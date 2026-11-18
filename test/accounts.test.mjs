@@ -66,7 +66,9 @@ test('snapshotCurrentAccount, listAccounts, applyAccountSnapshot, and deleteAcco
   assert.equal(savedAlice.id, 'alice@example.com');
 
   const stat = fs.statSync(fx.accountsFile);
-  assert.equal(stat.mode & 0o777, 0o600);
+  if (process.platform !== 'win32') {
+    assert.equal(stat.mode & 0o777, 0o600);
+  }
 
   // Switch simulated active state to Bob and snapshot Bob
   mockKeychain = 'secret-bob';
