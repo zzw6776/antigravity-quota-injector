@@ -64,7 +64,7 @@ export function createUpdateManager({
   prepareImpl = prepareUpdateArtifact,
   applyImpl = applySelfUpdateAndRelaunch,
   checkIntervalMs = UPDATE_CHECK_INTERVAL_MS,
-  initialDelayMs = 5_000,
+  initialDelayMs = 0,
 } = {}) {
   const updatesDir = path.join(dataDir, 'updates');
   const canAutoUpdate = mode === 'formal' && Boolean(installedApp);
@@ -74,6 +74,8 @@ export function createUpdateManager({
   let checkPromise = null;
   let downloadPromise = null;
   let installPromise = null;
+  let openPromise = null;
+  let lastCheckOk = false;
   let initialTimer = null;
   let intervalTimer = null;
   let stopped = false;
@@ -81,7 +83,11 @@ export function createUpdateManager({
   let state = {
     currentVersion: version,
     mode,
+    enabled: true,
     canAutoUpdate,
+    available: false,
+    opening: false,
+    requestId: null,
     status: 'idle',
     latestVersion: '',
     releaseNotes: '',
@@ -89,6 +95,7 @@ export function createUpdateManager({
     received: 0,
     total: 0,
     downloadedPath: '',
+    checkError: '',
     error: '',
     checkedAt: '',
   };
@@ -146,6 +153,7 @@ export function createUpdateManager({
       } catch (err) {
         publish({
           status: 'error',
+          available: Boolean(activeAsset),
           error: String(err?.message || '下载更新失败'),
         });
         return null;
@@ -164,20 +172,28 @@ export function createUpdateManager({
 
     checkPromise = (async () => {
       if (manual || state.status === 'idle' || state.status === 'error' || state.status === 'up-to-date') {
-        publish({ status: 'checking', error: '' });
+        publish({ status: 'checking', checkError: '', ...(manual ? { error: '' } : {}) });
       }
       try {
         const res = await fetchReleaseImpl({ etag: manual ? null : etag });
+        if (stopped) return getSnapshot();
         if (res.etag) etag = res.etag;
         if (res.unchanged) {
+          lastCheckOk = true;
           if (activeAsset) {
             publish({
               status: state.downloadedPath ? 'ready' : 'available',
+              available: true,
+              checkError: '',
+              error: '',
               checkedAt: new Date().toISOString(),
             });
           } else {
             publish({
               status: 'up-to-date',
+              available: false,
+              checkError: '',
+              error: '',
               checkedAt: new Date().toISOString(),
             });
           }
@@ -188,16 +204,19 @@ export function createUpdateManager({
           ? releaseUpdate(res.release, { version, mode, platform, arch }, res.releases)
           : null;
 
+        lastCheckOk = true;
         if (!candidate) {
           activeAsset = null;
           publish({
             status: 'up-to-date',
+            available: false,
             latestVersion: '',
             releaseNotes: '',
             releaseUrl: RELEASES_PAGE_URL,
             received: 0,
             total: 0,
             downloadedPath: '',
+            checkError: '',
             error: '',
             checkedAt: new Date().toISOString(),
           });
@@ -212,12 +231,14 @@ export function createUpdateManager({
 
         publish({
           status: !isNewAsset && state.downloadedPath ? 'ready' : 'available',
+          available: true,
           latestVersion: candidate.version,
           releaseNotes: candidate.releaseNotes || '',
           releaseUrl: candidate.releasePageUrl || RELEASES_PAGE_URL,
           total: candidate.size,
           received: !isNewAsset && state.downloadedPath ? candidate.size : 0,
           downloadedPath: !isNewAsset ? state.downloadedPath : '',
+          checkError: '',
           error: '',
           checkedAt: new Date().toISOString(),
         });
@@ -227,17 +248,22 @@ export function createUpdateManager({
         }
         return getSnapshot();
       } catch (err) {
+        lastCheckOk = false;
         const msg = String(err?.message || '检查更新失败');
         if (activeAsset) {
           publish({
             status: state.downloadedPath ? 'ready' : 'available',
-            error: manual ? msg : '',
+            available: true,
+            checkError: msg,
+            ...(manual ? { error: msg } : {}),
             checkedAt: new Date().toISOString(),
           });
         } else {
           publish({
             status: manual ? 'error' : 'idle',
-            error: manual ? msg : '',
+            available: false,
+            checkError: msg,
+            ...(manual ? { error: msg } : {}),
             checkedAt: new Date().toISOString(),
           });
         }
@@ -294,6 +320,7 @@ export function createUpdateManager({
       } catch (err) {
         publish({
           status: 'error',
+          available: Boolean(activeAsset),
           error: String(err?.message || '安装更新失败'),
         });
       } finally {
@@ -305,14 +332,52 @@ export function createUpdateManager({
     return installPromise;
   };
 
+  const openUpdate = async ({ requestId = null } = {}) => {
+    if (stopped || state.status === 'installing') return getSnapshot();
+    if (openPromise) return openPromise;
+
+    publish({ error: '', opening: true, requestId: requestId ?? null });
+    openPromise = (async () => {
+      try {
+        // A click must start its own live check after any earlier background check settles.
+        if (checkPromise) await checkPromise;
+        await checkNow({ manual: false });
+        if (!lastCheckOk) {
+          throw new Error(state.checkError || '无法确认远端最新版本，请重试');
+        }
+        if (activeAsset) {
+          if (!canAutoUpdate) {
+            openExternalUrl(state.releaseUrl || RELEASES_PAGE_URL, platform);
+          } else {
+            await installUpdate();
+          }
+        }
+      } catch (err) {
+        publish({
+          error: String(err?.message || '检查更新失败'),
+        });
+      } finally {
+        openPromise = null;
+        publish({ opening: false });
+      }
+      return getSnapshot();
+    })();
+
+    return openPromise;
+  };
+
   const start = () => {
     if (stopped) return;
     if (initialTimer || intervalTimer) return;
-    initialTimer = setTimeout(() => {
-      initialTimer = null;
+    if (initialDelayMs <= 0) {
       void checkNow({ manual: false });
-    }, initialDelayMs);
-    initialTimer.unref?.();
+    } else {
+      initialTimer = setTimeout(() => {
+        initialTimer = null;
+        void checkNow({ manual: false });
+      }, initialDelayMs);
+      initialTimer.unref?.();
+    }
 
     intervalTimer = setInterval(() => {
       void checkNow({ manual: false });
@@ -337,6 +402,7 @@ export function createUpdateManager({
     start,
     stop,
     checkNow,
+    openUpdate,
     installUpdate,
     openReleasePage: () => openExternalUrl(state.releaseUrl || RELEASES_PAGE_URL, platform),
   };

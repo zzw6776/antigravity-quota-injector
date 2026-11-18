@@ -9,6 +9,7 @@ import {
   deleteAccount,
   getAccountSwitchSupport,
   listAccounts,
+  prepareNewAccountWithRestart,
   snapshotCurrentAccount,
   switchAccountWithRestart,
 } from './accounts.mjs';
@@ -177,7 +178,13 @@ function createCdpClient(wsUrl) {
               clearTimeout(t);
               res(msg);
             });
-            ws.send(JSON.stringify({ id, method, params }));
+            try {
+              ws.send(JSON.stringify({ id, method, params }));
+            } catch {
+              clearTimeout(t);
+              pending.delete(id);
+              res(null);
+            }
           });
         },
         onBinding(fn) {
@@ -307,7 +314,10 @@ export async function runDaemon({
       : {
           currentVersion: readPackageVersion(),
           mode: isSea() ? 'formal' : 'dev',
+          enabled: false,
           canAutoUpdate: false,
+          available: false,
+          opening: false,
           status: 'idle',
         };
     try {
@@ -334,7 +344,9 @@ export async function runDaemon({
     }
     const type = String(msg?.type || '');
     if (type === 'check') {
-      await updateManager.checkNow({ manual: true });
+      await updateManager.checkNow({ manual: false });
+    } else if (type === 'open') {
+      await updateManager.openUpdate?.({ requestId: msg?.requestId ?? null });
     } else if (type === 'install') {
       await updateManager.installUpdate();
     } else if (type === 'open-release') {
@@ -394,17 +406,52 @@ export async function runDaemon({
         await pushAccountsToSession(session, { activeEmail });
         return;
       }
-      if (type === 'save' || type === 'prepare-add') {
-        const entry = snapshotCurrentAccount({
-          accountsFile: paths.accountsFile,
-          appSupportDir: paths.appSupportDir,
-          profile: profile || {},
-        });
-        session.activeEmail = entry.email;
+      if (type === 'save') {
+        try {
+          const entry = snapshotCurrentAccount({
+            accountsFile: paths.accountsFile,
+            appSupportDir: paths.appSupportDir,
+            profile: profile || {},
+          });
+          session.activeEmail = entry.email;
+          await pushAccountsToAllSessions({
+            activeEmail: entry.email,
+            status: msg?.silent ? '' : `已保存账号 ${entry.email}`,
+          });
+        } catch (err) {
+          if (msg?.silent) {
+            await pushAccountsToSession(session, { activeEmail });
+            return;
+          }
+          throw err;
+        }
+        return;
+      }
+      if (type === 'add-account' || type === 'prepare-add') {
+        if (switchInFlight) return;
+        switchInFlight = true;
         await pushAccountsToAllSessions({
-          activeEmail: entry.email,
-          status: type === 'prepare-add' ? '已保存当前账号，正在进入登录流程…' : `已保存账号 ${entry.email}`,
+          activeEmail,
+          busy: true,
+          status: '正在保存当前账号并重启 Antigravity 进入登录页…',
         });
+        try {
+          await prepareNewAccountWithRestart({
+            accountsFile: paths.accountsFile,
+            appSupportDir: paths.appSupportDir,
+            channel,
+            currentProfile: profile,
+          });
+        } catch (err) {
+          switchInFlight = false;
+          await pushAccountsToAllSessions({
+            activeEmail,
+            busy: false,
+            error: String(err?.message || '进入新账号登录失败'),
+          });
+          return;
+        }
+        switchInFlight = false;
         return;
       }
       if (type === 'delete') {
@@ -551,21 +598,33 @@ export async function runDaemon({
     session.evalScriptId = docRes?.result?.identifier || null;
 
     await client.send('Runtime.evaluate', { expression: script, returnByValue: false });
+    await hydrateSession(session);
+  };
+
+  const hydrateSession = async (session) => {
     await syncTurnsForSession(session, true);
     await pushAccountsToSession(session);
     await pushUpdateToSession(session);
+    await session.client.send('Runtime.evaluate', {
+      expression: 'window.__aqHydrated = true;',
+      returnByValue: false,
+    });
   };
 
-  const tick = async () => {
+  let tickPromise = null;
+
+  const runTick = async () => {
     if (stopping) return { liveCount: 0, attachedCount: attached.size };
     const port = readDebugPort(paths.portFile);
     if (!port) return { liveCount: 0, attachedCount: attached.size };
     const targets = await fetchCdpTargets(port);
     const liveIds = new Set();
+    const targetUrlById = new Map();
 
     for (const t of targets) {
       if (t.type !== 'page' || !ALLOWED_ORIGIN_RE.test(String(t.url || ''))) continue;
       liveIds.add(t.id);
+      targetUrlById.set(t.id, String(t.url || ''));
       if (!attached.has(t.id)) {
         await attachTarget(t);
       }
@@ -577,20 +636,34 @@ export async function runDaemon({
         attached.delete(id);
         continue;
       }
-      const verRes = await session.client.send('Runtime.evaluate', {
-        expression: 'window.__aq_version || ""',
+      const urlCid = targetUrlById.get(id)?.match(/\/c\/([0-9a-f-]{36})/i)?.[1] || '';
+      if (urlCid && urlCid !== session.activeCascadeId) {
+        session.activeCascadeId = urlCid;
+        session.lastPushedKey = '';
+      }
+      const stateRes = await session.client.send('Runtime.evaluate', {
+        expression: '({ v: window.__aq_version || "", h: Boolean(window.__aqHydrated) })',
         returnByValue: true,
       });
-      if (verRes?.result?.result?.value !== version) {
+      const pageState = stateRes?.result?.result?.value;
+      if (!pageState || pageState.v !== version) {
         await session.client.send('Runtime.evaluate', { expression: script, returnByValue: false });
-        await syncTurnsForSession(session, true);
-        await pushAccountsToSession(session);
-        await pushUpdateToSession(session);
+        await hydrateSession(session);
+      } else if (!pageState.h) {
+        await hydrateSession(session);
       } else {
         await syncTurnsForSession(session, false);
       }
     }
     return { liveCount: liveIds.size, attachedCount: attached.size };
+  };
+
+  const tick = () => {
+    if (tickPromise) return tickPromise;
+    tickPromise = runTick().finally(() => {
+      tickPromise = null;
+    });
+    return tickPromise;
   };
 
   const cleanupState = () => {

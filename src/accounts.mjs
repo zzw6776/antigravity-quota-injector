@@ -1,8 +1,10 @@
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+
+import { launchAntigravityExecutable } from './platform.mjs';
 
 const KEYCHAIN_SERVICE = 'gemini';
 const KEYCHAIN_ACCOUNT = 'antigravity';
@@ -44,6 +46,44 @@ export function normalizeAccountId(email, fallbackSeed = '') {
   return `account-${h}`;
 }
 
+export function parseKeychainSecretMetadata(secret) {
+  const raw = String(secret || '').trim();
+  if (!raw) return { usable: false, email: '' };
+
+  let decoded = raw;
+  const b64Prefix = 'go-keyring-base64:';
+  if (raw.startsWith(b64Prefix)) {
+    try {
+      decoded = Buffer.from(raw.slice(b64Prefix.length), 'base64').toString('utf8');
+    } catch {
+      return { usable: false, email: '' };
+    }
+  }
+
+  const trimmed = decoded.trim();
+  if (!trimmed.startsWith('{')) {
+    return { usable: true, email: '' };
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { usable: false, email: '' };
+    }
+    const tokenObj = parsed.token && typeof parsed.token === 'object' ? parsed.token : parsed;
+    const hasToken = Boolean(
+      (typeof tokenObj.access_token === 'string' && tokenObj.access_token.trim()) ||
+        (typeof tokenObj.refresh_token === 'string' && tokenObj.refresh_token.trim()) ||
+        (typeof tokenObj.accessToken === 'string' && tokenObj.accessToken.trim()) ||
+        (typeof tokenObj.refreshToken === 'string' && tokenObj.refreshToken.trim())
+    );
+    const email = typeof parsed.id_token_email === 'string' ? parsed.id_token_email.trim() : '';
+    return { usable: hasToken, email };
+  } catch {
+    return { usable: false, email: '' };
+  }
+}
+
 export function readKeychainSecret({
   service = KEYCHAIN_SERVICE,
   account = KEYCHAIN_ACCOUNT,
@@ -51,16 +91,52 @@ export function readKeychainSecret({
   if (process.platform !== 'darwin') {
     throw new Error('当前仅支持 macOS Keychain 账号快照');
   }
-  const out = execFileSync(
-    'security',
-    ['find-generic-password', '-s', service, '-a', account, '-w'],
-    {
-      timeout: 2500,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
+  try {
+    const out = execFileSync(
+      'security',
+      ['find-generic-password', '-s', service, '-a', account, '-w'],
+      {
+        timeout: 2500,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    return String(out || '').replace(/[\r\n]+$/, '');
+  } catch (err) {
+    const stderr = String(err?.stderr || err?.message || '');
+    if (
+      err?.status === 44 ||
+      /could not be found in the keychain|SecKeychainSearchCopyNext/i.test(stderr)
+    ) {
+      return '';
     }
-  );
-  return String(out || '').replace(/[\r\n]+$/, '');
+    throw new Error('读取系统钥匙串登录凭据失败');
+  }
+}
+
+export function deleteKeychainSecret({
+  service = KEYCHAIN_SERVICE,
+  account = KEYCHAIN_ACCOUNT,
+} = {}) {
+  if (process.platform !== 'darwin') {
+    throw new Error('当前仅支持 macOS Keychain 账号快照');
+  }
+  try {
+    execFileSync('security', ['delete-generic-password', '-a', account, '-s', service], {
+      timeout: 2500,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    const stderr = String(err?.stderr || err?.message || '');
+    if (
+      err?.status === 44 ||
+      /could not be found in the keychain|SecKeychainSearchCopyNext/i.test(stderr)
+    ) {
+      return false;
+    }
+    throw new Error('清理系统钥匙串登录凭据失败');
+  }
+  return true;
 }
 
 export function writeKeychainSecret(
@@ -152,18 +228,31 @@ function readAppStorageAuth(appSupportDir) {
 }
 
 function writeAppStorageAuth(appSupportDir, authMap) {
-  if (!authMap || typeof authMap !== 'object' || Object.keys(authMap).length === 0) return;
+  const map = authMap && typeof authMap === 'object' ? authMap : {};
   const p = path.join(appSupportDir, 'app_storage.json');
+  const fileExists = fs.existsSync(p);
+  if (!fileExists && Object.keys(map).length === 0) return;
   let json = {};
   try {
-    if (fs.existsSync(p)) json = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (fileExists) {
+      const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        json = parsed;
+      }
+    }
   } catch {}
   for (const k of APP_STORAGE_AUTH_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(authMap, k)) {
-      json[k] = authMap[k];
+    if (Object.prototype.hasOwnProperty.call(map, k)) {
+      json[k] = map[k];
+    } else {
+      delete json[k];
     }
   }
-  atomicWriteFile(p, JSON.stringify(json), 0o644);
+  atomicWriteFile(p, JSON.stringify(json, null, 2), 0o644);
+}
+
+function clearAppStorageAuth(appSupportDir) {
+  writeAppStorageAuth(appSupportDir, {});
 }
 
 function readVscdbAuth(appSupportDir) {
@@ -189,17 +278,20 @@ function readVscdbAuth(appSupportDir) {
 }
 
 function writeVscdbAuth(appSupportDir, vscdbAuth) {
-  if (!vscdbAuth || typeof vscdbAuth !== 'object' || Object.keys(vscdbAuth).length === 0) return;
+  const map = vscdbAuth && typeof vscdbAuth === 'object' ? vscdbAuth : {};
   const dbPath = path.join(appSupportDir, 'User', 'globalStorage', 'state.vscdb');
   if (!fs.existsSync(dbPath)) return;
   let db = null;
   try {
     db = new DatabaseSync(dbPath, { timeout: 500 });
     db.exec('BEGIN IMMEDIATE');
-    const stmt = db.prepare('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)');
+    const upsertStmt = db.prepare('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)');
+    const deleteStmt = db.prepare('DELETE FROM ItemTable WHERE key = ?');
     for (const k of VSCDB_AUTH_KEYS) {
-      if (Object.prototype.hasOwnProperty.call(vscdbAuth, k)) {
-        stmt.run(k, String(vscdbAuth[k]));
+      if (Object.prototype.hasOwnProperty.call(map, k)) {
+        upsertStmt.run(k, String(map[k]));
+      } else {
+        deleteStmt.run(k);
       }
     }
     db.exec('COMMIT');
@@ -213,6 +305,27 @@ function writeVscdbAuth(appSupportDir, vscdbAuth) {
       db?.close();
     } catch {}
   }
+}
+
+function clearVscdbAuth(appSupportDir) {
+  try {
+    writeVscdbAuth(appSupportDir, {});
+  } catch {}
+}
+
+export function clearCurrentAccountAuth({
+  appSupportDir,
+  deleteSecretFn = deleteKeychainSecret,
+}) {
+  deleteSecretFn();
+  const scopePath = path.join(appSupportDir, 'credential-user-scope');
+  try {
+    if (fs.existsSync(scopePath)) {
+      fs.unlinkSync(scopePath);
+    }
+  } catch {}
+  clearAppStorageAuth(appSupportDir);
+  clearVscdbAuth(appSupportDir);
 }
 
 function resolveEmailFromAppStorage(appStorageAuth) {
@@ -233,14 +346,20 @@ export function snapshotCurrentAccount({
   readSecretFn = readKeychainSecret,
 }) {
   const keychainSecret = readSecretFn();
-  if (!keychainSecret) {
-    throw new Error('未读取到当前登录凭据');
+  const secretMeta = parseKeychainSecretMetadata(keychainSecret);
+  if (!keychainSecret || !secretMeta.usable) {
+    throw new Error('未检测到当前账号的本地登录凭据，请重新登录后再试');
   }
   const appStorageAuth = readAppStorageAuth(appSupportDir);
-  const email = String(profile?.email || resolveEmailFromAppStorage(appStorageAuth) || '').trim();
+  const email = String(
+    secretMeta.email || profile?.email || resolveEmailFromAppStorage(appStorageAuth) || ''
+  ).trim();
   if (!email) {
     throw new Error('未获取到当前登录邮箱');
   }
+
+  const profileMatchesEmail =
+    !profile?.email || String(profile.email).trim().toLowerCase() === email.toLowerCase();
 
   let credentialUserScope = '';
   const scopePath = path.join(appSupportDir, 'credential-user-scope');
@@ -250,11 +369,16 @@ export function snapshotCurrentAccount({
 
   const vscdbAuth = readVscdbAuth(appSupportDir);
   const id = normalizeAccountId(email, keychainSecret);
+  const store = readAccountsStore(accountsFile);
+  const idx = store.accounts.findIndex(
+    (a) => a.id === id || String(a.email || '').toLowerCase() === email.toLowerCase()
+  );
+  const prev = idx >= 0 ? store.accounts[idx] : null;
   const entry = {
     id,
     email,
-    name: String(profile?.name || '').trim(),
-    planName: String(profile?.planName || '').trim(),
+    name: String((profileMatchesEmail ? profile?.name : '') || prev?.name || '').trim(),
+    planName: String((profileMatchesEmail ? profile?.planName : '') || prev?.planName || '').trim(),
     savedAt: new Date().toISOString(),
     keychainSecret,
     credentialUserScope,
@@ -262,12 +386,8 @@ export function snapshotCurrentAccount({
     vscdbAuth,
   };
 
-  const store = readAccountsStore(accountsFile);
-  const idx = store.accounts.findIndex(
-    (a) => a.id === id || String(a.email || '').toLowerCase() === email.toLowerCase()
-  );
   if (idx >= 0) {
-    store.accounts[idx] = { ...store.accounts[idx], ...entry };
+    store.accounts[idx] = { ...prev, ...entry };
   } else {
     store.accounts.push(entry);
   }
@@ -298,17 +418,18 @@ export function applyAccountSnapshot({
   const target = store.accounts.find(
     (a) => a.id?.toLowerCase() === targetId || String(a.email || '').toLowerCase() === targetId
   );
-  if (!target || !target.keychainSecret) {
+  if (!target || !target.keychainSecret || !parseKeychainSecretMetadata(target.keychainSecret).usable) {
     throw new Error('未找到目标账号的本地凭据快照');
   }
 
   writeSecretFn(target.keychainSecret);
+  const scopePath = path.join(appSupportDir, 'credential-user-scope');
   if (target.credentialUserScope) {
-    atomicWriteFile(
-      path.join(appSupportDir, 'credential-user-scope'),
-      target.credentialUserScope,
-      0o644
-    );
+    atomicWriteFile(scopePath, target.credentialUserScope, 0o644);
+  } else {
+    try {
+      if (fs.existsSync(scopePath)) fs.unlinkSync(scopePath);
+    } catch {}
   }
   const appAuth =
     target.appStorageAuth && Object.keys(target.appStorageAuth).length > 0
@@ -370,16 +491,24 @@ export async function quitAndWaitAntigravity({ channel = 'stable', timeoutMs = 8
   return findRunningAntigravityPids(appName).length === 0;
 }
 
-export function launchAntigravityApp({ channel = 'stable' } = {}) {
-  const appBundle =
-    channel === 'insiders'
-      ? '/Applications/Antigravity - Insiders.app'
-      : '/Applications/Antigravity.app';
-  const child = spawn('open', ['-a', appBundle], {
-    detached: true,
-    stdio: 'ignore',
-  });
-  child.unref();
+export function launchAntigravityApp({ channel = 'stable', stateDir = '' } = {}) {
+  const res = launchAntigravityExecutable({ channel, stateDir });
+  if (!res.launched) {
+    throw new Error(res.reason || '未找到 Antigravity 应用');
+  }
+  return res;
+}
+
+export async function waitForAntigravityLaunch({ channel = 'stable', timeoutMs = 8000 } = {}) {
+  const appName = channel === 'insiders' ? 'Antigravity - Insiders' : 'Antigravity';
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (findRunningAntigravityPids(appName).length > 0) {
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return false;
 }
 
 export async function switchAccountWithRestart({
@@ -393,6 +522,7 @@ export async function switchAccountWithRestart({
   if (!support.supported) {
     throw new Error(support.reason);
   }
+  const stateDir = accountsFile ? path.dirname(accountsFile) : '';
 
   // Best-effort snapshot of current active account so credentials are never lost
   if (currentProfile?.email) {
@@ -407,18 +537,64 @@ export async function switchAccountWithRestart({
   const exists = store.accounts.find(
     (a) => a.id?.toLowerCase() === targetId || String(a.email || '').toLowerCase() === targetId
   );
-  if (!exists || !exists.keychainSecret) {
+  if (!exists || !exists.keychainSecret || !parseKeychainSecretMetadata(exists.keychainSecret).usable) {
     throw new Error('目标账号快照不存在或已损坏');
   }
 
   const exited = await quitAndWaitAntigravity({ channel });
   if (!exited) {
-    launchAntigravityApp({ channel });
+    try {
+      launchAntigravityApp({ channel, stateDir });
+    } catch {}
     throw new Error('Antigravity 未能及时退出，已取消写入凭据');
   }
 
   const applied = applyAccountSnapshot({ accountId, accountsFile, appSupportDir });
   await new Promise((r) => setTimeout(r, 250));
-  launchAntigravityApp({ channel });
+  launchAntigravityApp({ channel, stateDir });
+  await waitForAntigravityLaunch({ channel });
   return applied;
+}
+
+export async function prepareNewAccountWithRestart({
+  accountsFile,
+  appSupportDir,
+  channel = 'stable',
+  currentProfile = null,
+  platform = process.platform,
+  readSecretFn = readKeychainSecret,
+  deleteSecretFn = deleteKeychainSecret,
+  quitFn = quitAndWaitAntigravity,
+  launchFn = launchAntigravityApp,
+  waitLaunchFn = waitForAntigravityLaunch,
+}) {
+  const support = getAccountSwitchSupport(platform);
+  if (!support.supported) {
+    throw new Error(support.reason);
+  }
+  const stateDir = accountsFile ? path.dirname(accountsFile) : '';
+
+  let savedEntry = null;
+  try {
+    savedEntry = snapshotCurrentAccount({
+      accountsFile,
+      appSupportDir,
+      profile: currentProfile || {},
+      readSecretFn,
+    });
+  } catch {}
+
+  const exited = await quitFn({ channel });
+  if (!exited) {
+    try {
+      launchFn({ channel, stateDir });
+    } catch {}
+    throw new Error('Antigravity 未能及时退出，已取消进入新账号登录');
+  }
+
+  clearCurrentAccountAuth({ appSupportDir, deleteSecretFn });
+  await new Promise((r) => setTimeout(r, 250));
+  launchFn({ channel, stateDir });
+  await waitLaunchFn({ channel });
+  return savedEntry;
 }

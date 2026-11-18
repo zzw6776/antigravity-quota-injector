@@ -12,6 +12,7 @@ import {
   installWindowsAppEntry,
   isNodeVersionSupported,
   launchAntigravityExecutable,
+  matchesQuotaInjectorCommand,
   parseWindowsTasklistCsv,
   resolveAntigravityExecutable,
   uninstallWindowsAppEntry,
@@ -203,4 +204,16 @@ test('launchAntigravityExecutable launches visible Start-Process on win32 and re
     invokedArgs.args[encodedIdx + 1],
     encodePowerShellCommand(`Start-Process -FilePath '${exe}' -WindowStyle Normal`)
   );
+});
+
+test('matchesQuotaInjectorCommand matches both spaced and hyphenated injector processes without false positives', () => {
+  assert.equal(matchesQuotaInjectorCommand('Antigravity Quota Injector'), true);
+  assert.equal(
+    matchesQuotaInjectorCommand('/Applications/Antigravity Quota Injector.app/Contents/Resources/Antigravity Quota Injector Worker --explicit-start'),
+    true
+  );
+  assert.equal(matchesQuotaInjectorCommand('node /Users/test/antigravity-quota-injector/src/launcher.mjs --explicit-start'), true);
+  assert.equal(matchesQuotaInjectorCommand('node src/cli.mjs start'), true);
+  assert.equal(matchesQuotaInjectorCommand('/Applications/Antigravity.app/Contents/MacOS/Antigravity'), false);
+  assert.equal(matchesQuotaInjectorCommand('Antigravity.exe'), false);
 });
