@@ -1,0 +1,7 @@
+node_modules/
+build/
+release/
+release-assets/
+.runtime/
+*.log
+.DS_Store

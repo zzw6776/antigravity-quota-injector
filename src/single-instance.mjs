@@ -1,0 +1,416 @@
+import { execFile } from 'node:child_process';
+import { createConnection, createServer } from 'node:net';
+import { promisify } from 'node:util';
+
+export const SINGLE_INSTANCE_PORT = Number(process.env.ANTIGRAVITY_QUOTA_INSTANCE_PORT || 49_239);
+const TAKEOVER_TIMEOUT_MS = 3_000;
+const LISTEN_RETRY_DELAY_MS = 50;
+const INSTANCE_MODES = new Set(['dev', 'formal']);
+const UPDATE_PREPARATION_PURPOSE = 'install-update';
+const UNRECOGNIZED_TAKEOVER_CODE = 'AQ_TAKEOVER_UNRECOGNIZED';
+const execFileAsync = promisify(execFile);
+
+export class SingleInstanceTakeoverError extends Error {
+  constructor(cause) {
+    super(`现有注入器未响应重启接管请求: ${cause?.message ?? cause}`);
+    this.name = 'SingleInstanceTakeoverError';
+    this.code = 'AQ_TAKEOVER_UNRESPONSIVE';
+  }
+}
+
+export async function acquireSingleInstance({
+  mode = 'dev',
+  version = '0.0.0',
+  explicitStart = false,
+  purpose = 'launch',
+  port = SINGLE_INSTANCE_PORT,
+  runtimeIdentity = null,
+  onTakeover,
+  onReuse,
+  getStatus,
+} = {}) {
+  const owner = {
+    mode: normalizeMode(mode),
+    version: normalizeVersion(version),
+    explicitStart: Boolean(explicitStart),
+    purpose: normalizePurpose(purpose),
+    runtimeIdentity: normalizeRuntimeIdentity(runtimeIdentity),
+  };
+  let takeoverStarted = false;
+
+  const server = createServer((socket) => {
+    socket.on('error', () => socket.destroy());
+    socket.setEncoding('utf8');
+    socket.setTimeout(TAKEOVER_TIMEOUT_MS, () => socket.destroy());
+    socket.once('data', (data) => {
+      try {
+        if (JSON.parse(String(data).trim())?.type === 'status') {
+          socket.end(
+            `${JSON.stringify({
+              pid: process.pid,
+              mode: owner.mode,
+              version: owner.version,
+              runtimeIdentity: owner.runtimeIdentity,
+              ...(getStatus?.() ?? { phase: 'unknown' }),
+            })}\n`
+          );
+          return;
+        }
+      } catch {}
+
+      const request = parseTakeoverRequest(data);
+      if (!request) {
+        socket.end('invalid\n');
+        return;
+      }
+
+      const replace = shouldReplace(owner, request);
+      const reuse = !replace && shouldReuse(owner, request);
+      socket.end(`${replace ? 'replace' : 'keep'}\n`);
+
+      if (replace) {
+        if (takeoverStarted) return;
+        takeoverStarted = true;
+        socket.once('close', () => {
+          Promise.resolve(onTakeover?.(request)).catch(() => undefined);
+        });
+      } else if (reuse) {
+        socket.once('close', () => {
+          Promise.resolve(onReuse?.(request)).catch(() => undefined);
+        });
+      }
+    });
+  });
+  server.unref();
+
+  try {
+    await listenServer(server, port);
+    return server;
+  } catch (error) {
+    if (error?.code !== 'EADDRINUSE') throw error;
+  }
+
+  let decision;
+  try {
+    decision = await requestTakeover(owner, port);
+  } catch (cause) {
+    if (cause?.code !== UNRECOGNIZED_TAKEOVER_CODE) {
+      throw new SingleInstanceTakeoverError(cause);
+    }
+    try {
+      await replaceUnrecognizedOwner(port);
+      decision = 'replace';
+    } catch (forceCause) {
+      throw new SingleInstanceTakeoverError(forceCause);
+    }
+  }
+  if (decision !== 'replace') return null;
+
+  const deadline = Date.now() + TAKEOVER_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      await listenServer(server, port);
+      return server;
+    } catch (error) {
+      if (error?.code !== 'EADDRINUSE') throw error;
+      await delay(LISTEN_RETRY_DELAY_MS);
+    }
+  }
+  throw new SingleInstanceTakeoverError(
+    new Error(`等待旧注入器释放单实例锁超时（${TAKEOVER_TIMEOUT_MS}ms）`)
+  );
+}
+
+export function readSingleInstanceStatus({ port = SINGLE_INSTANCE_PORT, timeoutMs = 1500 } = {}) {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host: '127.0.0.1', port });
+    let response = '';
+    const timer = setTimeout(() => socket.destroy(new Error('读取注入器启动状态超时')), timeoutMs);
+    socket.setEncoding('utf8');
+    socket.once('connect', () => socket.write('{"type":"status"}\n'));
+    socket.on('data', (data) => {
+      response += data;
+    });
+    socket.once('end', () => {
+      clearTimeout(timer);
+      try {
+        resolve(JSON.parse(response));
+      } catch {
+        reject(new Error('注入器未提供启动状态'));
+      }
+      socket.destroy();
+    });
+    socket.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+export function closeSingleInstance(server) {
+  if (!server?.listening) return Promise.resolve();
+  return new Promise((resolve) => server.close(() => resolve()));
+}
+
+export function compareVersions(left, right) {
+  const leftParts = parseVersion(left);
+  const rightParts = parseVersion(right);
+  if (!leftParts || !rightParts) return 0;
+  for (let index = 0; index < leftParts.length; index += 1) {
+    if (leftParts[index] !== rightParts[index]) {
+      return leftParts[index] > rightParts[index] ? 1 : -1;
+    }
+  }
+  return 0;
+}
+
+function shouldReplace(owner, requester) {
+  if (!requester.explicitStart) return false;
+  if (!INSTANCE_MODES.has(owner.mode) || !INSTANCE_MODES.has(requester.mode)) return false;
+  if (requester.mode === 'formal' && requester.purpose === UPDATE_PREPARATION_PURPOSE) {
+    return true;
+  }
+  if (requester.mode !== owner.mode) return true;
+  if (compareVersions(requester.version, owner.version) > 0) return true;
+  if (
+    owner.mode === 'dev' &&
+    requester.mode === 'dev' &&
+    requester.runtimeIdentity &&
+    owner.runtimeIdentity !== requester.runtimeIdentity
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function shouldReuse(owner, requester) {
+  if (!requester.explicitStart) return false;
+  return owner.mode === 'formal' || (owner.mode === 'dev' && requester.mode === 'dev');
+}
+
+function parseTakeoverRequest(data) {
+  const text = String(data ?? '').trim();
+  if (!text) return null;
+  try {
+    const value = JSON.parse(text);
+    if (value?.type !== 'takeover') return null;
+    return {
+      mode: normalizeMode(value.mode),
+      version: normalizeVersion(value.version),
+      explicitStart: value.explicitStart === true,
+      purpose: normalizePurpose(value.purpose),
+      runtimeIdentity: normalizeRuntimeIdentity(value.runtimeIdentity),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function requestTakeover(owner, port = SINGLE_INSTANCE_PORT) {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host: '127.0.0.1', port });
+    let response = '';
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      callback(value);
+    };
+    const timer = setTimeout(() => {
+      finish(reject, new Error(`接管请求超时（${TAKEOVER_TIMEOUT_MS}ms）`));
+    }, TAKEOVER_TIMEOUT_MS);
+    socket.setEncoding('utf8');
+    socket.once('connect', () =>
+      socket.write(
+        `${JSON.stringify({
+          type: 'takeover',
+          mode: owner.mode,
+          version: owner.version,
+          explicitStart: owner.explicitStart,
+          purpose: owner.purpose,
+          runtimeIdentity: owner.runtimeIdentity,
+        })}\n`
+      )
+    );
+    socket.on('data', (data) => {
+      response += data;
+    });
+    socket.once('end', () => {
+      const result = response.trim();
+      if (result === 'replace' || result === 'keep') {
+        finish(resolve, result);
+      } else {
+        const error = new Error(`现有实例返回了无法识别的接管结果: ${result || '空响应'}`);
+        error.code = UNRECOGNIZED_TAKEOVER_CODE;
+        finish(reject, error);
+      }
+    });
+    socket.once('error', (error) => finish(reject, error));
+  });
+}
+
+async function replaceUnrecognizedOwner(port = SINGLE_INSTANCE_PORT) {
+  const owners = await findListeningOwners(port);
+  const candidates = owners.filter(({ pid }) => pid !== process.pid);
+  if (candidates.length === 0) return;
+
+  const unknownOwners = candidates.filter((owner) => !isLikelyInjectorOwner(owner));
+  if (unknownOwners.length > 0) {
+    const details = unknownOwners
+      .map(({ pid, name, commandLine }) => `${pid} ${name || commandLine || 'unknown'}`)
+      .join(', ');
+    throw new Error(`${port} 端口占用者不是可确认的注入器，拒绝强制终止: ${details}`);
+  }
+
+  console.warn(
+    `[single-instance] 旧注入器接管协议无法识别，正在终止旧实例: ${candidates
+      .map(({ pid }) => pid)
+      .join(', ')}`
+  );
+  for (const { pid } of candidates) {
+    await terminateProcess(pid);
+  }
+}
+
+async function findListeningOwners(port = SINGLE_INSTANCE_PORT) {
+  if (process.platform === 'win32') {
+    const script = `
+$owners=@(
+  Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty OwningProcess -Unique |
+    ForEach-Object {
+      $ownerProcessId=[int]$_;
+      Get-CimInstance Win32_Process -Filter ("ProcessId = {0}" -f $ownerProcessId) |
+        Select-Object ProcessId,Name,ExecutablePath,CommandLine
+    }
+);
+if ($owners.Count -gt 0) { $owners | ConvertTo-Json -Compress }
+`;
+    const { stdout } = await execFileAsync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      { windowsHide: true, maxBuffer: 2 * 1024 * 1024 }
+    );
+    return parseProcessInfo(stdout);
+  }
+
+  if (process.platform === 'darwin' || process.platform === 'linux') {
+    const { stdout } = await execFileAsync(
+      'lsof',
+      ['-nP', '-t', `-iTCP:${port}`, '-sTCP:LISTEN']
+    ).catch((error) => {
+      if (error?.code === 1) return { stdout: '' };
+      throw error;
+    });
+    const pids = String(stdout)
+      .split(/\r?\n/)
+      .map((value) => Number(value.trim()))
+      .filter((value) => Number.isInteger(value) && value > 0);
+    return Promise.all(
+      pids.map(async (pid) => {
+        const processInfo = await execFileAsync('ps', ['-p', String(pid), '-o', 'pid=,comm=,args=']).catch(
+          () => ({ stdout: '' })
+        );
+        const commandLine = String(processInfo.stdout).trim();
+        return { pid, name: commandLine, executablePath: commandLine, commandLine };
+      })
+    );
+  }
+
+  return [];
+}
+
+function parseProcessInfo(stdout) {
+  const text = String(stdout ?? '').trim();
+  if (!text) return [];
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`无法读取端口占用进程信息: ${error.message}`);
+  }
+  const records = Array.isArray(value) ? value : [value];
+  return records
+    .map((record) => ({
+      pid: Number(record?.ProcessId),
+      name: String(record?.Name ?? ''),
+      executablePath: String(record?.ExecutablePath ?? ''),
+      commandLine: String(record?.CommandLine ?? ''),
+    }))
+    .filter(({ pid }) => Number.isInteger(pid) && pid > 0);
+}
+
+function isLikelyInjectorOwner(owner) {
+  const identity = [owner.name, owner.executablePath, owner.commandLine]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  return (
+    identity.includes('antigravity quota injector') ||
+    identity.includes('antigravity-quota-injector') ||
+    /src[\\/](?:launcher|cli)\.mjs/.test(identity)
+  );
+}
+
+async function terminateProcess(pid) {
+  if (process.platform === 'win32') {
+    await execFileAsync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
+      windowsHide: true,
+    });
+    return;
+  }
+
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch (error) {
+    if (error?.code !== 'ESRCH') throw error;
+  }
+}
+
+function listenServer(server, port = SINGLE_INSTANCE_PORT) {
+  return new Promise((resolve, reject) => {
+    const onListening = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      server.off('listening', onListening);
+      server.off('error', onError);
+    };
+    server.once('listening', onListening);
+    server.once('error', onError);
+    server.listen(port, '127.0.0.1');
+  });
+}
+
+function parseVersion(value) {
+  const match = String(value ?? '').trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
+  return match ? match.slice(1, 4).map(Number) : null;
+}
+
+function normalizeMode(value) {
+  const mode = String(value ?? '').trim();
+  return INSTANCE_MODES.has(mode) ? mode : 'unknown';
+}
+
+function normalizeVersion(value) {
+  return String(value ?? '').trim() || '0.0.0';
+}
+
+function normalizeRuntimeIdentity(value) {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) ? value : null;
+}
+
+function normalizePurpose(value) {
+  return value === UPDATE_PREPARATION_PURPOSE ? UPDATE_PREPARATION_PURPOSE : 'launch';
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
