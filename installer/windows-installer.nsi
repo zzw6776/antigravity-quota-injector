@@ -69,6 +69,9 @@ SectionEnd
 
 Section "Uninstall"
   SetShellVarContext current
+  ${If} ${FileExists} "$INSTDIR\Antigravity Quota Injector.exe"
+    ExecWait '"$INSTDIR\Antigravity Quota Injector.exe" --prepare-update' $0
+  ${EndIf}
   Delete "$DESKTOP\Antigravity Quota Injector.lnk"
   Delete "$SMPROGRAMS\Antigravity Quota Injector\Antigravity Quota Injector.lnk"
   RMDir "$SMPROGRAMS\Antigravity Quota Injector"

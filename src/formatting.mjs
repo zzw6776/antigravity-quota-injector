@@ -87,11 +87,23 @@ export function formatCallDetailTitle(detail, isLatestCompleted = false) {
  */
 export function normalizeModelLabel(label) {
   return String(label || '')
-    .replace(/\((?:low|medium|high|xhigh|max)(?:\s+thinking)?\)/gi, '')
-    .replace(/\b(?:low|medium|high|xhigh|max)\b/gi, '')
+    .replace(/\((?:low|medium|high|xhigh|max)(?:\s+(?:thinking|思考))?\)/gi, '')
+    .replace(/\((?:thinking|思考)\)/gi, '')
+    .replace(/\b(?:low|medium|high|xhigh|max|thinking)\b/gi, '')
+    .replace(/思考/g, '')
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
+}
+
+/**
+ * Compute starting index into DB turns when older DOM turns are paginated at the top.
+ */
+export function computeTurnPairingOffset(domTurnCount, dbTurnCount) {
+  const dom = Number(domTurnCount) || 0;
+  const db = Number(dbTurnCount) || 0;
+  if (dom <= 0 || db <= 0) return 0;
+  return db >= dom ? db - dom : 0;
 }
 
 /**
@@ -143,6 +155,19 @@ export function extractQuotaBuckets(group) {
     }
   }
   return { fiveHour, weekly };
+}
+
+export function orderQuotaBuckets(buckets) {
+  const list = Array.isArray(buckets) ? buckets.filter((b) => b && !b.disabled) : [];
+  const rank = (b) => {
+    const win = String(b?.window || '').toLowerCase();
+    const id = String(b?.bucketId || '').toLowerCase();
+    const name = String(b?.displayName || '');
+    if (win === '5h' || id.endsWith('-5h') || /5\s*h|five\s*hour/i.test(name)) return 0;
+    if (win === 'weekly' || id.endsWith('-weekly') || /weekly/i.test(name)) return 1;
+    return 2;
+  };
+  return list.slice().sort((a, b) => rank(a) - rank(b));
 }
 
 export function formatRemainingPercent(fraction) {

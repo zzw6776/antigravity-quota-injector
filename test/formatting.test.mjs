@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { buildClientScript } from '../src/daemon.mjs';
 import {
+  computeTurnPairingOffset,
   contextLevelClass,
   extractQuotaBuckets,
   formatCallDetailTitle,
@@ -11,6 +12,8 @@ import {
   formatResetCountdown,
   formatTurnSummary,
   matchQuotaGroup,
+  normalizeModelLabel,
+  orderQuotaBuckets,
 } from '../src/formatting.mjs';
 import { translateUiText } from '../src/i18n-zh.mjs';
 
@@ -100,6 +103,11 @@ test('buildClientScript produces syntactically valid JS without leftover exports
   assert.match(script, /rgb\(232, 243, 254\)/);
   assert.match(script, /新聊天/);
   assert.match(script, /accountsSupported/);
+  assert.match(script, /lastTurnsCid/);
+  assert.match(script, /aq-update-open/);
+  assert.match(script, /orderQuotaBuckets/);
+  assert.match(script, /\.dev/);
+  assert.doesNotMatch(script, /当前登录：|data-aq-acct-save|data-aq-quota-refresh|data-aq-update-check|data-aq-update-install|>检查更新<|已是最新版本/);
   assert.doesNotMatch(script, /^\s*export\s+/m);
   assert.doesNotThrow(() => new Function(script));
 
@@ -110,6 +118,19 @@ test('buildClientScript produces syntactically valid JS without leftover exports
   const withoutZh = buildClientScript({ zhUi: false });
   assert.notEqual(withoutZh.version, version);
   assert.doesNotMatch(withoutZh.script, /ZH_UI_EXACT/);
+});
+
+test('orderQuotaBuckets places 5h before weekly and filters disabled buckets', () => {
+  const ordered = orderQuotaBuckets([
+    { bucketId: 'custom-extra', window: 'monthly', remainingFraction: 0.9 },
+    { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.94 },
+    { bucketId: 'disabled-5h', window: '5h', remainingFraction: 0.1, disabled: true },
+    { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.8 },
+  ]);
+  assert.deepEqual(
+    ordered.map((b) => b.bucketId),
+    ['gemini-5h', 'gemini-weekly', 'custom-extra']
+  );
 });
 
 test('translateUiText translates exact Settings/UI strings and skips arbitrary text', () => {
@@ -131,4 +152,19 @@ test('formatCallDetailTitle groups repeated tool calls and labels final response
   assert.equal(formatCallDetailTitle({ toolCalls: [], hasVisibleText: true }, true), '最终回复');
   assert.equal(formatCallDetailTitle({ toolCalls: [], hasVisibleText: true, followsToolResult: true }, false), '生成回复');
   assert.equal(formatCallDetailTitle({ toolCalls: [], hasVisibleText: false, followsToolResult: true }, false), '处理工具结果');
+});
+
+test('computeTurnPairingOffset aligns paginated DOM turn slices to the tail of DB turns', () => {
+  assert.equal(computeTurnPairingOffset(7, 34), 27);
+  assert.equal(computeTurnPairingOffset(2, 34), 32);
+  assert.equal(computeTurnPairingOffset(5, 5), 0);
+  assert.equal(computeTurnPairingOffset(6, 5), 0);
+  assert.equal(computeTurnPairingOffset(0, 10), 0);
+});
+
+test('normalizeModelLabel strips both English Thinking and translated 思考 suffixes', () => {
+  assert.equal(normalizeModelLabel('Claude Sonnet 5.5 (High Thinking)'), 'claude sonnet 5.5');
+  assert.equal(normalizeModelLabel('Claude Sonnet 5.5 (High 思考)'), 'claude sonnet 5.5');
+  assert.equal(normalizeModelLabel('Claude Sonnet 5.5 思考'), 'claude sonnet 5.5');
+  assert.equal(matchQuotaGroup(SAMPLE_GROUPS, 'Claude Sonnet 5.5 思考').displayName, 'Claude and GPT models');
 });

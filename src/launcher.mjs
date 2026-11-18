@@ -64,6 +64,7 @@ function computeDevRuntimeIdentity() {
       path.join(srcDir, 'platform.mjs'),
       path.join(srcDir, 'single-instance.mjs'),
       path.join(srcDir, 'file-logger.mjs'),
+      path.join(srcDir, 'macos-dev-console.mjs'),
       path.join(srcDir, 'accounts.mjs'),
       path.join(srcDir, 'proto-metrics.mjs'),
       path.join(srcDir, 'app-update', 'manager.mjs'),
@@ -260,6 +261,7 @@ export async function runLauncher({
         return () => subscribers.delete(fn);
       },
       checkNow: (opts) => updateManager.checkNow(opts),
+      openUpdate: (opts) => updateManager.openUpdate(opts),
       installUpdate: () => updateManager.installUpdate(),
       openReleasePage: () => updateManager.openReleasePage(),
     };

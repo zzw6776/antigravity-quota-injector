@@ -169,3 +169,145 @@ test('resolveInstalledAppPath and Windows update helper script handle bundle/exe
   assert.match(ps, /\/S/);
   assert.doesNotMatch(ps, /Antigravity\.exe/);
 });
+
+test('openUpdate aligns with codex-quota-injector check/open semantics', async (t) => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'aq-upd-codex-'));
+  t.after(() => fs.rm(tmp, { recursive: true, force: true }));
+
+  const payload = Buffer.alloc(160, 0);
+  payload.write('MZ', 0, 'ascii');
+  payload.writeUInt32LE(0x40, 0x3c);
+  payload.write('PE\0\0', 0x40, 'ascii');
+  payload.writeUInt16LE(0x8664, 0x44);
+  const sha = crypto.createHash('sha256').update(payload).digest('hex');
+
+  const rel02 = {
+    tag_name: 'v0.2.0',
+    draft: false,
+    prerelease: false,
+    body: '',
+    assets: [
+      {
+        id: 200,
+        name: 'Antigravity-Quota-Injector-0.2.0-windows-x64-Setup.exe',
+        state: 'uploaded',
+        size: payload.length,
+        digest: `sha256:${sha}`,
+        browser_download_url:
+          'https://github.com/zzw6776/antigravity-quota-injector/releases/download/v0.2.0/Antigravity-Quota-Injector-0.2.0-windows-x64-Setup.exe',
+      },
+    ],
+  };
+  const rel03 = {
+    tag_name: 'v0.3.0',
+    draft: false,
+    prerelease: false,
+    body: '',
+    assets: [
+      {
+        id: 300,
+        name: 'Antigravity-Quota-Injector-0.3.0-windows-x64-Setup.exe',
+        state: 'uploaded',
+        size: payload.length,
+        digest: `sha256:${sha}`,
+        browser_download_url:
+          'https://github.com/zzw6776/antigravity-quota-injector/releases/download/v0.3.0/Antigravity-Quota-Injector-0.3.0-windows-x64-Setup.exe',
+      },
+    ],
+  };
+
+  let calls = 0;
+  let installedVersion = '';
+  let releaseDelayedBackground;
+  const etagsSeen = [];
+
+  const mgr = createUpdateManager({
+    version: '0.1.0',
+    mode: 'formal',
+    platform: 'win32',
+    arch: 'x64',
+    dataDir: tmp,
+    installedApp: 'C:\\Users\\Alice\\AppData\\Local\\Programs\\Antigravity Quota Injector',
+    fetchReleaseImpl: async ({ etag }) => {
+      calls += 1;
+      etagsSeen.push(etag);
+      if (calls === 1) return { release: rel02, releases: [rel02], etag: '"e2"' };
+      if (calls === 2) return { unchanged: true, etag: '"e2"' };
+      if (calls === 3) throw new Error('offline');
+      if (calls === 4) {
+        return new Promise((resolve) => {
+          releaseDelayedBackground = resolve;
+        });
+      }
+      if (calls === 5) throw new Error('offline-on-click');
+      return { release: rel03, releases: [rel03], etag: '"e3"' };
+    },
+    downloadImpl: async (asset, dest, { onProgress }) => {
+      await fs.mkdir(path.dirname(dest), { recursive: true });
+      await fs.writeFile(dest, payload);
+      onProgress(asset.size, asset.size);
+      return dest;
+    },
+    prepareImpl: async ({ downloadPath }) => {
+      await verifyWindowsInstallerPE(downloadPath);
+      return { installer: downloadPath };
+    },
+    applyImpl: async ({ asset }) => {
+      installedVersion = asset.version;
+    },
+  });
+  t.after(() => mgr.stop());
+
+  // 1) Concurrent background checks dedup & 304 / offline error keeps cached candidate without surfacing error
+  await Promise.all([mgr.checkNow({ manual: false }), mgr.checkNow({ manual: false })]);
+  assert.equal(calls, 1);
+  assert.equal(mgr.getState().available, true);
+  assert.equal(mgr.getState().latestVersion, '0.2.0');
+
+  await mgr.checkNow({ manual: false }); // 304 unchanged
+  assert.equal(etagsSeen[1], '"e2"');
+  assert.equal(mgr.getState().available, true);
+
+  await mgr.checkNow({ manual: false }); // background offline
+  assert.equal(mgr.getState().available, true);
+  assert.equal(mgr.getState().error, '');
+  assert.equal(mgr.getState().checkError, 'offline');
+
+  // 2) openUpdate waits for in-flight background check, then runs a live check (with ETag); if that check fails, does NOT install stale candidate
+  const bg = mgr.checkNow({ manual: false });
+  const failOpen = mgr.openUpdate({ requestId: 'req-fail' });
+  releaseDelayedBackground({ release: rel02, releases: [rel02], etag: '"e2"' });
+  await Promise.all([bg, failOpen]);
+  assert.equal(calls, 5);
+  assert.equal(etagsSeen[4], '"e2"');
+  assert.equal(installedVersion, '');
+  assert.equal(mgr.getState().error, 'offline-on-click');
+  assert.equal(mgr.getState().opening, false);
+  assert.equal(mgr.getState().requestId, 'req-fail');
+
+  // 3) Successful click dedup checks latest (0.3.0) and installs it
+  const [r1, r2] = await Promise.all([
+    mgr.openUpdate({ requestId: 'req-ok' }),
+    mgr.openUpdate({ requestId: 'req-dup' }),
+  ]);
+  assert.equal(calls, 6);
+  assert.equal(installedVersion, '0.3.0');
+  assert.equal(r1.opening, false);
+  assert.equal(r2.opening, false);
+  assert.equal(mgr.getState().error, '');
+
+  // 4) start() checks immediately on startup when initialDelayMs is default (0)
+  let instantChecks = 0;
+  const instantMgr = createUpdateManager({
+    version: '0.1.0',
+    mode: 'dev',
+    dataDir: tmp,
+    fetchReleaseImpl: async () => {
+      instantChecks += 1;
+      return { release: null, releases: [] };
+    },
+  });
+  instantMgr.start();
+  instantMgr.stop();
+  assert.equal(instantChecks, 1);
+});

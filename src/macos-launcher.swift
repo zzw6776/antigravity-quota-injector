@@ -3,6 +3,7 @@ import Foundation
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
   private var workers: [Process] = []
+  private var isTerminating = false
 
   private var logPath: String {
     FileManager.default.homeDirectoryForCurrentUser
@@ -17,6 +18,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
     launchWorker()
     return false
+  }
+
+  func applicationWillTerminate(_ notification: Notification) {
+    isTerminating = true
+    for worker in workers where worker.isRunning {
+      worker.terminate()
+    }
   }
 
   private func launchWorker() {
@@ -42,11 +50,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       DispatchQueue.main.async {
         guard let self else { return }
         self.workers.removeAll { $0 === terminatedProcess }
-        if terminatedProcess.terminationReason == .exit &&
+        if !self.isTerminating &&
+           terminatedProcess.terminationReason == .exit &&
            terminatedProcess.terminationStatus != 0 {
           self.showStartupFailure("启动进程异常退出（状态码 \(terminatedProcess.terminationStatus)）。")
         }
-        if self.workers.isEmpty {
+        if !self.isTerminating && self.workers.isEmpty {
           NSApp.terminate(nil)
         }
       }

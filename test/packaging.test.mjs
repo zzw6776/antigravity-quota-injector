@@ -80,3 +80,11 @@ test('AppIcon assets exist for macOS and Windows', async () => {
     assert.equal(info.isFile() && info.size > 0, true, `${name} should exist`);
   }
 });
+
+test('Windows NSIS uninstaller prepares running injector shutdown before deleting exe', async () => {
+  const nsi = await fs.readFile(path.join(root, 'installer', 'windows-installer.nsi'), 'utf8');
+  const uninstallSection = nsi.slice(nsi.indexOf('Section "Uninstall"'));
+  const prepareIdx = uninstallSection.indexOf('--prepare-update');
+  const deleteIdx = uninstallSection.indexOf('Delete "$INSTDIR\\Antigravity Quota Injector.exe"');
+  assert.equal(prepareIdx > 0 && prepareIdx < deleteIdx, true);
+});

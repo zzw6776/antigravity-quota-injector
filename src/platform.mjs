@@ -309,6 +309,12 @@ export function isPidAlive(pid) {
   }
 }
 
+export function matchesQuotaInjectorCommand(text) {
+  const s = String(text || '');
+  if (!s.trim()) return false;
+  return /(?:^|[\\/\s"'])(?:cli|launcher)\.mjs\b|antigravity[\s-]+quota[\s-]+injector/i.test(s);
+}
+
 export function isQuotaInjectorDaemonPid(
   pid,
   {
@@ -344,7 +350,7 @@ export function isQuotaInjectorDaemonPid(
         }
       );
       const text = String(out || '');
-      if (/cli\.mjs/i.test(text) || /antigravity-quota-injector/i.test(text)) {
+      if (matchesQuotaInjectorCommand(text)) {
         return true;
       }
       if (text.trim()) return false;
@@ -355,7 +361,7 @@ export function isQuotaInjectorDaemonPid(
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       });
-      return parseWindowsTasklistCsv(csv, ['node.exe']).includes(pid);
+      return parseWindowsTasklistCsv(csv, ['node.exe', 'Antigravity Quota Injector.exe']).includes(pid);
     }
 
     const out = execFileSyncFn('ps', ['-p', String(pid), '-o', 'command='], {
@@ -363,9 +369,7 @@ export function isQuotaInjectorDaemonPid(
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    const cmdline = String(out || '').trim();
-    if (!cmdline) return false;
-    return /cli\.mjs|antigravity-quota-injector/i.test(cmdline);
+    return matchesQuotaInjectorCommand(out);
   } catch {
     return false;
   }

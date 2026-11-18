@@ -52,6 +52,7 @@
     selectedModelLabel: '',
     renderRaf: 0,
     quotaTimer: null,
+    lastTurnsCid: '',
     routeTimer: null,
     domObserver: null,
     footerObserver: null,
@@ -75,6 +76,8 @@
     pendingSwitchTimer: null,
     autoSavedEmail: '',
     updateInfo: null,
+    updateOpening: false,
+    updateRequestId: '',
     isTranslating: false,
     cleanups: [],
   };
@@ -576,10 +579,11 @@
         background: rgba(127, 127, 127, 0.06);
       }
       .aq-q-acct-info {
+        flex: 1;
         min-width: 0;
         display: flex;
         align-items: center;
-        gap: 5px;
+        gap: 6px;
       }
       .aq-q-acct-email {
         overflow: hidden;
@@ -587,6 +591,7 @@
         white-space: nowrap;
       }
       .aq-q-acct-plan {
+        margin-left: auto;
         font-size: 9.5px;
         padding: 0 5px;
         border-radius: 9999px;
@@ -601,6 +606,13 @@
       .aq-q-acct-err {
         font-size: 10px;
         color: #dc2626;
+      }
+      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-plan,
+      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-note {
+        color: #9a9aa4;
+      }
+      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-err {
+        color: #f87171;
       }
       .aq-q-reset {
         font-size: 10px;
@@ -620,36 +632,56 @@
         margin-top: 6px;
         padding-top: 7px;
         border-top: 1px dashed rgba(127, 127, 127, 0.22);
-        display: grid;
-        gap: 4px;
-      }
-      .aq-q-update-hdr {
         display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-        font-size: 10.5px;
-      }
-      .aq-q-update-ver {
-        color: var(--muted-foreground, #71717a);
+        flex-wrap: wrap;
+        align-items: baseline;
+        justify-content: flex-end;
+        gap: 4px 10px;
         font-size: 10px;
       }
-      .aq-q-update-ready {
-        color: #15803d;
-        font-size: 10.5px;
-        font-weight: 550;
+      .aq-update-open {
+        appearance: none;
+        border: 0;
+        padding: 2px 0;
+        margin-left: auto;
+        background: transparent;
+        color: #16a34a;
+        font: inherit;
+        font-size: 10px;
+        line-height: 1.4;
+        cursor: pointer;
+        white-space: nowrap;
       }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-update-ready {
+      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-update-open {
         color: #4ade80;
       }
-      .aq-q-update-notes {
-        margin-top: 4px;
-        max-height: 110px;
-        overflow-y: auto;
-        white-space: pre-wrap;
-        font-size: 10px;
-        line-height: 1.45;
+      .aq-update-open:hover:not(:disabled) {
+        text-decoration: underline;
+      }
+      .aq-update-open:disabled {
+        cursor: default;
+        opacity: 0.75;
+      }
+      .aq-panel-version-text,
+      .aq-update-open.aq-panel-version-text {
+        margin-left: auto;
         color: var(--muted-foreground, #71717a);
+        white-space: nowrap;
+        font-size: 10px;
+      }
+      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-panel-version-text,
+      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-update-open.aq-panel-version-text {
+        color: #9a9aa4;
+      }
+      .aq-update-error {
+        flex-basis: 100%;
+        text-align: right;
+        color: #dc2626;
+        font-size: 10px;
+        overflow-wrap: anywhere;
+      }
+      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-update-error {
+        color: #f87171;
       }
     `;
   }
@@ -879,7 +911,28 @@
     return line;
   }
 
+  function isTurnRowElement(ch) {
+    return (
+      ch?.tagName === 'DIV' &&
+      Boolean(
+        ch.querySelector('[data-turn-content]') ||
+          ch.querySelector('[data-testid="agent-response"]') ||
+          ch.querySelector('[data-testid="user-message"]') ||
+          ch.querySelector('[data-testid="cascade-system-message-toolbar"]')
+      )
+    );
+  }
+
   function findTurnRows() {
+    const quotableRoot = document.querySelector('[data-quotable-root]');
+    if (quotableRoot) {
+      for (const child of quotableRoot.children) {
+        if (child.tagName === 'DIV') {
+          const rows = [...child.children].filter(isTurnRowElement);
+          if (rows.length > 0) return rows;
+        }
+      }
+    }
     const anchor =
       document.querySelector('[data-turn-content]') ||
       document.querySelector('[data-testid="agent-response"]') ||
@@ -887,14 +940,7 @@
     const row = anchor?.closest?.('.flex.items-start');
     const listParent = row?.parentElement;
     if (listParent) {
-      return [...listParent.children].filter(
-        (ch) =>
-          ch.tagName === 'DIV' &&
-          (ch.querySelector('[data-turn-content]') ||
-            ch.querySelector('[data-testid="agent-response"]') ||
-            ch.querySelector('[data-testid="user-message"]') ||
-            ch.querySelector('[data-testid="cascade-system-message-toolbar"]'))
-      );
+      return [...listParent.children].filter(isTurnRowElement);
     }
     return [...document.querySelectorAll('[data-turn-content]')];
   }
@@ -911,17 +957,11 @@
     const turnEls = findTurnRows();
     if (turnEls.length === 0 || turns.length === 0) return;
 
-    const latestIdx = turnEls.findIndex(
-      (el) => el.getAttribute('data-turn-content') === 'latest' || Boolean(el.querySelector('[data-turn-content="latest"]'))
-    );
-    const pairedCount = Math.min(turnEls.length, turns.length);
-
+    const offset = computeTurnPairingOffset(turnEls.length, turns.length);
     const activeLines = new Set();
-    for (let i = 0; i < pairedCount; i++) {
-      // Keep the latest DOM turn pinned to the latest DB turn when counts differ temporarily
-      const turnData = i === latestIdx && turnEls.length !== turns.length ? turns[turns.length - 1] : turns[i];
-      if (!turnData) continue;
-      if (turnData.totalTokens > 0 || !turnData.completed) {
+    for (let i = 0; i < turnEls.length; i++) {
+      const turnData = turns[offset + i] || null;
+      if (turnData && (turnData.totalTokens > 0 || !turnData.completed)) {
         activeLines.add(mountTurnLine(turnEls[i], turnData));
       } else {
         turnEls[i].querySelectorAll('[data-aq-turn-usage]').forEach((el) => el.remove());
@@ -952,11 +992,18 @@
   function detectSelectedModelLabel(leftGroup) {
     if (!leftGroup) return '';
     const explicit = leftGroup.querySelector('[data-testid="model-selector-trigger"]');
-    if (explicit?.textContent) return explicit.textContent.trim();
+    if (explicit) {
+      const aria = String(explicit.getAttribute('aria-label') || '');
+      const m = aria.match(/current:\s*(.+)$/i);
+      if (m && m[1]?.trim()) return m[1].trim();
+      if (explicit.textContent?.trim()) return explicit.textContent.trim();
+    }
     const btns = [...leftGroup.querySelectorAll('button')];
     for (let i = btns.length - 1; i >= 0; i--) {
       const aria = String(btns[i].getAttribute('aria-label') || '');
       if (/add context/i.test(aria)) continue;
+      const m = aria.match(/current:\s*(.+)$/i);
+      if (m && m[1]?.trim()) return m[1].trim();
       const text = String(btns[i].textContent || '').trim();
       if (text) return text;
     }
@@ -1002,7 +1049,9 @@
 
     const u = state.updateInfo;
     const hasUpdateDot = Boolean(
-      u && ['available', 'downloading', 'ready', 'installing'].includes(u.status) && u.latestVersion
+      u &&
+        (u.available === true ||
+          (Boolean(u.latestVersion) && ['available', 'downloading', 'ready', 'installing'].includes(u.status)))
     );
     const updateDotHtml = hasUpdateDot
       ? `<span class="aq-update-dot" title="${escapeHtml(`发现新版本 v${u.latestVersion}`)}"></span>`
@@ -1089,9 +1138,6 @@
           })
           .join('')
       : '';
-    const currentSummary = curEmail
-      ? `<div class="aq-q-acct-note">当前登录：${escapeHtml(curEmail)}${state.userProfile?.planName ? ` (${escapeHtml(state.userProfile.planName)})` : ''}</div>`
-      : '<div class="aq-q-acct-note">未登录或尚未读取到当前账号</div>';
     const statusHtml = !accountsSupported
       ? ''
       : state.accountsError
@@ -1103,75 +1149,57 @@
       ? `<div class="aq-q-acct-note">${escapeHtml(unsupportedReason)}</div>`
       : acctRows
         ? `<div class="aq-q-acct-list">${acctRows}</div>`
-        : '<div class="aq-q-acct-note">暂无已保存快照，点击「保存当前」即可添加</div>';
+        : '<div class="aq-q-acct-note">暂无已保存快照，登录后会自动保存</div>';
+    const addConfirming = state.pendingSwitchConfirmId === '__add__';
     const disabledTipAttr = !accountsSupported ? ` title="${escapeHtml(unsupportedReason)}"` : '';
     const accountsHtml = `
       <div class="aq-q-accounts">
         <div class="aq-q-acct-hdr">
           <span>账号切换</span>
           <div class="aq-q-acct-actions">
-            <button type="button" class="aq-q-btn" data-aq-acct-save="1" ${!accountsSupported || state.accountsBusy || !curEmail ? 'disabled' : ''}${disabledTipAttr}>保存当前</button>
-            <button type="button" class="aq-q-btn aq-q-btn-primary" data-aq-acct-add="1" ${!accountsSupported || state.accountsBusy ? 'disabled' : ''}${disabledTipAttr}>+ 登录新号</button>
+            <button type="button" class="aq-q-btn ${addConfirming ? 'aq-q-btn-warn' : 'aq-q-btn-primary'}" data-aq-acct-add="1" ${!accountsSupported || state.accountsBusy ? 'disabled' : ''}${disabledTipAttr}>${addConfirming ? '确认重启' : '+ 登录新号'}</button>
           </div>
         </div>
-        ${currentSummary}
         ${accountsBodyHtml}
         ${statusHtml}
       </div>
     `;
 
     const upd = state.updateInfo || {};
-    const curVer = upd.currentVersion ? `v${escapeHtml(upd.currentVersion)}` : '';
-    const updModeTag = upd.mode === 'dev' ? ' · 开发版' : '';
-    const updChecking = upd.status === 'checking';
+    const curVer = upd.currentVersion
+      ? `v${escapeHtml(upd.currentVersion)}${upd.mode === 'dev' ? '.dev' : ''}`
+      : '';
+    const updAvailable = Boolean(
+      upd.available === true ||
+        (upd.latestVersion && ['available', 'downloading', 'ready', 'installing'].includes(upd.status))
+    );
     const updInstalling = upd.status === 'installing';
     const updDownloading = upd.status === 'downloading';
-    const updHasTarget = Boolean(upd.latestVersion) && ['available', 'downloading', 'ready', 'installing'].includes(upd.status);
+    const updOpening = Boolean(state.updateOpening || upd.opening);
     const pctText =
       updDownloading && Number(upd.total) > 0
         ? ` ${Math.min(100, Math.round((Number(upd.received || 0) / Number(upd.total)) * 100))}%`
         : '';
 
-    let updDetailHtml = '';
-    let updActionBtnHtml = '';
+    let versionLabel = curVer;
     if (updInstalling) {
-      updDetailHtml = '<div class="aq-q-update-ready">正在原地替换注入器并重新注入（无需重启 Antigravity）…</div>';
-    } else if (updDownloading) {
-      updDetailHtml = `<div class="aq-q-acct-note">发现新版本 v${escapeHtml(upd.latestVersion)} · 预下载中${pctText}…</div>`;
-    } else if (updHasTarget) {
-      const readyText =
-        upd.status === 'ready'
-          ? `发现新版本 ${curVer} → v${escapeHtml(upd.latestVersion)}（已校验就绪）`
-          : `发现新版本 ${curVer} → v${escapeHtml(upd.latestVersion)}`;
-      updDetailHtml = `<div class="aq-q-update-ready">${readyText}</div>`;
-      if (upd.canAutoUpdate) {
-        updActionBtnHtml = `<button type="button" class="aq-q-btn aq-q-btn-primary" data-aq-update-install="1">立即更新</button>`;
-      } else {
-        updActionBtnHtml = `<button type="button" class="aq-q-btn aq-q-btn-primary" data-aq-update-open="1">前往下载</button>`;
-      }
-    } else if (upd.status === 'up-to-date') {
-      updDetailHtml = '<div class="aq-q-acct-note">已是最新版本</div>';
-    } else if (upd.status === 'error' && upd.error) {
-      updDetailHtml = `<div class="aq-q-acct-err">${escapeHtml(upd.error)}</div>`;
+      versionLabel = '正在原地替换注入器并重新注入…';
+    } else if (updOpening) {
+      versionLabel = updDownloading ? `正在下载更新${pctText}…` : '正在检查更新…';
+    } else if (updAvailable && upd.latestVersion) {
+      versionLabel = `${curVer ? `${curVer} → ` : ''}v${escapeHtml(upd.latestVersion)}`;
     }
 
-    const updNotesHtml =
-      updHasTarget && upd.releaseNotes
-        ? `<details class="aq-tt-details"><summary>更新说明</summary><div class="aq-q-update-notes">${escapeHtml(upd.releaseNotes)}</div></details>`
-        : '';
+    const versionControlHtml =
+      upd.enabled !== false
+        ? `<button type="button" class="aq-update-open${updAvailable || updInstalling ? '' : ' aq-panel-version-text'}" data-aq-update-open="1" ${updOpening || updInstalling ? 'disabled aria-busy="true"' : ''}>${versionLabel}</button>`
+        : `<span class="aq-panel-version-text">${versionLabel}</span>`;
 
     const updateHtml = upd.currentVersion
       ? `
         <div class="aq-q-update">
-          <div class="aq-q-update-hdr">
-            <span class="aq-q-update-ver">注入器 ${curVer}${updModeTag}</span>
-            <div class="aq-q-acct-actions">
-              ${updActionBtnHtml}
-              <button type="button" class="aq-q-btn" data-aq-update-check="1" ${updChecking || updInstalling || updDownloading ? 'disabled' : ''}>${updChecking ? '检查中…' : '检查更新'}</button>
-            </div>
-          </div>
-          ${updDetailHtml}
-          ${updNotesHtml}
+          ${versionControlHtml}
+          ${upd.error ? `<div class="aq-update-error" role="alert">${escapeHtml(upd.error)}</div>` : ''}
         </div>
       `
       : '';
@@ -1180,10 +1208,7 @@
       tt.innerHTML = `
         <div class="aq-tt-hdr">
           <span>上下文与配额</span>
-          <div class="aq-q-acct-actions">
-            <span class="aq-tt-sub">${state.quotaError ? escapeHtml(state.quotaError) : '加载中…'}</span>
-            <button type="button" class="aq-q-btn" data-aq-quota-refresh="1" ${state.quotaFetching ? 'disabled' : ''}>${state.quotaFetching ? '刷新中…' : '刷新'}</button>
-          </div>
+          <span class="aq-tt-sub">${state.quotaError ? escapeHtml(state.quotaError) : '加载中…'}</span>
         </div>
         ${ctxSectionHtml}
         ${accountsHtml}
@@ -1192,7 +1217,7 @@
     } else {
       const blocks = groups.map((g) => {
         const isMatched = activeGroup && g.displayName === activeGroup.displayName;
-        const buckets = (g.buckets || []).filter((b) => !b.disabled);
+        const buckets = orderQuotaBuckets(g.buckets);
         const bucketHtml = buckets
           .map((b) => {
             const pct = formatRemainingPercent(b.remainingFraction);
@@ -1225,14 +1250,10 @@
         `;
       });
 
-      const syncBtnLabel = state.quotaFetching ? '刷新中…' : '刷新';
-
       tt.innerHTML = `
         <div class="aq-tt-hdr">
           <span>上下文与配额</span>
-          <div class="aq-q-acct-actions">
-            <button type="button" class="aq-q-btn" data-aq-quota-refresh="1" ${state.quotaFetching ? 'disabled' : ''}>${syncBtnLabel}</button>
-          </div>
+          ${state.quotaError ? `<span class="aq-tt-sub">${escapeHtml(state.quotaError)}</span>` : ''}
         </div>
         ${ctxSectionHtml}
         ${blocks.join('')}
@@ -1271,46 +1292,36 @@
   }
 
   function bindQuotaTooltipActions(tt) {
-    const refreshBtn = tt.querySelector('[data-aq-quota-refresh]');
-    if (refreshBtn) {
-      refreshBtn.addEventListener('click', (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        void fetchQuota(true);
-      });
-    }
-    const saveBtn = tt.querySelector('[data-aq-acct-save]');
-    if (saveBtn) {
-      saveBtn.addEventListener('click', (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        if (!state.accountsSupported) return;
-        state.accountsError = '';
-        sendAccountAction({ type: 'save' });
-      });
-    }
     const addBtn = tt.querySelector('[data-aq-acct-add]');
     if (addBtn) {
-      addBtn.addEventListener('click', async (ev) => {
+      addBtn.addEventListener('click', (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
-        if (!state.accountsSupported) return;
-        state.accountsError = '';
-        if (state.userProfile?.email) {
-          sendAccountAction({ type: 'prepare-add' });
+        if (!state.accountsSupported || state.accountsBusy) return;
+        state.quotaTooltipPinned = true;
+        if (state.pendingSwitchConfirmId !== '__add__') {
+          state.pendingSwitchConfirmId = '__add__';
+          if (state.pendingSwitchTimer) clearTimeout(state.pendingSwitchTimer);
+          state.pendingSwitchTimer = setTimeout(() => {
+            state.pendingSwitchTimer = null;
+            if (state.pendingSwitchConfirmId === '__add__') {
+              state.pendingSwitchConfirmId = '';
+              refreshQuotaTooltipIfVisible();
+            }
+          }, 3000);
+          refreshQuotaTooltipIfVisible();
+          return;
         }
-        closeQuotaTooltip();
-        try {
-          const csrf = window.__APP_CONFIG__?.csrfToken || '';
-          await fetch('/exa.language_server_pb.LanguageServerService/AuthLogout', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              ...(csrf ? { 'x-codeium-csrf-token': csrf } : {}),
-            },
-            body: JSON.stringify({}),
-          });
-        } catch {}
+        state.pendingSwitchConfirmId = '';
+        if (state.pendingSwitchTimer) {
+          clearTimeout(state.pendingSwitchTimer);
+          state.pendingSwitchTimer = null;
+        }
+        state.accountsError = '';
+        state.accountsBusy = true;
+        state.accountsStatus = '正在保存当前账号并重启 Antigravity 进入登录页…';
+        refreshQuotaTooltipIfVisible();
+        sendAccountAction({ type: 'add-account' });
       });
     }
     const switchBtns = tt.querySelectorAll('[data-aq-acct-switch]');
@@ -1320,6 +1331,7 @@
         ev.stopPropagation();
         const id = switchBtns[i].getAttribute('data-aq-acct-switch') || '';
         if (!id || state.accountsBusy) return;
+        state.quotaTooltipPinned = true;
         if (state.pendingSwitchConfirmId !== id) {
           state.pendingSwitchConfirmId = id;
           if (state.pendingSwitchTimer) clearTimeout(state.pendingSwitchTimer);
@@ -1355,28 +1367,28 @@
         sendAccountAction({ type: 'delete', id });
       });
     }
-    const checkUpdateBtn = tt.querySelector('[data-aq-update-check]');
-    if (checkUpdateBtn) {
-      checkUpdateBtn.addEventListener('click', (ev) => {
+    const openUpdateBtn = tt.querySelector('[data-aq-update-open]');
+    if (openUpdateBtn) {
+      openUpdateBtn.addEventListener('click', (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
-        sendUpdateAction({ type: 'check' });
-      });
-    }
-    const installUpdateBtn = tt.querySelector('[data-aq-update-install]');
-    if (installUpdateBtn) {
-      installUpdateBtn.addEventListener('click', (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        sendUpdateAction({ type: 'install' });
-      });
-    }
-    const openReleaseBtn = tt.querySelector('[data-aq-update-open]');
-    if (openReleaseBtn) {
-      openReleaseBtn.addEventListener('click', (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        sendUpdateAction({ type: 'open-release' });
+        if (state.updateOpening || state.updateInfo?.opening || state.updateInfo?.status === 'installing') {
+          return;
+        }
+        state.quotaTooltipPinned = true;
+        if (typeof state.updateInfo?.opening !== 'boolean') {
+          state.updateInfo = {
+            ...(state.updateInfo || {}),
+            error: '后台守护进程代码已更新，请重新运行 启动开发版.command 后重试',
+          };
+          refreshQuotaTooltipIfVisible();
+          return;
+        }
+        const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        state.updateRequestId = requestId;
+        state.updateOpening = true;
+        refreshQuotaTooltipIfVisible();
+        sendUpdateAction({ type: 'open', requestId });
       });
     }
   }
@@ -1428,8 +1440,10 @@
       bindTooltipTrigger(ctxChip, quotaTriggerOpts);
     }
 
+    let chipCreated = false;
     let chip = document.getElementById('aq-quota-chip');
     if (!chip) {
+      chipCreated = true;
       chip = document.createElement('button');
       chip.type = 'button';
       chip.id = 'aq-quota-chip';
@@ -1446,6 +1460,9 @@
         }
         state.quotaTooltipPinned = true;
         sendAccountAction({ type: 'list' });
+        if (state.updateInfo && state.updateInfo.enabled !== false) {
+          sendUpdateAction({ type: 'check' });
+        }
         showQuotaTooltip(chip);
         void fetchQuota(true);
       });
@@ -1481,6 +1498,9 @@
     }
 
     renderQuotaChipContent();
+    if (chipCreated && !state.quotaData && !state.quotaFetching) {
+      void fetchQuota(true);
+    }
   }
 
   async function fetchQuota(force = false) {
@@ -1516,11 +1536,9 @@
             name: String(us?.name || '').trim(),
             planName: String(us?.planStatus?.planInfo?.planName || us?.userTier?.name || '').trim(),
           };
-          const known = Array.isArray(state.accounts)
-            && state.accounts.some((a) => String(a.email || '').toLowerCase() === email.toLowerCase());
-          if (state.accountsMetaLoaded && state.accountsSupported && !known && state.autoSavedEmail !== email) {
+          if (state.accountsMetaLoaded && state.accountsSupported && state.autoSavedEmail !== email) {
             state.autoSavedEmail = email;
-            sendAccountAction({ type: 'save' });
+            sendAccountAction({ type: 'save', silent: true });
           } else {
             sendAccountAction({ type: 'list' });
           }
@@ -1639,17 +1657,7 @@
     }
   }
 
-  function scheduleRenderAll() {
-    if (state.renderRaf) return;
-    state.renderRaf = requestAnimationFrame(() => {
-      state.renderRaf = 0;
-      ensureQuotaChip();
-      renderTurnUsageLines();
-      applyUiTranslations();
-    });
-  }
-
-  function checkRoute() {
+  function syncCascadeRoute() {
     const cid = extractCascadeId();
     if (cid !== state.cascadeId) {
       state.cascadeId = cid;
@@ -1661,14 +1669,35 @@
         } catch {}
       }
     }
+  }
+
+  function scheduleRenderAll() {
+    if (state.renderRaf) return;
+    state.renderRaf = requestAnimationFrame(() => {
+      state.renderRaf = 0;
+      syncCascadeRoute();
+      ensureQuotaChip();
+      renderTurnUsageLines();
+      applyUiTranslations();
+    });
+  }
+
+  function checkRoute() {
+    syncCascadeRoute();
     scheduleRenderAll();
   }
 
   // Expose receiver called by Node daemon
   window.__aqRenderTurns = function (payload) {
     try {
+      const cid = typeof payload?.cascadeId === 'string' ? payload.cascadeId.trim() : '';
+      const sameChat = Boolean(cid && cid === state.lastTurnsCid);
+      state.lastTurnsCid = cid;
       state.turnsPayload = payload;
       scheduleRenderAll();
+      if (sameChat && !document.hidden) {
+        void fetchQuota(false);
+      }
     } catch {}
   };
 
@@ -1690,13 +1719,8 @@
 
       const email = state.userProfile?.email || '';
       if (state.accountsSupported && email && state.autoSavedEmail !== email) {
-        const known = state.accounts.some(
-          (a) => String(a.email || '').toLowerCase() === email.toLowerCase()
-        );
-        if (!known) {
-          state.autoSavedEmail = email;
-          sendAccountAction({ type: 'save' });
-        }
+        state.autoSavedEmail = email;
+        sendAccountAction({ type: 'save', silent: true });
       }
       refreshQuotaTooltipIfVisible();
     } catch {}
@@ -1705,6 +1729,13 @@
   window.__aqRenderUpdate = function (payload) {
     try {
       state.updateInfo = payload && typeof payload === 'object' ? payload : null;
+      if (
+        payload?.requestId &&
+        payload.requestId === state.updateRequestId &&
+        payload.opening === false
+      ) {
+        state.updateOpening = false;
+      }
       renderQuotaChipContent();
       refreshQuotaTooltipIfVisible();
     } catch {}
@@ -1789,12 +1820,6 @@
       void fetchQuota(false);
     }
   };
-  const onComposerSend = (ev) => {
-    const target = ev.target;
-    if (target?.closest?.('[data-testid="send-button"]')) {
-      setTimeout(() => void fetchQuota(true), 2500);
-    }
-  };
   const onDocPointerDown = (ev) => {
     if (!state.quotaTooltipPinned) return;
     const t = ev.target;
@@ -1808,7 +1833,6 @@
   };
   window.addEventListener('popstate', onPopState);
   document.addEventListener('visibilitychange', onVisChange);
-  document.addEventListener('click', onComposerSend, true);
   document.addEventListener('pointerdown', onDocPointerDown, true);
   document.addEventListener('keydown', onDocKeyDown, true);
 
@@ -1824,7 +1848,6 @@
     } catch {}
     window.removeEventListener('popstate', onPopState);
     document.removeEventListener('visibilitychange', onVisChange);
-    document.removeEventListener('click', onComposerSend, true);
     document.removeEventListener('pointerdown', onDocPointerDown, true);
     document.removeEventListener('keydown', onDocKeyDown, true);
     if (state.renderRaf) cancelAnimationFrame(state.renderRaf);
@@ -1844,11 +1867,16 @@
     document.getElementById('aq-quota-tooltip')?.remove();
     document.getElementById('aq-turn-tooltip')?.remove();
     document.querySelectorAll('[data-aq-turn-usage]').forEach((el) => el.remove());
+    delete window.__aqRenderTurns;
+    delete window.__aqGetWatchedCascadeId;
     delete window.__aqRenderAccounts;
     delete window.__aqRenderUpdate;
+    delete window.__aqHydrated;
     delete window.__aq_version;
+    delete window.__aqCleanup;
   };
 
+  window.__aqHydrated = false;
   window.__aq_version = INJECT_VERSION;
   checkRoute();
   void fetchQuota(true);
