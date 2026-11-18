@@ -1,0 +1,331 @@
+/* Codex-inspired clean modern theme layer for Antigravity */
+
+/* ============================================================================
+ * 1. Typography, Weight Variables & Axis Reset (matched to running Codex UI)
+ * ============================================================================ */
+:root,
+html,
+body,
+body[data-agy-theme],
+body[data-agy-font],
+body[data-agy-font="google-sans"],
+body[data-agy-font="google-sans"] :where(.font-sans),
+body[data-agy-font="inter"],
+body[data-agy-font] :where(.font-sans) {
+  --vscode-font-family: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", sans-serif !important;
+  --font-sans: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", sans-serif !important;
+  --default-font-family: var(--font-sans) !important;
+  --font-family: var(--font-sans) !important;
+  --sdk-font-family: var(--font-sans) !important;
+  --editor-font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace !important;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace !important;
+  --default-mono-font-family: var(--font-mono) !important;
+  --sdk-font-family-mono: var(--font-mono) !important;
+
+  /* Keep 400 normal weight so macOS PingFang SC stays Regular (400) instead of snapping to PingFangSC-Medium at 430 */
+  --font-weight-light: 300 !important;
+  --font-weight-normal: 400 !important;
+  --font-weight-medium: 500 !important;
+  --font-weight-semibold: 600 !important;
+  --font-weight-bold: 700 !important;
+  --font-weight-black: 800 !important;
+  --agy-gsf-fvs: normal !important;
+  --agy-gsf-bold-wght: 600 !important;
+  --agy-gsf-h1-wght: 600 !important;
+  --agy-gsf-h3-wght: 600 !important;
+  --agy-gsf-slnt: 0 !important;
+}
+
+html,
+body,
+body[data-agy-font],
+body[data-agy-font="google-sans"] {
+  font-family: var(--font-sans) !important;
+  font-weight: 400 !important;
+  font-variation-settings: normal !important;
+  font-synthesis-weight: none !important;
+  -webkit-font-smoothing: antialiased;
+}
+
+body[data-agy-font] :where(p, li, span, div, a, button, label, h1, h2, h3, h4, h5, h6, strong, b, .font-sans):not(.codicon):not(.google-symbols) {
+  font-variation-settings: normal !important;
+}
+
+body[data-agy-font] :where(button, select, nav, aside, .font-sans) {
+  font-family: var(--font-sans) !important;
+}
+
+body[data-agy-font] :is(b, strong, h1, h2, h3, h4, h5, h6, .font-semibold, .font-bold):not(.codicon):not(.google-symbols) {
+  font-weight: 600 !important;
+}
+
+body[data-agy-font] .font-medium:not(.codicon):not(.google-symbols) {
+  font-weight: 500 !important;
+}
+
+/* ============================================================================
+ * 2. Light Mode Palette (sampled from running Codex desktop)
+ * ============================================================================ */
+html:has(> body.theme-light),
+html:has(> body:not(.dark):not(.theme-dark)),
+body.theme-light,
+body:not(.dark):not(.theme-dark) {
+  --background: #ffffff !important;
+  --content: #ffffff !important;
+  --foreground: #1a1c1f !important;
+  --sidebar: #fcfcfc !important;
+  --shell: #f6f6f6 !important;
+  --shell-canvas: #f6f6f6 !important;
+  --sidebar-secondary: rgba(26, 28, 31, 0.06) !important;
+  --sidebar-muted: rgba(26, 28, 31, 0.04) !important;
+  --card: #ffffff !important;
+  --card-border: rgba(26, 28, 31, 0.085) !important;
+  --card-edge: rgba(26, 28, 31, 0.085) !important;
+  --border: rgba(26, 28, 31, 0.078) !important;
+  --sash-line: rgba(26, 28, 31, 0.085) !important;
+  --secondary: rgba(26, 28, 31, 0.06) !important;
+  --secondary-foreground: rgba(26, 28, 31, 0.86) !important;
+  --muted: rgba(26, 28, 31, 0.038) !important;
+  --muted-foreground: rgba(26, 28, 31, 0.58) !important;
+  --placeholder: rgba(26, 28, 31, 0.44) !important;
+  --primary: #1a1c1f !important;
+  --primary-foreground: #ffffff !important;
+  --onyx-frame: #f6f6f6 !important;
+  --onyx-well: rgba(26, 28, 31, 0.045) !important;
+  --onyx-raised: #ffffff !important;
+  --onyx-selected: rgba(26, 28, 31, 0.065) !important;
+  --onyx-key: #ffffff !important;
+  --glass: rgba(255, 255, 255, 0.96) !important;
+  --glass-border: rgba(26, 28, 31, 0.085) !important;
+  --home-glow: transparent !important;
+  --link: #2563eb !important;
+  --code-foreground: #1a1c1f !important;
+  --editor-selection-background: rgba(59, 130, 246, 0.22) !important;
+}
+
+/* ============================================================================
+ * 3. Dark Mode Palette (Codex deep slate)
+ * ============================================================================ */
+html:has(> body.dark),
+html:has(> body.theme-dark),
+body.dark,
+body.theme-dark {
+  --background: #141419 !important;
+  --content: #141419 !important;
+  --foreground: #f4f4f7 !important;
+  --sidebar: #111116 !important;
+  --shell: #111116 !important;
+  --shell-canvas: #111116 !important;
+  --sidebar-secondary: rgba(255, 255, 255, 0.08) !important;
+  --sidebar-muted: rgba(255, 255, 255, 0.045) !important;
+  --card: #191922 !important;
+  --card-border: rgba(255, 255, 255, 0.1) !important;
+  --card-edge: rgba(255, 255, 255, 0.1) !important;
+  --border: rgba(255, 255, 255, 0.09) !important;
+  --sash-line: rgba(255, 255, 255, 0.1) !important;
+  --secondary: rgba(255, 255, 255, 0.075) !important;
+  --secondary-foreground: #e4e4ec !important;
+  --muted: rgba(255, 255, 255, 0.05) !important;
+  --muted-foreground: #9a9aa6 !important;
+  --placeholder: #72727e !important;
+  --primary: #f4f4f7 !important;
+  --primary-foreground: #141419 !important;
+  --onyx-frame: #111116 !important;
+  --onyx-well: #16161d !important;
+  --onyx-raised: #1e1e28 !important;
+  --onyx-selected: rgba(255, 255, 255, 0.09) !important;
+  --onyx-key: #24242d !important;
+  --glass: #191922 !important;
+  --glass-border: rgba(255, 255, 255, 0.1) !important;
+  --home-glow: transparent !important;
+  --link: #60a5fa !important;
+  --code-foreground: #e4e4ec !important;
+}
+
+/* ============================================================================
+ * 4. Shell, Main Canvas Elevation & Sidebar Pills
+ * ============================================================================ */
+body:not([data-has-browser-hole="true"]):not([data-has-drawer-browser-hole="true"]) .agy-inset-shell,
+.agy-titlebar {
+  background-color: var(--shell) !important;
+}
+
+body:not(.dark):not(.theme-dark) .bg-sidebar {
+  --sidebar: #fcfcfc !important;
+  --color-sidebar: #fcfcfc !important;
+  background-color: #fcfcfc !important;
+}
+
+body:is(.dark, .theme-dark) .bg-sidebar {
+  --sidebar: #111116 !important;
+  --color-sidebar: #111116 !important;
+  background-color: #111116 !important;
+}
+
+.agy-sheet[data-sheet-inset] [data-main-content-body]:not(:has([data-browser-hole="true"])),
+[data-main-content-body]:not(:has([data-browser-hole="true"])) {
+  background-color: var(--background) !important;
+}
+
+body:not(.dark):not(.theme-dark) .agy-sheet[data-sheet-inset] [data-main-content-body]:not(:has([data-browser-hole="true"])) {
+  border-radius: 12px !important;
+  box-shadow: 0 0 0 0.5px rgba(26, 28, 31, 0.11), 0 3px 7.5px rgba(0, 0, 0, 0.03), 0 0 16px rgba(0, 0, 0, 0.02) !important;
+}
+
+.agy-sidebar-row {
+  border-radius: 10px !important;
+  font-weight: 400 !important;
+}
+
+body:not(.dark):not(.theme-dark) .agy-sidebar-row[data-selected="true"] {
+  background-color: rgba(26, 28, 31, 0.06) !important;
+  box-shadow: none !important;
+  color: #1a1c1f !important;
+  font-weight: 400 !important;
+}
+
+body:is(.dark, .theme-dark) .agy-sidebar-row[data-selected="true"] {
+  background-color: rgba(255, 255, 255, 0.09) !important;
+  box-shadow: none !important;
+  color: #ffffff !important;
+  font-weight: 400 !important;
+}
+
+/* ============================================================================
+ * 5. Chat Typography, User Ice-Blue Bubble & Code Blocks
+ * ============================================================================ */
+[data-markdown-root],
+[data-markdown-root] :where(p, li, blockquote, td, th),
+[data-testid="user-message-content"],
+.agy-user-bubble {
+  font-family: var(--font-sans) !important;
+  font-size: 14px !important;
+  font-weight: 400 !important;
+  line-height: 1.625 !important;
+  letter-spacing: normal !important;
+}
+
+[data-markdown-root] :not(pre) > code {
+  font-family: var(--font-mono) !important;
+  font-size: 12px !important;
+  font-weight: 400 !important;
+  padding: 1px 6px !important;
+  border-radius: 6px !important;
+}
+
+body:not(.dark):not(.theme-dark) [data-markdown-root] :not(pre) > code {
+  background-color: rgba(26, 28, 31, 0.055) !important;
+  color: #1a1c1f !important;
+}
+
+body:is(.dark, .theme-dark) [data-markdown-root] :not(pre) > code {
+  background-color: rgba(255, 255, 255, 0.09) !important;
+  color: #e4e4ec !important;
+}
+
+[data-markdown-root] pre,
+[data-markdown-root] pre code {
+  font-family: var(--font-mono) !important;
+  font-size: 12px !important;
+  font-weight: 400 !important;
+}
+
+[data-markdown-root] div:has(> pre),
+[data-markdown-root] div:has(> div > pre) {
+  border-radius: 14px !important;
+}
+
+body:not(.dark):not(.theme-dark) [data-markdown-root] pre {
+  background-color: #f4f4f5 !important;
+}
+
+body:is(.dark, .theme-dark) [data-markdown-root] pre {
+  background-color: #1b1b24 !important;
+}
+
+/* Codex signature ice-blue user bubble */
+.agy-user-bubble-frame {
+  background: transparent !important;
+  background-color: transparent !important;
+  padding: 0 !important;
+  border-radius: 20px !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+body:not(.dark):not(.theme-dark) .agy-user-bubble {
+  background-color: rgb(232, 243, 254) !important;
+  color: rgb(12, 39, 74) !important;
+  border-radius: 20px !important;
+  padding: 10px 16px !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+body:not(.dark):not(.theme-dark) .agy-user-bubble [data-testid="user-message-content"] {
+  color: rgb(12, 39, 74) !important;
+}
+
+body:is(.dark, .theme-dark) .agy-user-bubble {
+  background-color: rgba(56, 139, 253, 0.16) !important;
+  color: #e6edf7 !important;
+  border-radius: 20px !important;
+  padding: 10px 16px !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+/* ============================================================================
+ * 6. Codex Single-Layer Floating Composer & Monochrome Send Button
+ * ============================================================================ */
+#antigravity\.agentSidePanelInputBox {
+  border-radius: 22px !important;
+  background-color: transparent !important;
+  padding: 0 !important;
+  box-shadow: none !important;
+}
+
+body:not(.dark):not(.theme-dark) #antigravity\.agentSidePanelInputBox .surface-composer-card {
+  border-radius: 22px !important;
+  background-color: rgba(255, 255, 255, 0.96) !important;
+  border: none !important;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.05), 0 2px 8px rgba(0, 0, 0, 0.04), 0 4px 24px rgba(0, 0, 0, 0.025) !important;
+  padding: 6px 8px !important;
+}
+
+body:not(.dark):not(.theme-dark) #antigravity\.agentSidePanelInputBox:focus-within .surface-composer-card {
+  box-shadow: 0 0 0 1px rgba(26, 28, 31, 0.1), 0 4px 14px rgba(0, 0, 0, 0.06), 0 8px 28px rgba(0, 0, 0, 0.03) !important;
+}
+
+body:is(.dark, .theme-dark) #antigravity\.agentSidePanelInputBox .surface-composer-card {
+  border-radius: 22px !important;
+  background-color: #191922 !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35) !important;
+  padding: 6px 8px !important;
+}
+
+body:is(.dark, .theme-dark) #antigravity\.agentSidePanelInputBox:focus-within .surface-composer-card {
+  border-color: rgba(255, 255, 255, 0.18) !important;
+}
+
+body:not(.dark):not(.theme-dark) #antigravity\.agentSidePanelInputBox [data-testid="send-button"]:not(:disabled):not([aria-disabled="true"]) {
+  background-color: #1a1c1f !important;
+  color: #ffffff !important;
+}
+
+body:not(.dark):not(.theme-dark) #antigravity\.agentSidePanelInputBox [data-testid="send-button"]:not(:disabled):not([aria-disabled="true"]):hover {
+  background-color: #2c2f36 !important;
+}
+
+body:is(.dark, .theme-dark) #antigravity\.agentSidePanelInputBox [data-testid="send-button"]:not(:disabled):not([aria-disabled="true"]) {
+  background-color: #f4f4f7 !important;
+  color: #141419 !important;
+}
+
+#antigravity\.agentSidePanelInputBox [data-lexical-editor="true"],
+#antigravity\.agentSidePanelInputBox [data-lexical-editor="true"] span {
+  font-family: var(--font-sans) !important;
+  font-size: 14px !important;
+  font-weight: 400 !important;
+}
