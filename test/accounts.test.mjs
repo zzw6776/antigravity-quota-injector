@@ -13,7 +13,9 @@ import {
   listAccounts,
   parseKeychainSecretMetadata,
   prepareNewAccountWithRestart,
+  sanitizeQuotaSnapshot,
   snapshotCurrentAccount,
+  updateAccountQuotaSnapshot,
 } from '../src/accounts.mjs';
 
 function makeTempFixture() {
@@ -223,6 +225,7 @@ test('prepareNewAccountWithRestart snapshots active account, quits, clears auth,
   assert.equal(tokRow, undefined);
 
   // Calling prepareNewAccountWithRestart again when keychain is already empty must not throw
+  let launchAttempts = 0;
   const savedWhenSignedOut = await prepareNewAccountWithRestart({
     accountsFile: fx.accountsFile,
     appSupportDir: fx.appSupportDir,
@@ -232,10 +235,13 @@ test('prepareNewAccountWithRestart snapshots active account, quits, clears auth,
     readSecretFn: () => '',
     quitFn: async () => true,
     deleteSecretFn: () => false,
-    launchFn: () => {},
-    waitLaunchFn: async () => true,
+    launchFn: () => {
+      launchAttempts += 1;
+    },
+    waitLaunchFn: async () => launchAttempts >= 2,
   });
   assert.equal(savedWhenSignedOut, null);
+  assert.equal(launchAttempts, 2);
   assert.equal(listAccounts(fx.accountsFile).length, 1);
 
   fs.rmSync(fx.root, { recursive: true, force: true });
@@ -292,5 +298,97 @@ test('applyAccountSnapshot removes stale credential-user-scope when target snaps
     appSupportDir: fx.appSupportDir,
     deleteSecretFn: () => true,
   });
+  fs.rmSync(fx.root, { recursive: true, force: true });
+});
+
+test('account quotaSnapshot persists cleanly via snapshotCurrentAccount and updateAccountQuotaSnapshot', () => {
+  const fx = makeTempFixture();
+  const initialQuota = {
+    updatedAt: '2026-11-20T02:00:00.000Z',
+    groups: [
+      {
+        displayName: 'Gemini Models',
+        buckets: [
+          {
+            bucketId: 'gemini-5h',
+            displayName: '5h',
+            window: '5h',
+            remainingFraction: 0.72,
+            resetTime: '2026-11-20T05:00:00.000Z',
+          },
+          {
+            bucketId: 'disabled-b',
+            window: 'weekly',
+            remainingFraction: 0.5,
+            disabled: true,
+          },
+        ],
+      },
+    ],
+  };
+
+  assert.equal(sanitizeQuotaSnapshot({ groups: [] }), null);
+  snapshotCurrentAccount({
+    accountsFile: fx.accountsFile,
+    appSupportDir: fx.appSupportDir,
+    profile: { email: 'alice@example.com', name: 'Alice', planName: 'Pro' },
+    quota: initialQuota,
+    readSecretFn: () => 'secret-alice',
+  });
+
+  // Subsequent snapshot without quota must preserve existing quotaSnapshot
+  snapshotCurrentAccount({
+    accountsFile: fx.accountsFile,
+    appSupportDir: fx.appSupportDir,
+    profile: { email: 'alice@example.com', name: 'Alice', planName: 'Pro' },
+    readSecretFn: () => 'secret-alice',
+  });
+
+  let listed = listAccounts(fx.accountsFile, 'alice@example.com');
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].quotaSnapshot?.groups.length, 1);
+  assert.equal(listed[0].quotaSnapshot?.groups[0].buckets.length, 1);
+  assert.equal(listed[0].quotaSnapshot?.groups[0].buckets[0].remainingFraction, 0.72);
+
+  // Identical quota within 60s skips redundant disk write
+  const noopRes = updateAccountQuotaSnapshot({
+    accountsFile: fx.accountsFile,
+    email: 'alice@example.com',
+    quota: {
+      updatedAt: '2026-11-20T02:00:20.000Z',
+      groups: initialQuota.groups,
+    },
+  });
+  assert.equal(noopRes.updated, false);
+
+  // Changed remainingFraction persists immediately
+  const updatedRes = updateAccountQuotaSnapshot({
+    accountsFile: fx.accountsFile,
+    email: 'alice@example.com',
+    quota: {
+      updatedAt: '2026-11-20T02:00:30.000Z',
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          buckets: [
+            {
+              bucketId: 'gemini-5h',
+              window: '5h',
+              remainingFraction: 0.45,
+              resetTime: '2026-11-20T05:00:00.000Z',
+            },
+          ],
+        },
+      ],
+    },
+  });
+  assert.equal(updatedRes.updated, true);
+  assert.equal(updatedRes.changed, true);
+
+  listed = listAccounts(fx.accountsFile, 'other@example.com');
+  assert.equal(listed[0].active, false);
+  assert.equal(listed[0].quotaSnapshot?.groups[0].buckets[0].remainingFraction, 0.45);
+  assert.equal('keychainSecret' in listed[0], false);
+
   fs.rmSync(fx.root, { recursive: true, force: true });
 });

@@ -6,6 +6,7 @@ import path from 'node:path';
 export const MIN_NODE_MAJOR = 22;
 export const MIN_NODE_MINOR = 13;
 export const WINDOWS_SHORTCUT_NAME = 'Antigravity Quota';
+export const ANTIGRAVITY_REMOTE_DEBUGGING_ARGS = ['--remote-debugging-port=0'];
 
 export function parseNodeVersion(versionStr = process.versions?.node || process.version) {
   const clean = String(versionStr || '').replace(/^v/i, '');
@@ -255,7 +256,7 @@ export function launchAntigravityExecutable({
   }
 
   if (platform === 'darwin') {
-    const child = spawnFn('open', ['-a', exePath], {
+    const child = spawnFn('open', ['-a', exePath, '--args', ...ANTIGRAVITY_REMOTE_DEBUGGING_ARGS], {
       detached: true,
       stdio: 'ignore',
     });
@@ -266,7 +267,10 @@ export function launchAntigravityExecutable({
   if (platform === 'win32') {
     // Launch via ShellExecute (Start-Process -WindowStyle Normal) so a hidden wscript/node launcher
     // never passes SW_HIDE into Antigravity's initial window state.
-    const psScript = `Start-Process -FilePath '${escapePowerShellSingleQuoted(exePath)}' -WindowStyle Normal`;
+    const argList = ANTIGRAVITY_REMOTE_DEBUGGING_ARGS.map(
+      (a) => `'${escapePowerShellSingleQuoted(a)}'`
+    ).join(', ');
+    const psScript = `Start-Process -FilePath '${escapePowerShellSingleQuoted(exePath)}' -ArgumentList @(${argList}) -WindowStyle Normal`;
     const res = spawnSyncFn(
       'powershell.exe',
       [
@@ -290,7 +294,7 @@ export function launchAntigravityExecutable({
     }
   }
 
-  const child = spawnFn(exePath, [], {
+  const child = spawnFn(exePath, [...ANTIGRAVITY_REMOTE_DEBUGGING_ARGS], {
     detached: true,
     stdio: 'ignore',
     windowsHide: false,

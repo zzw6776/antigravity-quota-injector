@@ -177,15 +177,27 @@ body:not(.dark):not(.theme-dark) .agy-sheet[data-sheet-inset] [data-main-content
   font-weight: 400 !important;
 }
 
+body:not(.dark):not(.theme-dark) .agy-sidebar-row:hover:not([data-selected="true"]) {
+  background-color: rgba(26, 28, 31, 0.04) !important;
+  --row-bg: #f3f3f3 !important;
+}
+
 body:not(.dark):not(.theme-dark) .agy-sidebar-row[data-selected="true"] {
   background-color: rgba(26, 28, 31, 0.06) !important;
+  --row-bg: #eeefef !important;
   box-shadow: none !important;
   color: #1a1c1f !important;
   font-weight: 400 !important;
 }
 
+body:is(.dark, .theme-dark) .agy-sidebar-row:hover:not([data-selected="true"]) {
+  background-color: rgba(255, 255, 255, 0.045) !important;
+  --row-bg: #1c1c20 !important;
+}
+
 body:is(.dark, .theme-dark) .agy-sidebar-row[data-selected="true"] {
   background-color: rgba(255, 255, 255, 0.09) !important;
+  --row-bg: #26262b !important;
   box-shadow: none !important;
   color: #ffffff !important;
   font-weight: 400 !important;

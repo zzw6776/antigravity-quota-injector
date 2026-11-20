@@ -12,7 +12,21 @@ import {
   prepareNewAccountWithRestart,
   snapshotCurrentAccount,
   switchAccountWithRestart,
+  updateAccountQuotaSnapshot,
 } from './accounts.mjs';
+import {
+  addConversationToGroup,
+  createConversationGroup,
+  deleteConversationGroup,
+  moveConversationBetweenGroups,
+  moveConversationGroup,
+  readConversationGroupsStore,
+  removeConversationFromGroup,
+  renameConversationGroup,
+  reorderConversationGroups,
+  syncConversationMetadata,
+  toggleConversationGroupCollapse,
+} from './conversation-groups.mjs';
 import {
   createFollowAppController,
   isAntigravityProcessRunning,
@@ -23,6 +37,7 @@ import {
   parseConversationTurns,
   resolveConversationDbPath,
 } from './proto-metrics.mjs';
+import { TokenPricingManager } from './token-pricing.mjs';
 
 function resolveSrcDir() {
   if (typeof __dirname === 'string') return __dirname;
@@ -76,6 +91,7 @@ export function getAppDataPaths(channel = 'stable') {
     conversationsDir: path.join(home, geminiSubDir, 'conversations'),
     stateDir,
     accountsFile: path.join(stateDir, 'accounts.json'),
+    groupsFile: path.join(stateDir, 'conversation-groups.json'),
   };
 }
 
@@ -307,6 +323,23 @@ export async function runDaemon({
   let wakeLoop = null;
   let sleepTimer = null;
 
+  const pricingManager = new TokenPricingManager({
+    stateDir: paths.stateDir,
+    refreshOnInitialize: !once,
+  });
+  await pricingManager.initialize();
+  const unsubscribePricing = pricingManager.onChange(() => {
+    if (sleepTimer) {
+      clearTimeout(sleepTimer);
+      sleepTimer = null;
+    }
+    if (wakeLoop) {
+      const fn = wakeLoop;
+      wakeLoop = null;
+      fn();
+    }
+  });
+
   const pushUpdateToSession = async (session) => {
     if (!session?.client?.isOpen() || !session.hostConfirmed) return;
     const payload = updateManager
@@ -383,6 +416,129 @@ export async function runDaemon({
     }
   };
 
+  const pushGroupsToSession = async (session, extra = {}) => {
+    if (!session?.client?.isOpen() || !session.hostConfirmed) return;
+    const store = extra.store || readConversationGroupsStore(paths.groupsFile);
+    const payload = {
+      collapsedSection: Boolean(store.collapsedSection),
+      groups: Array.isArray(store.groups) ? store.groups : [],
+      error: String(extra.error || ''),
+    };
+    try {
+      await session.client.send('Runtime.evaluate', {
+        expression: `window.__aqRenderGroups && window.__aqRenderGroups(${JSON.stringify(payload)})`,
+        returnByValue: false,
+      });
+    } catch {}
+  };
+
+  const pushGroupsToAllSessions = async (extra = {}) => {
+    const store = extra.store || readConversationGroupsStore(paths.groupsFile);
+    for (const s of attached.values()) {
+      await pushGroupsToSession(s, { ...extra, store });
+    }
+  };
+
+  const handleGroupAction = async (session, rawPayload) => {
+    let msg;
+    try {
+      msg = JSON.parse(String(rawPayload || '{}'));
+    } catch {
+      return;
+    }
+    const type = String(msg?.type || '');
+    try {
+      if (type === 'list') {
+        await pushGroupsToSession(session);
+        return;
+      }
+      if (type === 'create') {
+        const { store } = createConversationGroup(paths.groupsFile, {
+          name: msg?.name,
+          parentId: msg?.parentId || '',
+          initialItem: msg?.item || null,
+        });
+        await pushGroupsToAllSessions({ store });
+        return;
+      }
+      if (type === 'rename') {
+        const store = renameConversationGroup(paths.groupsFile, {
+          groupId: msg?.groupId,
+          name: msg?.name,
+        });
+        await pushGroupsToAllSessions({ store });
+        return;
+      }
+      if (type === 'delete') {
+        const store = deleteConversationGroup(paths.groupsFile, {
+          groupId: msg?.groupId,
+        });
+        await pushGroupsToAllSessions({ store });
+        return;
+      }
+      if (type === 'toggle-collapse') {
+        const store = toggleConversationGroupCollapse(paths.groupsFile, {
+          groupId: msg?.groupId,
+          section: Boolean(msg?.section),
+        });
+        await pushGroupsToAllSessions({ store });
+        return;
+      }
+      if (type === 'add-item') {
+        const store = addConversationToGroup(paths.groupsFile, {
+          groupId: msg?.groupId,
+          item: msg?.item,
+        });
+        await pushGroupsToAllSessions({ store });
+        return;
+      }
+      if (type === 'remove-item') {
+        const store = removeConversationFromGroup(paths.groupsFile, {
+          groupId: msg?.groupId,
+          cascadeId: msg?.cascadeId,
+        });
+        await pushGroupsToAllSessions({ store });
+        return;
+      }
+      if (type === 'move-item') {
+        const store = moveConversationBetweenGroups(paths.groupsFile, {
+          fromGroupId: msg?.fromGroupId,
+          toGroupId: msg?.toGroupId,
+          item: msg?.item,
+        });
+        await pushGroupsToAllSessions({ store });
+        return;
+      }
+      if (type === 'move-group') {
+        const store = moveConversationGroup(paths.groupsFile, {
+          groupId: msg?.groupId,
+          parentId: msg?.parentId || '',
+          beforeGroupId: msg?.beforeGroupId || '',
+        });
+        await pushGroupsToAllSessions({ store });
+        return;
+      }
+      if (type === 'reorder') {
+        const store = reorderConversationGroups(paths.groupsFile, {
+          orderedIds: msg?.orderedIds,
+          parentId: msg?.parentId,
+        });
+        await pushGroupsToAllSessions({ store });
+        return;
+      }
+      if (type === 'sync-meta') {
+        const { store, changed } = syncConversationMetadata(paths.groupsFile, msg?.metadata || {});
+        if (changed) {
+          await pushGroupsToAllSessions({ store });
+        }
+      }
+    } catch (err) {
+      await pushGroupsToSession(session, {
+        error: String(err?.message || '分组操作失败'),
+      });
+    }
+  };
+
   const handleAccountAction = async (session, rawPayload) => {
     let msg;
     try {
@@ -406,12 +562,24 @@ export async function runDaemon({
         await pushAccountsToSession(session, { activeEmail });
         return;
       }
+      if (type === 'sync-quota') {
+        const res = updateAccountQuotaSnapshot({
+          accountsFile: paths.accountsFile,
+          email: activeEmail,
+          quota: msg?.quota || null,
+        });
+        if (res.updated) {
+          await pushAccountsToAllSessions({ activeEmail });
+        }
+        return;
+      }
       if (type === 'save') {
         try {
           const entry = snapshotCurrentAccount({
             accountsFile: paths.accountsFile,
             appSupportDir: paths.appSupportDir,
             profile: profile || {},
+            quota: msg?.quota || null,
           });
           session.activeEmail = entry.email;
           await pushAccountsToAllSessions({
@@ -436,14 +604,18 @@ export async function runDaemon({
           status: '正在保存当前账号并重启 Antigravity 进入登录页…',
         });
         try {
+          log('[accounts] preparing new account login (restarting Antigravity)...');
           await prepareNewAccountWithRestart({
             accountsFile: paths.accountsFile,
             appSupportDir: paths.appSupportDir,
             channel,
             currentProfile: profile,
+            currentQuota: msg?.quota || null,
           });
+          log('[accounts] Antigravity relaunched for new account login');
         } catch (err) {
           switchInFlight = false;
+          log(`[accounts] prepare-add failed: ${err?.message || err}`);
           await pushAccountsToAllSessions({
             activeEmail,
             busy: false,
@@ -468,15 +640,19 @@ export async function runDaemon({
           status: '正在切换账号并重启 Antigravity…',
         });
         try {
+          log(`[accounts] switching account to ${String(msg?.id || '')} (restarting Antigravity)...`);
           await switchAccountWithRestart({
             accountId: msg?.id,
             accountsFile: paths.accountsFile,
             appSupportDir: paths.appSupportDir,
             channel,
             currentProfile: profile,
+            currentQuota: msg?.quota || null,
           });
+          log('[accounts] Antigravity relaunched after account switch');
         } catch (err) {
           switchInFlight = false;
+          log(`[accounts] switch failed: ${err?.message || err}`);
           await pushAccountsToAllSessions({
             activeEmail,
             busy: false,
@@ -514,21 +690,23 @@ export async function runDaemon({
     const sig = getDbSignature(dbPath);
     if (!sig) return;
 
-    const sessionKey = `${session.activeCascadeId}@${sig}`;
+    const rateSig = pricingManager.getRateSignature();
+    const sessionKey = `${session.activeCascadeId}@${sig}@${rateSig}`;
     if (!force && sessionKey === session.lastPushedKey) return;
 
-    let payload;
+    let basePayload;
     const cached = turnsCache.get(dbPath);
     if (cached && cached.sig === sig) {
-      payload = cached.payload;
+      basePayload = cached.payload;
     } else {
-      payload = parseConversationTurns(dbPath, session.activeCascadeId);
-      if (payload.transientError) return;
+      basePayload = parseConversationTurns(dbPath, session.activeCascadeId);
+      if (basePayload.transientError) return;
       if (turnsCache.size > 24) {
         turnsCache.delete(turnsCache.keys().next().value);
       }
-      turnsCache.set(dbPath, { sig, payload });
+      turnsCache.set(dbPath, { sig, payload: basePayload });
     }
+    const payload = pricingManager.enrichConversationPayload(basePayload);
 
     await session.client.send('Runtime.evaluate', {
       expression: `window.__aqRenderTurns && window.__aqRenderTurns(${JSON.stringify(payload)})`,
@@ -578,6 +756,7 @@ export async function runDaemon({
     await client.send('Runtime.addBinding', { name: '__aqRequestTurns' });
     await client.send('Runtime.addBinding', { name: '__aqAccountAction' });
     await client.send('Runtime.addBinding', { name: '__aqUpdateAction' });
+    await client.send('Runtime.addBinding', { name: '__aqGroupAction' });
 
     client.onBinding((params) => {
       if (params?.name === '__aqRequestTurns') {
@@ -591,6 +770,8 @@ export async function runDaemon({
         void handleAccountAction(session, params.payload);
       } else if (params?.name === '__aqUpdateAction') {
         void handleUpdateAction(params.payload);
+      } else if (params?.name === '__aqGroupAction') {
+        void handleGroupAction(session, params.payload);
       }
     });
 
@@ -604,6 +785,7 @@ export async function runDaemon({
   const hydrateSession = async (session) => {
     await syncTurnsForSession(session, true);
     await pushAccountsToSession(session);
+    await pushGroupsToSession(session);
     await pushUpdateToSession(session);
     await session.client.send('Runtime.evaluate', {
       expression: 'window.__aqHydrated = true;',
@@ -637,15 +819,18 @@ export async function runDaemon({
         continue;
       }
       const urlCid = targetUrlById.get(id)?.match(/\/c\/([0-9a-f-]{36})/i)?.[1] || '';
-      if (urlCid && urlCid !== session.activeCascadeId) {
-        session.activeCascadeId = urlCid;
-        session.lastPushedKey = '';
-      }
       const stateRes = await session.client.send('Runtime.evaluate', {
-        expression: '({ v: window.__aq_version || "", h: Boolean(window.__aqHydrated) })',
+        expression:
+          '({ v: window.__aq_version || "", h: Boolean(window.__aqHydrated), cid: window.__aqGetWatchedCascadeId ? window.__aqGetWatchedCascadeId() : "" })',
         returnByValue: true,
       });
       const pageState = stateRes?.result?.result?.value;
+      const watchedCid = UUID_RE.test(String(pageState?.cid || '')) ? String(pageState.cid) : '';
+      const resolvedCid = watchedCid || (pageState?.v ? '' : urlCid);
+      if (resolvedCid && resolvedCid !== session.activeCascadeId) {
+        session.activeCascadeId = resolvedCid;
+        session.lastPushedKey = '';
+      }
       if (!pageState || pageState.v !== version) {
         await session.client.send('Runtime.evaluate', { expression: script, returnByValue: false });
         await hydrateSession(session);
@@ -680,6 +865,9 @@ export async function runDaemon({
     }
     try {
       unsubscribeUpdate?.();
+    } catch {}
+    try {
+      unsubscribePricing?.();
     } catch {}
     for (const session of attached.values()) session.client.close();
     attached.clear();
@@ -746,6 +934,7 @@ export async function runDaemon({
       });
       if (stopping) break;
       try {
+        void pricingManager.refreshExchangeRate().catch(() => {});
         userCfg = readUserConfig(paths.stateDir);
         const next = buildClientScript(userCfg);
         if (next.version !== version) {

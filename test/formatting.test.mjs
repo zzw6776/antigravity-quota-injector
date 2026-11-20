@@ -7,13 +7,18 @@ import {
   contextLevelClass,
   extractQuotaBuckets,
   formatCallDetailTitle,
+  formatCny,
   formatContextCompact,
   formatContextK,
+  formatPricingSourceNote,
   formatResetCountdown,
   formatTurnSummary,
+  formatUnitPrice,
   matchQuotaGroup,
   normalizeModelLabel,
   orderQuotaBuckets,
+  resolveGeminiQuotaAvailability,
+  resolveUserPlanLabel,
 } from '../src/formatting.mjs';
 import { translateUiText } from '../src/i18n-zh.mjs';
 
@@ -43,8 +48,8 @@ const SAMPLE_GROUPS = [
   },
 ];
 
-test('formatTurnSummary omits latency and price and formats codex-style line', () => {
-  const summary = formatTurnSummary({
+test('formatTurnSummary formats codex-style line with CNY price and fallback states', () => {
+  const pricedSummary = formatTurnSummary({
     totalTokens: 943000,
     inputTokens: 940000,
     cachedInputTokens: 935300,
@@ -52,13 +57,67 @@ test('formatTurnSummary omits latency and price and formats codex-style line', (
     firstTokenLatencyMs: 4400,
     outputSpeed: 61.7,
     completed: true,
+    cost: { available: true, totalCny: 0.8524 },
   });
-  assert.match(summary, /本轮 Token 0\.943M/);
-  assert.match(summary, /缓存命中率 99\.5%/);
-  assert.match(summary, /累计 139\.749M/);
-  assert.match(summary, /首字 4\.4s/);
-  assert.match(summary, /速率 61\.7 tok\/s/);
-  assert.doesNotMatch(summary, /延时|价格/);
+  assert.match(pricedSummary, /本轮 Token 0\.943M/);
+  assert.match(pricedSummary, /缓存命中率 99\.5%/);
+  assert.match(pricedSummary, /累计 139\.749M/);
+  assert.match(pricedSummary, /首字 4\.4s/);
+  assert.match(pricedSummary, /速率 61\.7 tok\/s/);
+  assert.match(pricedSummary, /价格 ¥0\.8524/);
+  assert.doesNotMatch(pricedSummary, /延时/);
+
+  const unpricedSummary = formatTurnSummary({
+    totalTokens: 10000,
+    inputTokens: 9000,
+    cachedInputTokens: 0,
+    cumulativeTotalTokens: 10000,
+    completed: true,
+    cost: { available: false },
+  });
+  assert.match(unpricedSummary, /价格暂不可算/);
+
+  assert.equal(formatTurnSummary({ totalTokens: 0, completed: false }), '等待 Token 数据 · 价格待计算');
+  assert.equal(formatTurnSummary({ totalTokens: 0, completed: true }), '本轮未获取到 Token 数据 · 价格无法计算');
+});
+
+test('formatCny, formatUnitPrice, and formatPricingSourceNote format pricing metadata cleanly', () => {
+  assert.equal(formatCny(1.5), '¥1.50');
+  assert.equal(formatCny(0.0523), '¥0.0523');
+  assert.equal(formatCny(0.001234), '¥0.001234');
+  assert.equal(
+    formatUnitPrice(
+      {
+        available: true,
+        normalizedModel: 'gemini-4-argon',
+        currency: 'USD',
+        rates: { ordinaryInput: 2 },
+        exchangeRate: { rate: 6.7118 },
+      },
+      'ordinaryInput'
+    ),
+    '¥13.42/M'
+  );
+  assert.equal(
+    formatPricingSourceNote({
+      available: true,
+      provider: 'google',
+      providers: ['google'],
+      hasTieredContext: true,
+      contextTiers: ['short', 'long'],
+    }),
+    'Google Gemini 标准 API 价格 · 混合上下文'
+  );
+  assert.equal(
+    formatPricingSourceNote({
+      available: true,
+      provider: 'anthropic',
+      providers: ['anthropic'],
+      hasTieredContext: false,
+      contextTiers: ['standard'],
+    }),
+    'Anthropic Claude 标准 API 价格'
+  );
 });
 
 test('matchQuotaGroup picks the group matching active model selector label', () => {
@@ -78,11 +137,14 @@ test('matchQuotaGroup picks the group matching active model selector label', () 
   assert.equal(b3.weekly.bucketId, 'gemini-argon-wtu-weekly');
 });
 
-test('formatResetCountdown formats remaining time cleanly', () => {
-  const now = Date.parse('2026-11-17T10:00:00Z');
-  assert.equal(formatResetCountdown('2026-11-17T14:16:00Z', now), '4小时16分后重置');
-  assert.equal(formatResetCountdown('2026-11-19T12:00:00Z', now), '2天2小时后重置');
-  assert.equal(formatResetCountdown('2026-11-17T09:59:00Z', now), '即将重置');
+test('formatResetCountdown formats remaining time with local target time cleanly', () => {
+  const now = new Date(2026, 10, 17, 10, 0, 0).getTime();
+  const sameDayTarget = new Date(2026, 10, 17, 14, 16, 0).toISOString();
+  const crossDayTarget = new Date(2026, 10, 19, 12, 5, 0).toISOString();
+  const expiredTarget = new Date(2026, 10, 17, 9, 59, 0).toISOString();
+  assert.equal(formatResetCountdown(sameDayTarget, now), '4小时16分 (14:16)');
+  assert.equal(formatResetCountdown(crossDayTarget, now), '2天2小时 (11/19 12:05)');
+  assert.equal(formatResetCountdown(expiredTarget, now), '即将重置');
 });
 
 test('formatContextCompact and contextLevelClass format context window cleanly', () => {
@@ -167,4 +229,150 @@ test('normalizeModelLabel strips both English Thinking and translated 思考 suf
   assert.equal(normalizeModelLabel('Claude Sonnet 5.5 (High 思考)'), 'claude sonnet 5.5');
   assert.equal(normalizeModelLabel('Claude Sonnet 5.5 思考'), 'claude sonnet 5.5');
   assert.equal(matchQuotaGroup(SAMPLE_GROUPS, 'Claude Sonnet 5.5 思考').displayName, 'Claude and GPT models');
+});
+
+test('resolveUserPlanLabel prefers userTier and distinguishes Ultra 5x, Ultra 20x, Pro, and Free', () => {
+  assert.equal(
+    resolveUserPlanLabel({
+      planStatus: { planInfo: { teamsTier: 'TEAMS_TIER_PRO', planName: 'Pro' } },
+      userTier: {
+        id: 'g1-ultra-lite-tier',
+        name: 'Google AI Ultra',
+        description: 'Google AI Ultra',
+        upgradeSubscriptionText:
+          'You can upgrade to a higher Google AI Ultra plan to receive the highest rate limits.',
+      },
+    }),
+    'Ultra 5x'
+  );
+  assert.equal(
+    resolveUserPlanLabel({
+      planStatus: { planInfo: { planName: 'Pro' } },
+      userTier: {
+        id: 'g1-ultra-tier',
+        name: 'Google AI Ultra',
+        description: 'Google AI Ultra',
+      },
+    }),
+    'Ultra 20x'
+  );
+  assert.equal(
+    resolveUserPlanLabel({
+      planStatus: { planInfo: { planName: 'Pro' } },
+      userTier: {
+        id: 'g1-pro-tier',
+        name: 'Google AI Pro',
+        description: 'Google AI Pro',
+      },
+    }),
+    'Pro'
+  );
+  assert.equal(
+    resolveUserPlanLabel({
+      planStatus: { planInfo: { planName: 'Pro' } },
+      userTier: {
+        id: 'free-tier',
+        name: 'Google AI Free',
+        description: 'Free',
+      },
+    }),
+    'Free'
+  );
+  assert.equal(
+    resolveUserPlanLabel({
+      planStatus: { planInfo: { planName: 'Pro' } },
+      userTier: {
+        id: 'gcp-ge-ultra-tier',
+        name: 'Google Cloud Enterprise Ultra',
+        description: 'Google Cloud Enterprise Ultra',
+      },
+    }),
+    'Google Cloud Enterprise Ultra'
+  );
+  assert.equal(
+    resolveUserPlanLabel({
+      planStatus: { planInfo: { planName: 'Pro' } },
+    }),
+    'Pro'
+  );
+});
+
+test('resolveGeminiQuotaAvailability identifies available, depleted, inferred-reset, and unknown Gemini states', () => {
+  const nowMs = Date.parse('2026-11-20T06:00:00Z');
+  assert.equal(resolveGeminiQuotaAvailability(null, { nowMs }).state, 'unknown');
+
+  const okRes = resolveGeminiQuotaAvailability(
+    {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          buckets: [
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.63, resetTime: '2026-11-25T02:00:00Z' },
+            { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.83, resetTime: '2026-11-20T09:00:00Z' },
+          ],
+        },
+        {
+          displayName: 'Gemini 4 Argon',
+          buckets: [{ bucketId: 'gemini-argon-wtu-weekly', window: 'weekly', remainingFraction: 0 }],
+        },
+      ],
+    },
+    { isCurrent: true, nowMs }
+  );
+  assert.equal(okRes.state, 'available');
+  assert.match(okRes.label, /5h 83%/);
+  assert.match(okRes.label, /周 63%/);
+
+  // Depleted 5h before resetTime
+  const depleted5h = resolveGeminiQuotaAvailability(
+    {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          buckets: [
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.5, resetTime: '2026-11-25T02:00:00Z' },
+            { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0, resetTime: '2026-11-20T08:00:00Z' },
+          ],
+        },
+      ],
+    },
+    { isCurrent: false, nowMs }
+  );
+  assert.equal(depleted5h.state, 'depleted');
+
+  // Expired 5h resetTime on cached non-active account flips back to available
+  const recovered5h = resolveGeminiQuotaAvailability(
+    {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          buckets: [
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.5, resetTime: '2026-11-25T02:00:00Z' },
+            { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0, resetTime: '2026-11-20T05:00:00Z' },
+          ],
+        },
+      ],
+    },
+    { isCurrent: false, nowMs }
+  );
+  assert.equal(recovered5h.state, 'available');
+  assert.match(recovered5h.label, /预计可用/);
+  assert.match(recovered5h.label, /5h 已重置/);
+
+  // Weekly still 0% before reset even if 5h reset expired -> still depleted
+  const depletedWeekly = resolveGeminiQuotaAvailability(
+    {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          buckets: [
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0, resetTime: '2026-11-25T02:00:00Z' },
+            { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0, resetTime: '2026-11-20T05:00:00Z' },
+          ],
+        },
+      ],
+    },
+    { isCurrent: false, nowMs }
+  );
+  assert.equal(depletedWeekly.state, 'depleted');
 });
