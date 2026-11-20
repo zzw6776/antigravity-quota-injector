@@ -45,13 +45,81 @@ export function formatCacheHitRate(cachedTokens, inputTokens) {
   })}%`;
 }
 
+export function formatCny(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num < 0) return '¥0.000000';
+  const digits = num >= 1 ? 2 : num >= 0.01 ? 4 : 6;
+  return `¥${num.toLocaleString(undefined, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  })}`;
+}
+
+export function formatExchangeRate(value) {
+  const num = Number(value);
+  return Number.isFinite(num) && num > 0 ? num.toFixed(4) : '未知';
+}
+
+export function formatContextTier(value) {
+  return value === 'short' ? '短' : value === 'long' ? '长' : '标准';
+}
+
+export function formatUnitPrice(cost, component) {
+  if (!cost?.available) return '未知';
+  if (
+    cost.normalizedModel === 'multiple' ||
+    (Array.isArray(cost.contextTiers) && cost.contextTiers.length > 1)
+  ) {
+    return '未知';
+  }
+  const rate = Number(cost.rates?.[component]);
+  const exchangeRate = cost.currency === 'USD' ? Number(cost.exchangeRate?.rate) : 1;
+  if (!Number.isFinite(rate) || rate < 0 || !Number.isFinite(exchangeRate) || exchangeRate <= 0) {
+    return '未知';
+  }
+  return `${formatCny(rate * exchangeRate)}/M`;
+}
+
+export function formatPricingSourceNote(cost) {
+  if (!cost?.available) {
+    return cost?.reason || '当前模型没有可用价格';
+  }
+  const providers = Array.isArray(cost.providers) && cost.providers.length > 0
+    ? cost.providers
+    : cost.provider
+      ? [cost.provider]
+      : [];
+  const labelMap = {
+    google: 'Google Gemini 标准 API 价格',
+    anthropic: 'Anthropic Claude 标准 API 价格',
+    'vertex-maas': 'Google Vertex AI 标准 API 价格',
+  };
+  const baseLabel =
+    providers.length === 1
+      ? labelMap[providers[0]] || '标准 API 价格'
+      : '多供应商标准 API 价格';
+
+  if (cost.hasTieredContext) {
+    const tiers = Array.isArray(cost.contextTiers) ? cost.contextTiers : [];
+    const hasShort = tiers.includes('short');
+    const hasLong = tiers.includes('long');
+    const tierText = hasShort && hasLong ? '混合上下文' : hasLong ? '长上下文' : '短上下文';
+    return `${baseLabel} · ${tierText}`;
+  }
+  return baseLabel;
+}
+
 export function formatTurnSummary(turn) {
   if (!turn || Number(turn.totalTokens) <= 0) {
-    return turn?.completed ? '本轮未获取到 Token 数据' : '等待 Token 数据…';
+    return turn?.completed
+      ? '本轮未获取到 Token 数据 · 价格无法计算'
+      : '等待 Token 数据 · 价格待计算';
   }
   const cacheHit = formatCacheHitRate(turn.cachedInputTokens, turn.inputTokens);
   const firstToken = formatDurationMs(turn.firstTokenLatencyMs);
   const speed = formatRate(turn.outputSpeed);
+  const cost = turn.cost;
+  const priceText = cost?.available ? `价格 ${formatCny(cost.totalCny)}` : '价格暂不可算';
 
   return [
     `本轮 Token ${formatTokenCount(turn.totalTokens)}`,
@@ -59,6 +127,7 @@ export function formatTurnSummary(turn) {
     `累计 ${formatTokenCount(turn.cumulativeTotalTokens)}`,
     ...(firstToken ? [`首字 ${firstToken}`] : []),
     ...(speed ? [`速率 ${speed}`] : []),
+    priceText,
   ].join(' · ');
 }
 
@@ -195,9 +264,26 @@ export function formatResetCountdown(resetTimeIso, nowMs = Date.now()) {
   const days = Math.floor(totalMins / 1440);
   const hours = Math.floor((totalMins % 1440) / 60);
   const mins = totalMins % 60;
-  if (days > 0) return hours > 0 ? `${days}天${hours}小时后重置` : `${days}天后重置`;
-  if (hours > 0) return mins > 0 ? `${hours}小时${mins}分后重置` : `${hours}小时后重置`;
-  return mins > 0 ? `${mins}分钟后重置` : '<1分钟后重置';
+  let countdown = '';
+  if (days > 0) {
+    countdown = hours > 0 ? `${days}天${hours}小时` : `${days}天`;
+  } else if (hours > 0) {
+    countdown = mins > 0 ? `${hours}小时${mins}分` : `${hours}小时`;
+  } else {
+    countdown = mins > 0 ? `${mins}分钟` : '<1分钟';
+  }
+  const nowDate = new Date(nowMs);
+  const targetDate = new Date(ts);
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const hhmm = `${pad2(targetDate.getHours())}:${pad2(targetDate.getMinutes())}`;
+  const sameDay =
+    nowDate.getFullYear() === targetDate.getFullYear() &&
+    nowDate.getMonth() === targetDate.getMonth() &&
+    nowDate.getDate() === targetDate.getDate();
+  const targetStr = sameDay
+    ? hhmm
+    : `${targetDate.getMonth() + 1}/${targetDate.getDate()} ${hhmm}`;
+  return `${countdown} (${targetStr})`;
 }
 
 export function formatContextCompact(tokens) {
@@ -222,4 +308,127 @@ export function contextLevelClass(usedTokens, maxTokens) {
   if (ratio >= 0.9) return 'aq-lvl-crit';
   if (ratio >= 0.75) return 'aq-lvl-warn';
   return 'aq-lvl-ok';
+}
+
+/**
+ * Resolve a concise subscription label from Antigravity GetUserStatus payload.
+ * Prefers `userTier` over legacy `planStatus.planInfo.planName`, which frequently stays "Pro".
+ */
+export function resolveUserPlanLabel(userStatus) {
+  const tier =
+    userStatus?.userTier && typeof userStatus.userTier === 'object' ? userStatus.userTier : null;
+  if (tier) {
+    const id = String(tier.id || '').trim().toLowerCase();
+    const rawName = String(tier.description || tier.name || '').trim();
+    const upgradeText = String(tier.upgradeSubscriptionText || '').trim();
+
+    if (id === 'g1-ultra-lite-tier') return 'Ultra 5x';
+    if (id === 'g1-ultra-tier') return 'Ultra 20x';
+    if (id === 'g1-pro-tier') return 'Pro';
+    if (id === 'free-tier' || id === 'standard-tier') return 'Free';
+
+    if (id.includes('ultra')) {
+      if (
+        id.includes('lite') ||
+        /5x/i.test(id) ||
+        /higher\s+google\s+ai\s+ultra/i.test(upgradeText)
+      ) {
+        return 'Ultra 5x';
+      }
+      if (/20x/i.test(id)) {
+        return 'Ultra 20x';
+      }
+      if (rawName) {
+        return rawName.replace(/^Google\s+AI\s+/i, '').trim() || 'Ultra';
+      }
+      return 'Ultra';
+    }
+
+    if (rawName) {
+      if (
+        /^Google\s+AI\s+Ultra$/i.test(rawName) &&
+        /higher\s+google\s+ai\s+ultra/i.test(upgradeText)
+      ) {
+        return 'Ultra 5x';
+      }
+      const compact = rawName.replace(/^Google\s+AI\s+/i, '').trim();
+      return compact || rawName;
+    }
+
+    if (id) {
+      return id.replace(/-tier$/i, '');
+    }
+  }
+
+  return String(userStatus?.planStatus?.planInfo?.planName || '').trim();
+}
+
+/**
+ * Determine whether an account's primary Gemini model quota is currently available
+ * (considering resetTime expiration for cached snapshots of non-active accounts).
+ */
+export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs = Date.now() } = {}) {
+  const groups = Array.isArray(quota?.groups) ? quota.groups : [];
+  if (groups.length === 0) {
+    return { state: 'unknown', label: '暂无 Gemini 额度记录' };
+  }
+
+  const pickValidBuckets = (group) =>
+    orderQuotaBuckets(
+      (Array.isArray(group?.buckets) ? group.buckets : []).filter(
+        (b) => b && !b.disabled && Number.isFinite(Number(b.remainingFraction))
+      )
+    );
+
+  const primary =
+    groups.find((g) => {
+      const name = String(g?.displayName || '').trim();
+      if (/^gemini\s*models$/i.test(name)) return pickValidBuckets(g).length > 0;
+      const buckets = pickValidBuckets(g);
+      return buckets.some((b) => /^gemini-(?:5h|weekly)$/i.test(String(b.bucketId || '').trim()));
+    }) ||
+    groups.find((g) => {
+      const name = String(g?.displayName || '').trim();
+      return /gemini/i.test(name) && !/argon/i.test(name) && pickValidBuckets(g).length > 0;
+    }) ||
+    groups.find((g) => /gemini/i.test(String(g?.displayName || '')) && pickValidBuckets(g).length > 0);
+
+  if (!primary) {
+    return { state: 'unknown', label: '暂无 Gemini 额度记录' };
+  }
+
+  const buckets = pickValidBuckets(primary);
+  if (buckets.length === 0) {
+    return { state: 'unknown', label: '暂无 Gemini 额度记录' };
+  }
+
+  let allAvailable = true;
+  let anyInferredReset = false;
+  const parts = [];
+  for (const b of buckets) {
+    const win = String(b.window || '').toLowerCase();
+    const winLabel = win === '5h' ? '5h' : win === 'weekly' ? '周' : String(b.displayName || b.bucketId || '配额');
+    const resetTs = Date.parse(String(b.resetTime || ''));
+    const expired = !isCurrent && Number.isFinite(resetTs) && resetTs <= nowMs;
+    const frac = Number(b.remainingFraction);
+    if (expired) {
+      anyInferredReset = true;
+      parts.push(`${winLabel} 已重置`);
+    } else {
+      if (frac < 0.005) allAvailable = false;
+      parts.push(`${winLabel} ${formatRemainingPercent(frac)}`);
+    }
+  }
+
+  const detail = parts.join(' / ');
+  if (allAvailable) {
+    return {
+      state: 'available',
+      label: anyInferredReset ? `Gemini 预计可用（${detail}）` : `Gemini 可用（${detail}）`,
+    };
+  }
+  return {
+    state: 'depleted',
+    label: `Gemini 已用完（${detail}）`,
+  };
 }

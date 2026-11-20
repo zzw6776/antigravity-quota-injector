@@ -176,7 +176,7 @@ test('installWindowsAppEntry and uninstallWindowsAppEntry manage node-path.txt a
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-test('launchAntigravityExecutable launches visible Start-Process on win32 and returns helpful reason when missing', () => {
+test('launchAntigravityExecutable passes --remote-debugging-port=0 on win32 & darwin and returns helpful reason when missing', () => {
   const missing = launchAntigravityExecutable({
     platform: 'win32',
     env: {},
@@ -202,8 +202,25 @@ test('launchAntigravityExecutable launches visible Start-Process on win32 and re
   const encodedIdx = invokedArgs.args.indexOf('-EncodedCommand');
   assert.equal(
     invokedArgs.args[encodedIdx + 1],
-    encodePowerShellCommand(`Start-Process -FilePath '${exe}' -WindowStyle Normal`)
+    encodePowerShellCommand(
+      `Start-Process -FilePath '${exe}' -ArgumentList @('--remote-debugging-port=0') -WindowStyle Normal`
+    )
   );
+
+  let macCall = null;
+  const macOk = launchAntigravityExecutable({
+    platform: 'darwin',
+    existsSyncFn: (p) => p === '/Applications/Antigravity.app',
+    spawnFn: (cmd, args) => {
+      macCall = { cmd, args };
+      return { unref() {} };
+    },
+  });
+  assert.equal(macOk.launched, true);
+  assert.deepEqual(macCall, {
+    cmd: 'open',
+    args: ['-a', '/Applications/Antigravity.app', '--args', '--remote-debugging-port=0'],
+  });
 });
 
 test('matchesQuotaInjectorCommand matches both spaced and hyphenated injector processes without false positives', () => {

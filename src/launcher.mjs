@@ -66,7 +66,9 @@ function computeDevRuntimeIdentity() {
       path.join(srcDir, 'file-logger.mjs'),
       path.join(srcDir, 'macos-dev-console.mjs'),
       path.join(srcDir, 'accounts.mjs'),
+      path.join(srcDir, 'conversation-groups.mjs'),
       path.join(srcDir, 'proto-metrics.mjs'),
+      path.join(srcDir, 'token-pricing.mjs'),
       path.join(srcDir, 'app-update', 'manager.mjs'),
       path.join(srcDir, 'app-update', 'releases.mjs'),
       path.join(srcDir, 'app-update', 'download.mjs'),
@@ -100,7 +102,14 @@ async function ensureAntigravityRunning(paths, userCfg, { allowMissingError = fa
     }
   }
   if (running) {
-    console.log('[launcher] Antigravity 已在运行，直接附着注入');
+    const activePort = readDebugPort(paths.portFile);
+    if (!activePort) {
+      console.warn(
+        '[launcher] 检测到 Antigravity 已在运行但未开启远程调试端口（Antigravity 2.33+ 需带 --remote-debugging-port=0 启动），当前无法注入；请完全退出 Antigravity 后通过本注入器启动'
+      );
+    } else {
+      console.log('[launcher] Antigravity 已在运行，直接附着注入');
+    }
     return { ok: true, launched: false };
   }
 

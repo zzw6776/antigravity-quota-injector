@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
+import { resolveContextTier } from './token-pricing.mjs';
+
 const textDecoder = new TextDecoder('utf-8', { fatal: false });
 const UUID_RE = /^[0-9a-f-]{36}$/i;
 
@@ -162,11 +164,13 @@ export function parseGenMetadataRow(row) {
   const stream = Number(streamMap.get(1) || 0) + Number(streamMap.get(2) || 0) / 1e9;
   const maxCtx = Number(ctxWin.get(4) || 0);
   const model = readUtf8(chat.get(19)).trim();
+  const modelLabel = readUtf8(chat.get(21)).trim();
 
   return {
     idx: row.idx,
     stepIds,
     model,
+    modelLabel,
     inTok,
     cacheRead,
     outTok,
@@ -256,7 +260,9 @@ export function parseConversationTurns(dbPath, cascadeId = '') {
       startStepIdx,
       calls: 0,
       callDetails: [],
+      segments: [],
       model: '',
+      modelLabel: '',
       uncachedInputTokens: 0,
       cachedInputTokens: 0,
       inputTokens: 0,
@@ -290,7 +296,12 @@ export function parseConversationTurns(dbPath, cascadeId = '') {
 
       const turn = buckets[turnIdx];
       turn.calls += 1;
-      if (parsed.model) turn.model = parsed.model;
+      if (parsed.model) {
+        turn.model = parsed.model;
+      } else if (!turn.model && parsed.modelLabel) {
+        turn.model = parsed.modelLabel;
+      }
+      if (parsed.modelLabel) turn.modelLabel = parsed.modelLabel;
       turn.uncachedInputTokens += parsed.inTok;
       turn.cachedInputTokens += parsed.cacheRead;
       const callInput = parsed.inTok + parsed.cacheRead;
@@ -301,6 +312,35 @@ export function parseConversationTurns(dbPath, cascadeId = '') {
       turn.totalTokens += callInput + parsed.outTok;
       turn.contextTokens = callInput;
       if (parsed.maxCtx > 0) turn.maxContextTokens = parsed.maxCtx;
+
+      const segModel = parsed.model || '';
+      const segLabel = parsed.modelLabel || '';
+      const contextTier = resolveContextTier(segModel || turn.model, callInput, segLabel || turn.modelLabel);
+      const lastSeg = turn.segments.at(-1);
+      if (lastSeg && lastSeg.model === segModel && lastSeg.modelLabel === segLabel && lastSeg.contextTier === contextTier) {
+        lastSeg.usage.inputTokens += callInput;
+        lastSeg.usage.uncachedInputTokens += parsed.inTok;
+        lastSeg.usage.cachedInputTokens += parsed.cacheRead;
+        lastSeg.usage.outputTokens += parsed.outTok;
+        lastSeg.usage.thinkingTokens += parsed.thinkTok;
+        lastSeg.usage.responseTokens += parsed.respTok;
+        lastSeg.usage.totalTokens += callInput + parsed.outTok;
+      } else {
+        turn.segments.push({
+          model: segModel,
+          modelLabel: segLabel,
+          contextTier,
+          usage: {
+            inputTokens: callInput,
+            uncachedInputTokens: parsed.inTok,
+            cachedInputTokens: parsed.cacheRead,
+            outputTokens: parsed.outTok,
+            thinkingTokens: parsed.thinkTok,
+            responseTokens: parsed.respTok,
+            totalTokens: callInput + parsed.outTok,
+          },
+        });
+      }
 
       if (parsed.ttft > 0) {
         turn.ttftTotalMs += parsed.ttft * 1000;
@@ -329,7 +369,8 @@ export function parseConversationTurns(dbPath, cascadeId = '') {
       );
       turn.callDetails.push({
         callIndex: turn.calls,
-        model: parsed.model || '',
+        model: parsed.model || parsed.modelLabel || '',
+        modelLabel: parsed.modelLabel || '',
         ttftMs: Math.round(parsed.ttft * 1000),
         streamMs: Math.round(parsed.stream * 1000),
         outTok: parsed.outTok,

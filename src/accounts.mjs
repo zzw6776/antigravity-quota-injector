@@ -191,6 +191,80 @@ export function writeAccountsStore(accountsFile, store) {
   atomicWriteFile(accountsFile, `${JSON.stringify({ version: 1, accounts: store.accounts || [] }, null, 2)}\n`, 0o600);
 }
 
+export function sanitizeQuotaSnapshot(rawQuota) {
+  if (!rawQuota || typeof rawQuota !== 'object') return null;
+  const rawGroups = Array.isArray(rawQuota.groups) ? rawQuota.groups : [];
+  if (rawGroups.length === 0) return null;
+
+  const groups = [];
+  for (const g of rawGroups) {
+    if (!g || typeof g !== 'object') continue;
+    const displayName = String(g.displayName || '').trim();
+    const rawBuckets = Array.isArray(g.buckets) ? g.buckets : [];
+    const buckets = [];
+    for (const b of rawBuckets) {
+      if (!b || typeof b !== 'object' || b.disabled) continue;
+      const frac = Number(b.remainingFraction);
+      if (!Number.isFinite(frac)) continue;
+      buckets.push({
+        bucketId: String(b.bucketId || '').trim(),
+        displayName: String(b.displayName || '').trim(),
+        window: String(b.window || '').trim(),
+        remainingFraction: Math.max(0, Math.min(1, frac)),
+        resetTime: String(b.resetTime || '').trim(),
+      });
+    }
+    if (displayName || buckets.length > 0) {
+      groups.push({ displayName: displayName || '模型分组', buckets });
+    }
+  }
+  if (groups.length === 0) return null;
+
+  const parsedUpdated = Date.parse(String(rawQuota.updatedAt || ''));
+  const updatedAt = Number.isFinite(parsedUpdated)
+    ? new Date(parsedUpdated).toISOString()
+    : new Date().toISOString();
+  return { updatedAt, groups };
+}
+
+function quotaSnapshotDataSignature(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.groups)) return '';
+  return JSON.stringify(snapshot.groups);
+}
+
+/**
+ * Update only the cached quota snapshot for an existing saved account without touching keychain credentials.
+ */
+export function updateAccountQuotaSnapshot({ accountsFile, email, quota }) {
+  const normEmail = String(email || '').trim().toLowerCase();
+  if (!normEmail) return { updated: false, changed: false };
+  const snapshot = sanitizeQuotaSnapshot(quota);
+  if (!snapshot) return { updated: false, changed: false };
+
+  const store = readAccountsStore(accountsFile);
+  const idx = store.accounts.findIndex(
+    (a) => String(a?.email || '').trim().toLowerCase() === normEmail || String(a?.id || '').toLowerCase() === normEmail
+  );
+  if (idx < 0) return { updated: false, changed: false };
+
+  const prev = store.accounts[idx];
+  const prevSig = quotaSnapshotDataSignature(prev?.quotaSnapshot);
+  const nextSig = quotaSnapshotDataSignature(snapshot);
+  const prevAt = Date.parse(String(prev?.quotaSnapshot?.updatedAt || ''));
+  const nextAt = Date.parse(snapshot.updatedAt);
+  const changed = prevSig !== nextSig;
+  if (!changed && Number.isFinite(prevAt) && Number.isFinite(nextAt) && nextAt - prevAt < 60_000) {
+    return { updated: false, changed: false };
+  }
+
+  store.accounts[idx] = {
+    ...prev,
+    quotaSnapshot: snapshot,
+  };
+  writeAccountsStore(accountsFile, store);
+  return { updated: true, changed, snapshot };
+}
+
 /**
  * Return UI-safe account summaries without exposing credentials or raw tokens.
  */
@@ -206,6 +280,7 @@ export function listAccounts(accountsFile, activeEmail = '') {
       planName: String(item?.planName || '').trim(),
       savedAt: String(item?.savedAt || ''),
       active: Boolean(normActive && email.toLowerCase() === normActive),
+      quotaSnapshot: sanitizeQuotaSnapshot(item?.quotaSnapshot),
     };
   });
 }
@@ -343,6 +418,7 @@ export function snapshotCurrentAccount({
   accountsFile,
   appSupportDir,
   profile = {},
+  quota = null,
   readSecretFn = readKeychainSecret,
 }) {
   const keychainSecret = readSecretFn();
@@ -374,6 +450,9 @@ export function snapshotCurrentAccount({
     (a) => a.id === id || String(a.email || '').toLowerCase() === email.toLowerCase()
   );
   const prev = idx >= 0 ? store.accounts[idx] : null;
+  const quotaSnapshot =
+    (profileMatchesEmail ? sanitizeQuotaSnapshot(quota) : null) ||
+    sanitizeQuotaSnapshot(prev?.quotaSnapshot);
   const entry = {
     id,
     email,
@@ -384,6 +463,7 @@ export function snapshotCurrentAccount({
     credentialUserScope,
     appStorageAuth,
     vscdbAuth,
+    ...(quotaSnapshot ? { quotaSnapshot } : {}),
   };
 
   if (idx >= 0) {
@@ -511,23 +591,47 @@ export async function waitForAntigravityLaunch({ channel = 'stable', timeoutMs =
   return false;
 }
 
+async function relaunchAntigravityWithRetry({
+  channel = 'stable',
+  stateDir = '',
+  launchFn = launchAntigravityApp,
+  waitLaunchFn = waitForAntigravityLaunch,
+} = {}) {
+  launchFn({ channel, stateDir });
+  const firstOk = await waitLaunchFn({ channel, timeoutMs: 4000 });
+  if (firstOk) return true;
+  await new Promise((r) => setTimeout(r, 600));
+  launchFn({ channel, stateDir });
+  return Boolean(await waitLaunchFn({ channel, timeoutMs: 6000 }));
+}
+
 export async function switchAccountWithRestart({
   accountId,
   accountsFile,
   appSupportDir,
   channel = 'stable',
   currentProfile = null,
+  currentQuota = null,
+  platform = process.platform,
+  quitFn = quitAndWaitAntigravity,
+  launchFn = launchAntigravityApp,
+  waitLaunchFn = waitForAntigravityLaunch,
 }) {
-  const support = getAccountSwitchSupport();
+  const support = getAccountSwitchSupport(platform);
   if (!support.supported) {
     throw new Error(support.reason);
   }
   const stateDir = accountsFile ? path.dirname(accountsFile) : '';
 
-  // Best-effort snapshot of current active account so credentials are never lost
+  // Best-effort snapshot of current active account so credentials and latest quota are never lost
   if (currentProfile?.email) {
     try {
-      snapshotCurrentAccount({ accountsFile, appSupportDir, profile: currentProfile });
+      snapshotCurrentAccount({
+        accountsFile,
+        appSupportDir,
+        profile: currentProfile,
+        quota: currentQuota,
+      });
     } catch {}
   }
 
@@ -541,18 +645,25 @@ export async function switchAccountWithRestart({
     throw new Error('目标账号快照不存在或已损坏');
   }
 
-  const exited = await quitAndWaitAntigravity({ channel });
+  const exited = await quitFn({ channel });
   if (!exited) {
     try {
-      launchAntigravityApp({ channel, stateDir });
+      launchFn({ channel, stateDir });
     } catch {}
     throw new Error('Antigravity 未能及时退出，已取消写入凭据');
   }
 
   const applied = applyAccountSnapshot({ accountId, accountsFile, appSupportDir });
   await new Promise((r) => setTimeout(r, 250));
-  launchAntigravityApp({ channel, stateDir });
-  await waitForAntigravityLaunch({ channel });
+  const relaunched = await relaunchAntigravityWithRetry({
+    channel,
+    stateDir,
+    launchFn,
+    waitLaunchFn,
+  });
+  if (!relaunched) {
+    throw new Error('账号凭据已切换，但自动重新打开 Antigravity 超时，请手动启动注入器打开');
+  }
   return applied;
 }
 
@@ -561,6 +672,7 @@ export async function prepareNewAccountWithRestart({
   appSupportDir,
   channel = 'stable',
   currentProfile = null,
+  currentQuota = null,
   platform = process.platform,
   readSecretFn = readKeychainSecret,
   deleteSecretFn = deleteKeychainSecret,
@@ -580,6 +692,7 @@ export async function prepareNewAccountWithRestart({
       accountsFile,
       appSupportDir,
       profile: currentProfile || {},
+      quota: currentQuota,
       readSecretFn,
     });
   } catch {}
@@ -594,7 +707,14 @@ export async function prepareNewAccountWithRestart({
 
   clearCurrentAccountAuth({ appSupportDir, deleteSecretFn });
   await new Promise((r) => setTimeout(r, 250));
-  launchFn({ channel, stateDir });
-  await waitLaunchFn({ channel });
+  const relaunched = await relaunchAntigravityWithRetry({
+    channel,
+    stateDir,
+    launchFn,
+    waitLaunchFn,
+  });
+  if (!relaunched) {
+    throw new Error('已清理当前登录状态，但自动重新打开 Antigravity 超时，请手动启动注入器打开');
+  }
   return savedEntry;
 }
