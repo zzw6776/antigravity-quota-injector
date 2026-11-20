@@ -25,6 +25,7 @@
   }
 
   const INJECT_VERSION = '__AQ_VERSION__';
+  const INSTANCE_TOKEN = `${INJECT_VERSION}:${Math.random().toString(36).slice(2, 10)}`;
   const CODEX_THEME_CSS = __AQ_CODEX_THEME_CSS__;
   if (window.__aq_version === INJECT_VERSION && document.getElementById('aq-style')) {
     return;
@@ -118,9 +119,40 @@
       } catch {}
       return false;
     })(),
+    foldersCollapsed: (() => {
+      try {
+        const raw = localStorage.getItem('aq_smart_groups_collapsed_v1');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          return Boolean(parsed?.folders);
+        }
+      } catch {}
+      return false;
+    })(),
+    recentCollapsed: (() => {
+      try {
+        const raw = localStorage.getItem('aq_smart_groups_collapsed_v1');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          return Boolean(parsed?.recent);
+        }
+      } catch {}
+      return false;
+    })(),
     smartStableMap: new Map(),
+    smartNextSeq: 1,
     smartGraceTimer: null,
     localViewedAtById: Object.create(null),
+    sidebarTab: (() => {
+      try {
+        return localStorage.getItem('aq_sidebar_tab_v1') === 'projects' ? 'projects' : 'groups';
+      } catch {
+        return 'groups';
+      }
+    })(),
+    cachedProjSplit: null,
+    projScrollEl: null,
+    onProjScroll: null,
     groupsBodyHeight: (() => {
       try {
         const v = Number(localStorage.getItem('aq_groups_body_height_v1'));
@@ -132,15 +164,34 @@
     groupResizeDrag: null,
     groupResizeSnapTimer: null,
     convDrag: null,
+    convDragLongPressTimer: null,
     convDragExpandTimer: null,
     convDragHoverGroupTimer: null,
     convDragHoverGroupId: '',
+    autoUnpinnedCids: (() => {
+      try {
+        const raw = localStorage.getItem('aq_auto_unpinned_cids_v1');
+        const arr = raw ? JSON.parse(raw) : [];
+        return new Set(
+          Array.isArray(arr)
+            ? arr.map((s) => String(s || '').trim().toLowerCase()).filter(Boolean)
+            : []
+        );
+      } catch {
+        return new Set();
+      }
+    })(),
     pendingUnpinCascadeIds: new Set(),
+    pendingRestorePinCascadeIds: new Set(),
     suppressGroupClickUntil: 0,
     trajMetaById: Object.create(null),
     trajFetchedAt: 0,
     lastMetaSyncKey: '',
     isTranslating: false,
+    lastNativeMenuConv: null,
+    contextMenuPatched: false,
+    contextMenuProto: null,
+    contextMenuProviderFiber: null,
     cleanups: [],
   };
 
@@ -814,20 +865,239 @@
       /* Sidebar custom conversation groups */
       #aq-conv-groups {
         position: relative;
-        flex-shrink: 0;
-        margin-top: -7px;
-        padding: 6px 8px 6px;
-        border-top: 1px solid rgba(127, 127, 127, 0.16);
-        border-bottom: 1px solid rgba(127, 127, 127, 0.16);
+        flex: 1 1 0%;
+        min-height: 0;
+        min-width: 0;
+        margin-top: 0;
+        padding: 2px 8px 6px;
+        display: flex;
+        flex-direction: column;
         font-size: 13px;
         line-height: 1.35;
+        letter-spacing: -0.006em;
         user-select: none;
+        overflow: hidden;
       }
-      .aq-grp-resizer {
+      .aq-grp-active-sec,
+      .aq-grp-top-wrap,
+      .aq-grp-recent-sec,
+      .aq-proj-card {
+        border-radius: 10px;
+        background: var(--background, #ffffff);
+        border: 1px solid rgba(24, 24, 27, 0.075);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.025);
+      }
+      .bg-sidebar [data-testid="sidebar-navigation-items"] {
+        gap: 2px !important;
+      }
+      .bg-sidebar > .px-2 + div.h-px,
+      .bg-sidebar > div.h-px:has(+ div > [data-testid="settings-button"]) {
+        background-color: rgba(24, 24, 27, 0.068) !important;
+      }
+      .bg-sidebar > .px-2 + div.h-px {
+        margin: 8px 10px 0 !important;
+      }
+      .bg-sidebar > div.h-px:has(+ div > [data-testid="settings-button"]) {
+        margin: 6px 10px 2px !important;
+      }
+      .bg-sidebar > div:has(> [data-testid="settings-button"]) {
+        margin: 2px 0 0 !important;
+        padding: 4px 8px 0 !important;
+      }
+      .bg-sidebar [data-testid="conversation-list-sidebar"] {
+        padding: 0 !important;
+        --sidebar: var(--background, #ffffff);
+        --color-sidebar: var(--background, #ffffff);
+      }
+      .bg-sidebar [data-testid="conversation-list-sidebar"] > div > div[data-index] {
+        padding-left: 4px !important;
+        padding-right: 4px !important;
+        box-sizing: border-box !important;
+        z-index: 1;
+      }
+      .aq-proj-card {
         position: absolute;
         left: 0;
         right: 0;
-        bottom: -5px;
+        z-index: 0;
+        pointer-events: none;
+        box-sizing: border-box;
+      }
+      body:not(.dark):not(.theme-dark) .bg-sidebar [data-testid="conversation-list-sidebar"] .bg-sidebar {
+        background-color: transparent !important;
+      }
+      body:not(.dark):not(.theme-dark) .bg-sidebar [data-testid="conversation-list-sidebar"] [data-sidebar-section-drop-id="pinned"][style*="sticky"],
+      body:not(.dark):not(.theme-dark) .bg-sidebar [data-testid="conversation-list-sidebar"] [data-sidebar-section-drop-id="main-section-header"][style*="sticky"] {
+        background-color: var(--background, #ffffff) !important;
+        clip-path: inset(1px 1px 0 1px);
+      }
+      .aq-grp-active-sec,
+      .aq-grp-top-wrap,
+      .aq-grp-recent-sec {
+        padding: 4px 4px 5px;
+      }
+      .aq-grp-active-sec {
+        flex-shrink: 0;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        margin-bottom: 8px;
+      }
+      .aq-grp-active-sec.is-empty {
+        display: none;
+      }
+      .aq-grp-active-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 9999px;
+        flex-shrink: 0;
+        background: #3b82f6;
+        box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.16);
+      }
+      .aq-grp-active-sec .aq-smart-list {
+        max-height: clamp(72px, 24vh, 210px);
+        overflow-y: auto;
+      }
+      .aq-grp-top-wrap {
+        position: relative;
+        flex: 0 1 auto;
+        min-width: 0;
+        padding: 4px 4px 5px;
+        margin-bottom: 8px;
+        display: flex;
+        flex-direction: column;
+      }
+      .aq-grp-root-add-btn {
+        appearance: none;
+        width: 100%;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        height: 28px;
+        margin-top: 3px;
+        padding: 0 8px;
+        box-sizing: border-box;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--muted-foreground, #71717a);
+        font: inherit;
+        font-size: 12.5px;
+        font-weight: 400;
+        cursor: pointer;
+        text-align: left;
+        transition: background-color 0.12s ease, color 0.12s ease;
+      }
+      .aq-grp-root-add-btn:hover {
+        background: var(--sidebar-muted, rgba(24, 24, 27, 0.04));
+        color: var(--foreground, #18181b);
+      }
+      .aq-grp-empty-cta {
+        appearance: none;
+        width: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        padding: 7px 10px;
+        margin: 2px 0;
+        border-radius: 8px;
+        border: 1px dashed rgba(24, 24, 27, 0.14);
+        background: rgba(24, 24, 27, 0.02);
+        color: var(--muted-foreground, #71717a);
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+        transition: border-color 0.14s ease, color 0.14s ease, background-color 0.14s ease;
+      }
+      .aq-grp-empty-cta:hover {
+        border-color: rgba(24, 24, 27, 0.28);
+        background: rgba(24, 24, 27, 0.04);
+        color: var(--foreground, #18181b);
+      }
+      .aq-grp-recent-sec {
+        flex: 1 1 0%;
+        min-height: 72px;
+        min-width: 0;
+        margin-top: 0;
+        padding: 4px 4px 5px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      .aq-grp-recent-sec:has(> .aq-smart-children.is-collapsed) {
+        flex: 0 0 auto;
+        min-height: 0;
+      }
+      .aq-grp-recent-sec > .aq-grp-hdr {
+        flex-shrink: 0;
+      }
+      .aq-grp-recent-sec > .aq-smart-children {
+        flex: 1 1 0%;
+        min-height: 0;
+        overflow: hidden;
+      }
+      .aq-grp-recent-sec > .aq-smart-children:not(.is-collapsed) > .aq-smart-children-inner {
+        overflow-x: hidden;
+        overflow-y: auto;
+      }
+      .aq-grp-recent-sec > .aq-smart-children.is-collapsed {
+        flex: 0 0 auto;
+        overflow: hidden;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .bg-sidebar > .px-2 + div.h-px,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .bg-sidebar > div.h-px:has(+ div > [data-testid="settings-button"]) {
+        background-color: rgba(255, 255, 255, 0.09) !important;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) :is(
+        .aq-grp-active-sec,
+        .aq-grp-top-wrap,
+        .aq-grp-recent-sec,
+        .aq-proj-card
+      ) {
+        background: #19191f;
+        border-color: rgba(255, 255, 255, 0.085);
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .bg-sidebar [data-testid="conversation-list-sidebar"],
+      body:is(.dark, .theme-dark) .bg-sidebar [data-testid="conversation-list-sidebar"] {
+        --sidebar: #19191f;
+        --color-sidebar: #19191f;
+      }
+      body:is(.dark, .theme-dark) .bg-sidebar [data-testid="conversation-list-sidebar"] .bg-sidebar,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .bg-sidebar [data-testid="conversation-list-sidebar"] .bg-sidebar {
+        background-color: transparent !important;
+      }
+      body:is(.dark, .theme-dark) .bg-sidebar [data-testid="conversation-list-sidebar"] [data-sidebar-section-drop-id="pinned"][style*="sticky"],
+      body:is(.dark, .theme-dark) .bg-sidebar [data-testid="conversation-list-sidebar"] [data-sidebar-section-drop-id="main-section-header"][style*="sticky"],
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .bg-sidebar [data-testid="conversation-list-sidebar"] [data-sidebar-section-drop-id="pinned"][style*="sticky"],
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .bg-sidebar [data-testid="conversation-list-sidebar"] [data-sidebar-section-drop-id="main-section-header"][style*="sticky"] {
+        background-color: #19191f !important;
+        clip-path: inset(1px 1px 0 1px);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-active-dot {
+        background: #60a5fa;
+        box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.2);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-root-add-btn:hover {
+        background: rgba(255, 255, 255, 0.055);
+        color: #f4f4f7;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-empty-cta {
+        border-color: rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.025);
+        color: #9a9aa6;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-empty-cta:hover {
+        border-color: rgba(255, 255, 255, 0.28);
+        background: rgba(255, 255, 255, 0.055);
+        color: #f4f4f7;
+      }
+      .aq-grp-resizer {
+        position: absolute;
+        left: 8px;
+        right: 8px;
+        bottom: -9px;
         height: 9px;
         cursor: row-resize;
         z-index: 6;
@@ -943,8 +1213,9 @@
       }
       .aq-grp-body {
         height: auto;
-        max-height: clamp(180px, 40vh, 380px);
+        max-height: clamp(180px, 44vh, 400px);
         overflow-y: auto;
+        min-width: 0;
         display: flex;
         flex-direction: column;
         gap: 2px;
@@ -968,13 +1239,15 @@
         box-shadow: inset 0 0 0 1.5px rgba(37, 99, 235, 0.45);
         border-radius: 8px;
       }
-      .aq-grp-sec-hdr.aq-grp-drag-root {
+      .aq-grp-sec-hdr.aq-grp-drag-root,
+      .aq-grp-hdr.is-smart.aq-grp-drag-root {
         background: rgba(37, 99, 235, 0.1);
         box-shadow: inset 0 0 0 1.5px rgba(37, 99, 235, 0.45);
-        border-radius: 6px;
+        border-radius: 8px;
         color: #2563eb;
       }
-      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-sec-hdr.aq-grp-drag-root {
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-sec-hdr.aq-grp-drag-root,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-hdr.is-smart.aq-grp-drag-root {
         background: rgba(96, 165, 250, 0.14);
         box-shadow: inset 0 0 0 1.5px rgba(96, 165, 250, 0.5);
         color: #93c5fd;
@@ -983,13 +1256,23 @@
         display: flex;
         flex-direction: column;
         gap: 1px;
+        min-width: 0;
         border-radius: 8px;
+      }
+      .aq-grp-block.is-dragging > .aq-grp-hdr {
+        opacity: 0.45;
       }
       .aq-grp-block.aq-grp-drag-before > .aq-grp-hdr {
         box-shadow: inset 0 2px 0 0 #2563eb;
       }
+      .aq-grp-block.aq-grp-drag-after > .aq-grp-hdr {
+        box-shadow: inset 0 -2px 0 0 #2563eb;
+      }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-block.aq-grp-drag-before > .aq-grp-hdr {
         box-shadow: inset 0 2px 0 0 #60a5fa;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-block.aq-grp-drag-after > .aq-grp-hdr {
+        box-shadow: inset 0 -2px 0 0 #60a5fa;
       }
       .aq-grp-block.aq-grp-drop-target > .aq-grp-hdr,
       .aq-grp-block.aq-grp-drag-inside > .aq-grp-hdr {
@@ -1022,19 +1305,27 @@
       .aq-grp-hdr {
         display: flex;
         align-items: center;
-        gap: 5px;
+        gap: 6px;
         height: 28px;
-        padding: 0 6px;
+        padding: 0 8px;
         box-sizing: border-box;
-        border-radius: 7px;
+        border-radius: 8px;
         cursor: pointer;
-        color: var(--secondary-foreground, #3f3f46);
-        font-size: 12.5px;
+        color: var(--foreground, #0f172a);
+        font-size: 13px;
         font-weight: 500;
+        letter-spacing: -0.006em;
+      }
+      .aq-grp-hdr.is-smart {
+        height: 26px;
+        font-size: 11.5px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+        color: var(--muted-foreground, #64748b);
       }
       .aq-grp-hdr:hover {
-        background: var(--sidebar-muted, rgba(127, 127, 127, 0.1));
-        color: var(--foreground, #18181b);
+        background: var(--sidebar-muted, rgba(15, 23, 42, 0.048));
+        color: var(--foreground, #0f172a);
       }
       .aq-grp-chev {
         width: 12px;
@@ -1042,7 +1333,7 @@
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        color: var(--muted-foreground, #71717a);
+        color: var(--muted-foreground, #64748b);
         transition: transform 0.12s ease;
       }
       .aq-grp-chev.is-open {
@@ -1053,7 +1344,11 @@
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        color: var(--muted-foreground, #71717a);
+        color: var(--muted-foreground, #64748b);
+      }
+      .aq-grp-folder-ico svg {
+        width: 13px;
+        height: 13px;
       }
       .aq-grp-name {
         flex: 1;
@@ -1075,7 +1370,8 @@
         flex-shrink: 0;
       }
       .aq-grp-hdr:hover .aq-grp-actions,
-      .aq-grp-hdr.has-confirm .aq-grp-actions {
+      .aq-grp-hdr.has-confirm .aq-grp-actions,
+      .aq-grp-actions.is-always {
         display: inline-flex;
       }
       .aq-grp-hdr:hover .aq-grp-count,
@@ -1091,8 +1387,11 @@
       }
       .aq-grp-smart-sep {
         height: 1px;
-        margin: 4px 4px;
-        background: rgba(127, 127, 127, 0.14);
+        margin: 4px 6px;
+        background: rgba(15, 23, 42, 0.055);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-smart-sep {
+        background: rgba(226, 232, 240, 0.07);
       }
       .aq-smart-children {
         display: grid;
@@ -1149,12 +1448,17 @@
         display: flex;
         flex-direction: column;
         gap: 1px;
-        margin-left: 11px;
-        padding-left: 6px;
-        border-left: 1px solid rgba(127, 127, 127, 0.16);
+        min-width: 0;
+        margin-left: 12px;
+        padding-left: 2px;
+      }
+      .aq-grp-active-sec .aq-grp-children,
+      .aq-grp-recent-sec .aq-grp-children {
+        margin-left: 0;
+        padding-left: 0;
       }
       .aq-gm-tree-branch {
-        color: var(--muted-foreground, #71717a);
+        color: var(--muted-foreground, #64748b);
         opacity: 0.7;
         font-size: 11px;
         flex-shrink: 0;
@@ -1165,25 +1469,26 @@
         display: flex;
         align-items: center;
         gap: 6px;
-        padding: 4px 6px 4px 10px;
+        padding: 5px 8px;
         min-height: 32px;
         box-sizing: border-box;
         border-radius: 8px;
         cursor: pointer;
-        color: var(--secondary-foreground, #3f3f46);
+        color: var(--secondary-foreground, #334155);
+        font-weight: 400;
         min-width: 0;
       }
       .aq-grp-item.is-dragging {
         opacity: 0.45;
       }
       .aq-grp-item:hover {
-        background: var(--sidebar-muted, rgba(127, 127, 127, 0.1));
-        color: var(--foreground, #18181b);
+        background: var(--sidebar-muted, rgba(15, 23, 42, 0.048));
+        color: var(--foreground, #0f172a);
       }
       .aq-grp-item.is-active {
-        background: var(--sidebar-secondary, rgba(127, 127, 127, 0.16));
-        color: var(--foreground, #18181b);
-        font-weight: 500;
+        background: var(--sidebar-secondary, rgba(15, 23, 42, 0.088));
+        color: var(--foreground, #0f172a);
+        font-weight: 400;
       }
       .aq-grp-item-main {
         flex: 1;
@@ -1196,18 +1501,33 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-        font-size: 12.5px;
+        font-size: 13px;
         line-height: 1.35;
+        letter-spacing: -0.006em;
+        font-weight: 400;
+      }
+      .aq-grp-item.is-active .aq-grp-item-title {
+        font-weight: 500;
+        color: var(--foreground, #0f172a);
       }
       .aq-grp-item-sub {
         display: inline-flex;
         align-items: center;
         gap: 3px;
         font-size: 11px;
-        color: var(--muted-foreground, #71717a);
+        line-height: 1.25;
+        font-weight: 400 !important;
+        color: var(--muted-foreground, #64748b);
+        opacity: 0.9;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      .aq-grp-item-sub svg {
+        width: 11px;
+        height: 11px;
+        flex-shrink: 0;
+        opacity: 0.78;
       }
       .aq-grp-item-sub > span {
         overflow: hidden;
@@ -1217,12 +1537,15 @@
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 16px;
-        height: 16px;
+        width: 22px;
+        height: 22px;
         flex-shrink: 0;
-        color: var(--foreground, #18181b);
+        color: var(--muted-foreground, #71717a);
       }
-      .aq-grp-item:hover .aq-grp-item-status {
+      .aq-grp-item[data-aq-project]:not([data-aq-project=""]) > .aq-grp-item-status {
+        transform: translateY(-2px);
+      }
+      .aq-grp-item:has(> .aq-grp-item-actions):hover > .aq-grp-item-status {
         display: none;
       }
       @keyframes aqAgentStateDot {
@@ -1236,15 +1559,22 @@
       .aq-grp-status-spinner {
         display: grid;
         place-content: center;
-        width: 16px;
-        height: 16px;
-        grid-template-columns: repeat(2, 4px);
+        place-items: center;
+        width: 12px;
+        height: 12px;
+        margin: auto;
+        grid-template-columns: repeat(2, 3px);
+        grid-template-rows: repeat(2, 3px);
         gap: 2px;
-        opacity: 0.7;
+        opacity: 0.78;
+        color: #3b82f6;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-status-spinner {
+        color: #60a5fa;
       }
       .aq-grp-status-spinner > span {
-        width: 4px;
-        height: 4px;
+        width: 3px;
+        height: 3px;
         border-radius: 9999px;
         background: currentColor;
         animation: 1.4s ease-in-out infinite aqAgentStateDot;
@@ -1266,31 +1596,28 @@
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 16px;
-        height: 16px;
+        width: 12px;
+        height: 12px;
       }
       .aq-grp-status-unread-halo {
-        position: absolute;
-        width: 14px;
-        height: 14px;
-        border-radius: 9999px;
-        background: var(--primary, var(--foreground, #18181b));
-        opacity: 0.12;
+        display: none;
       }
       .aq-grp-status-unread-core {
-        width: 6px;
-        height: 6px;
+        width: 5.5px;
+        height: 5.5px;
         border-radius: 9999px;
-        background: var(--primary, var(--foreground, #18181b));
+        background: #3b82f6;
+        opacity: 0.82;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-status-unread-core {
+        background: #60a5fa;
       }
       @keyframes aqWaitingPulse {
         0%, 100% {
-          transform: scale(0.85);
-          opacity: 0.35;
+          opacity: 0.5;
         }
         50% {
-          transform: scale(1.2);
-          opacity: 0.12;
+          opacity: 1;
         }
       }
       .aq-grp-status-waiting {
@@ -1298,24 +1625,19 @@
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 16px;
-        height: 16px;
+        width: 12px;
+        height: 12px;
       }
       .aq-grp-status-waiting-halo {
-        position: absolute;
-        width: 14px;
-        height: 14px;
+        display: none;
+      }
+      .aq-grp-status-waiting-core {
+        width: 5.5px;
+        height: 5.5px;
         border-radius: 9999px;
         background: #d97706;
         animation: 1.6s ease-in-out infinite aqWaitingPulse;
       }
-      .aq-grp-status-waiting-core {
-        width: 6px;
-        height: 6px;
-        border-radius: 9999px;
-        background: #d97706;
-      }
-      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-status-waiting-halo,
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-status-waiting-core {
         background: #fbbf24;
       }
@@ -1559,6 +1881,282 @@
         gap: 4px;
         padding-top: 6px;
         border-top: 1px solid rgba(127, 127, 127, 0.16);
+      }
+
+      #aq-grp-ctx-menu {
+        position: fixed;
+        z-index: 999999;
+        min-width: 152px;
+        max-width: 220px;
+        padding: 4px;
+        border-radius: 10px;
+        background: var(--glass, #ffffff);
+        border: 1px solid var(--border, rgba(24, 24, 27, 0.1));
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12), 0 1px 4px rgba(15, 23, 42, 0.06);
+        font-size: 12.5px;
+        color: var(--foreground, #18181b);
+        display: none;
+        user-select: none;
+      }
+      #aq-grp-ctx-menu.is-visible {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-grp-ctx-menu {
+        background: #1c1c22;
+        border-color: rgba(255, 255, 255, 0.12);
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+        color: #f4f4f7;
+      }
+      .aq-ctx-item {
+        appearance: none;
+        width: 100%;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        font-size: 12.5px;
+        line-height: 1.3;
+        padding: 6px 8px;
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        cursor: pointer;
+        text-align: left;
+      }
+      .aq-ctx-item:hover {
+        background: var(--sidebar-muted, rgba(24, 24, 27, 0.055));
+      }
+      .aq-ctx-item.is-danger {
+        color: #dc2626;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-ctx-item.is-danger {
+        color: #f87171;
+      }
+      .aq-ctx-sep {
+        height: 1px;
+        margin: 3px 6px;
+        background: rgba(24, 24, 27, 0.075);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-ctx-sep {
+        background: rgba(255, 255, 255, 0.09);
+      }
+
+      /* Injected folder actions inside Antigravity native [role="menu"] */
+      .aq-native-folder-entry {
+        position: relative;
+      }
+      .aq-native-folder-entry .aq-nmf-count {
+        font-size: 10.5px;
+        font-weight: 600;
+        padding: 0 5px;
+        height: 16px;
+        line-height: 16px;
+        border-radius: 9999px;
+        background: rgba(37, 99, 235, 0.12);
+        color: #2563eb;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-native-folder-entry .aq-nmf-count {
+        background: rgba(96, 165, 250, 0.2);
+        color: #93c5fd;
+      }
+      .aq-native-folder-sub {
+        position: absolute;
+        left: calc(100% + 6px);
+        top: -4px;
+        z-index: 30;
+        display: none;
+        width: 224px;
+        padding: 8px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.98);
+        color: #18181b;
+        border: 1px solid rgba(0, 0, 0, 0.12);
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16);
+        backdrop-filter: blur(20px) saturate(1.6);
+        font-size: 12px;
+        line-height: 1.4;
+      }
+      .aq-native-folder-sub.is-open {
+        display: block;
+      }
+      .aq-native-folder-sub.is-left {
+        left: auto;
+        right: calc(100% + 6px);
+      }
+      .aq-native-folder-sub::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: -10px;
+        width: 10px;
+      }
+      .aq-native-folder-sub.is-left::before {
+        left: auto;
+        right: -10px;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-native-folder-sub {
+        background: rgba(24, 24, 27, 0.98);
+        color: #f4f4f5;
+        border-color: rgba(255, 255, 255, 0.14);
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+      }
+
+      /* Sidebar 2-tab switcher (分组 | 项目) — borderless track with sliding white card pill */
+      #aq-sidebar-tabs {
+        position: relative;
+        display: flex;
+        align-items: center;
+        flex-shrink: 0;
+        margin: 6px 8px;
+        padding: 0;
+        height: 28px;
+        background: transparent;
+        user-select: none;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-sidebar-tabs {
+        background: transparent;
+      }
+      .aq-row-grp-btn {
+        appearance: none;
+        border: 0;
+        background: transparent;
+        color: var(--muted-foreground, #71717a);
+        width: 22px;
+        height: 22px;
+        border-radius: 6px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        padding: 0;
+        flex-shrink: 0;
+        transition: background-color 0.12s ease, color 0.12s ease;
+      }
+      .aq-row-grp-btn:hover,
+      .aq-row-grp-btn[data-aq-menu-open="1"] {
+        background: rgba(24, 24, 27, 0.08);
+        color: var(--foreground, #18181b);
+      }
+      .aq-row-grp-btn.is-grouped {
+        color: #2563eb;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-row-grp-btn:hover,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-row-grp-btn[data-aq-menu-open="1"] {
+        background: rgba(255, 255, 255, 0.11);
+        color: #f4f4f7;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-row-grp-btn.is-grouped {
+        color: #60a5fa;
+      }
+      .agy-sidebar-row:has([data-aq-menu-open="1"]) .agy-row-actions {
+        opacity: 1 !important;
+      }
+      #aq-sidebar-tabs::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 50%;
+        box-sizing: border-box;
+        border-radius: 8px;
+        background: var(--background, #ffffff);
+        border: 1px solid rgba(24, 24, 27, 0.075);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.025);
+        transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+        pointer-events: none;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-sidebar-tabs::before {
+        background: #19191f;
+        border-color: rgba(255, 255, 255, 0.085);
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+      }
+      .bg-sidebar[data-aq-tab="projects"] #aq-sidebar-tabs::before {
+        transform: translateX(100%);
+      }
+      .aq-st-tab {
+        position: relative;
+        z-index: 1;
+        flex: 1;
+        appearance: none;
+        border: 0;
+        background: transparent !important;
+        box-shadow: none !important;
+        color: var(--muted-foreground, #71717a);
+        font: inherit;
+        font-size: 12.5px;
+        font-weight: 400;
+        letter-spacing: -0.006em;
+        height: 24px;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: color 160ms ease;
+      }
+      .aq-st-tab:hover {
+        color: var(--foreground, #18181b);
+      }
+      .aq-st-tab.is-active {
+        color: var(--foreground, #18181b);
+        font-weight: 500;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-st-tab:hover,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-st-tab.is-active {
+        color: #ffffff;
+      }
+      .bg-sidebar[data-aq-tab="groups"] #aq-conv-groups {
+        flex: 1 1 0%;
+        min-height: 0;
+        opacity: 1;
+        transform: translateY(0);
+        pointer-events: auto;
+        transition: opacity 170ms cubic-bezier(0.22, 1, 0.36, 1), transform 170ms cubic-bezier(0.22, 1, 0.36, 1);
+      }
+      .bg-sidebar[data-aq-tab="projects"] #aq-conv-groups {
+        flex: 0 0 0px !important;
+        height: 0 !important;
+        min-height: 0 !important;
+        max-height: 0 !important;
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+        margin: 0 !important;
+        overflow: hidden !important;
+        opacity: 0;
+        transform: translateY(-4px);
+        pointer-events: none;
+        transition: opacity 140ms ease, transform 140ms ease;
+      }
+      .bg-sidebar[data-aq-tab="projects"] #aq-conv-groups + div {
+        flex: 1 1 0% !important;
+        min-height: 0 !important;
+        padding: 2px 8px 6px !important;
+        opacity: 1;
+        transform: translateY(0);
+        pointer-events: auto;
+        transition: opacity 170ms cubic-bezier(0.22, 1, 0.36, 1), transform 170ms cubic-bezier(0.22, 1, 0.36, 1);
+      }
+      .bg-sidebar[data-aq-tab="groups"] #aq-conv-groups + div {
+        flex: 0 0 0px !important;
+        height: 0 !important;
+        min-height: 0 !important;
+        max-height: 0 !important;
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+        margin: 0 !important;
+        overflow: hidden !important;
+        opacity: 0;
+        transform: translateY(4px);
+        pointer-events: none;
+        transition: opacity 140ms ease, transform 140ms ease;
+      }
+      .aq-pinned-add-folder-btn {
+        margin-left: 4px;
+        margin-right: auto;
+        width: 20px;
+        height: 20px;
       }
     `;
   }
@@ -2250,7 +2848,7 @@
                 : win === 'weekly'
                   ? '周'
                   : escapeHtml(b.displayName || b.bucketId || '配额');
-            const reset = formatResetCountdown(b.resetTime);
+            const reset = formatResetCountdown(b.resetTime, Date.now(), { includeDate: true });
             return `
               <div class="aq-tt-row">
                 <span class="aq-tt-lbl">${label}</span>
@@ -2495,7 +3093,7 @@
               const origNote = Number(b.remainingFraction) < 0.995 ? `原 ${pct}` : '预计满额';
               valHtml = `<span class="aq-lvl-ok">已重置</span><span class="aq-q-reset"> · ${escapeHtml(origNote)}</span>`;
             } else {
-              const reset = formatResetCountdown(b.resetTime);
+              const reset = formatResetCountdown(b.resetTime, Date.now(), { includeDate: true });
               valHtml = `<span class="${lvl}">${pct}</span>${reset ? `<span class="aq-q-reset"> · ${escapeHtml(reset)}</span>` : ''}`;
             }
             return `
@@ -2943,7 +3541,7 @@
   }
 
   const TRANSLATE_SKIP_SELECTOR =
-    '[data-markdown-root], [data-testid="agent-response"], [data-testid="user-message"], [data-testid="user-message-content"], [data-lexical-editor], [data-aq-turn-usage], #aq-turn-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-context-chip, #aq-quota-chip, #aq-conv-groups, #aq-group-menu, #aq-conv-drag-ghost, code, pre, script, style, .codicon, .google-symbols, .agy-sidebar-row';
+    '[data-markdown-root], [data-testid="user-message"], [data-testid="user-message-content"], [data-lexical-editor], [data-testid="model-selector-trigger"], [data-aq-turn-usage], [data-aq-native-menu-ext], #aq-turn-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-context-chip, #aq-quota-chip, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost, code, pre, script, style, .codicon, .google-symbols, .agy-sidebar-row';
 
   const CHROME_ROOT_SELECTOR = [
     '.settings-modal-container',
@@ -2964,6 +3562,15 @@
     '[data-radix-popper-content-wrapper]',
     '[data-radix-popper-content]',
     '.bg-sidebar',
+  ].join(', ');
+
+  const TURN_CHROME_SELECTOR = [
+    '[data-testid="worked-for-collapsible"]',
+    '[data-testid="changed-files-card-header"]',
+    '[data-testid="changed-files-card-review"]',
+    '[data-testid="cascade-system-message-toolbar"]',
+    '[data-testid="user-message-actions"]',
+    '[data-testid="turn-cards-container"] button',
   ].join(', ');
 
   function isProjectFolderNode(el) {
@@ -3021,11 +3628,16 @@
         translateTextInRoot(footerContainer, true);
       }
 
+      const turnChrome = document.querySelectorAll(TURN_CHROME_SELECTOR);
+      for (let i = 0; i < turnChrome.length; i++) {
+        translateTextInRoot(turnChrome[i], true);
+      }
+
       const chromeControls = document.querySelectorAll('button, [role="tab"], [data-testid="title-menu-bar"] *');
       for (let i = 0; i < chromeControls.length; i++) {
         const ctrl = chromeControls[i];
         if (ctrl.closest(TRANSLATE_SKIP_SELECTOR) || isProjectFolderNode(ctrl)) continue;
-        if (ctrl.closest('[data-turn-content]')) continue;
+        if (ctrl.closest('[data-turn-content]') && !ctrl.closest('[data-testid="turn-cards-container"], [data-testid="changed-files-card"], [data-testid="worked-for-collapsible"]')) continue;
         const txt = ctrl.textContent;
         const aria = ctrl.getAttribute('aria-label');
         const title = ctrl.getAttribute('title');
@@ -3036,6 +3648,104 @@
     } finally {
       state.isTranslating = false;
     }
+  }
+
+  function getReactFiberFromElement(el) {
+    if (!el || typeof el !== 'object') return null;
+    const keys = Object.keys(el);
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      if (k.startsWith('__reactFiber$') || k.startsWith('__reactContainer$')) {
+        return el[k];
+      }
+    }
+    return null;
+  }
+
+  function isContextMenuFeatureProvider(fiber) {
+    const v = fiber?.memoizedProps?.value;
+    if (!v || typeof v !== 'object' || typeof v.get !== 'function' || !(v.getCache instanceof Map)) {
+      return false;
+    }
+    try {
+      const cms = v.get('contextMenuSystem');
+      return Boolean(cms && typeof cms === 'object');
+    } catch {
+      return false;
+    }
+  }
+
+  function findContextMenuFeatureProvider() {
+    const startNodes = [
+      document.querySelector('[data-testid="conversation-row-sidebar"]'),
+      document.querySelector('.bg-sidebar'),
+    ];
+    for (let i = 0; i < startNodes.length; i++) {
+      let fib = getReactFiberFromElement(startNodes[i]);
+      while (fib) {
+        if (isContextMenuFeatureProvider(fib)) return fib;
+        fib = fib.return;
+      }
+    }
+    const rootFib = getReactFiberFromElement(document.getElementById('root'));
+    if (!rootFib) return null;
+    const queue = [rootFib];
+    for (let seen = 0; queue.length > 0 && seen < 120; seen++) {
+      const cur = queue.shift();
+      if (!cur) continue;
+      if (isContextMenuFeatureProvider(cur)) return cur;
+      if (cur.child) queue.push(cur.child);
+      if (cur.sibling) queue.push(cur.sibling);
+    }
+    return null;
+  }
+
+  function bumpContextMenuProvider(provFiber) {
+    const val = provFiber?.memoizedProps?.value;
+    try {
+      val?.getCache?.delete('contextMenuSystem');
+    } catch {}
+    let ms = provFiber?.return?.memoizedState;
+    while (ms) {
+      if (typeof ms.memoizedState === 'number' && typeof ms.queue?.dispatch === 'function') {
+        try {
+          ms.queue.dispatch((prev) => (typeof prev === 'number' ? prev + 1 : 1));
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      ms = ms.next;
+    }
+    return false;
+  }
+
+  /**
+   * 禁用 Electron 原生 NSMenu 右键，切回页面 DOM ContextMenu 以便完整汉化菜单与子菜单。
+   */
+  function ensureWebContextMenuMode() {
+    if (state.contextMenuPatched) return true;
+    const provFiber = findContextMenuFeatureProvider();
+    const val = provFiber?.memoizedProps?.value;
+    if (!val) return false;
+    const proto = Object.getPrototypeOf(val);
+    if (!proto || typeof proto.get !== 'function') return false;
+    if (!proto.__aqOrigGet) {
+      const origGet = proto.get;
+      proto.__aqOrigGet = origGet;
+      proto.get = function (name) {
+        const res = origGet.call(this, name);
+        if (name === 'contextMenuSystem' && res && typeof res === 'object' && res.enabled && res.useNativeMenu) {
+          return { ...res, useNativeMenu: false };
+        }
+        return res;
+      };
+    }
+    state.contextMenuProto = proto;
+    state.contextMenuProviderFiber = provFiber;
+    bumpContextMenuProvider(provFiber);
+    state.contextMenuPatched = true;
+    return true;
   }
 
   const SVG_FOLDER =
@@ -3053,23 +3763,122 @@
   const SVG_SMART_ACTIVE =
     '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="1.8" fill="currentColor" stroke="none"/></svg>';
 
-  function unpinConversationIfPinned(cascadeId) {
-    const cidLower = String(cascadeId || '').trim().toLowerCase();
-    if (!/^[0-9a-f-]{36}$/i.test(cidLower)) return false;
+  function saveAutoUnpinnedCids() {
+    try {
+      localStorage.setItem('aq_auto_unpinned_cids_v1', JSON.stringify([...state.autoUnpinnedCids]));
+    } catch {}
+  }
+
+  function markAutoUnpinned(cidLower) {
+    if (!cidLower || state.autoUnpinnedCids.has(cidLower)) return;
+    state.autoUnpinnedCids.add(cidLower);
+    saveAutoUnpinnedCids();
+  }
+
+  function unmarkAutoUnpinned(cidLower) {
+    if (!cidLower || !state.autoUnpinnedCids.has(cidLower)) return;
+    state.autoUnpinnedCids.delete(cidLower);
+    saveAutoUnpinnedCids();
+  }
+
+  async function updateConversationAnnotationPinnedRpc(cascadeId, pinned) {
+    try {
+      const csrf = window.__APP_CONFIG__?.csrfToken || '';
+      const res = await fetch('/exa.language_server_pb.LanguageServerService/UpdateConversationAnnotations', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(csrf ? { 'x-codeium-csrf-token': csrf } : {}),
+        },
+        body: JSON.stringify({
+          cascadeIds: [cascadeId],
+          annotations: { pinned: Boolean(pinned) },
+          mergeAnnotations: true,
+        }),
+      });
+      if (res.ok) {
+        const meta = state.trajMetaById[String(cascadeId || '').toLowerCase()];
+        if (meta) meta.pinned = Boolean(pinned);
+        return true;
+      }
+    } catch {}
+    return false;
+  }
+
+  function findConversationSidebarRow(cidLower) {
     const rows = document.querySelectorAll(
-      '.bg-sidebar [data-testid="conversation-row-sidebar"][data-pinned="true"][data-cascade-id]'
+      '.bg-sidebar [data-testid="conversation-row-sidebar"][data-cascade-id]'
     );
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       if (row.closest('[aria-hidden="true"]')) continue;
-      if (String(row.getAttribute('data-cascade-id') || '').trim().toLowerCase() !== cidLower) continue;
+      if (String(row.getAttribute('data-cascade-id') || '').trim().toLowerCase() === cidLower) {
+        return row;
+      }
+    }
+    return null;
+  }
+
+  function unpinConversationIfPinned(cascadeId) {
+    const cid = String(cascadeId || '').trim();
+    const cidLower = cid.toLowerCase();
+    if (!/^[0-9a-f-]{36}$/i.test(cidLower)) return false;
+    const row = findConversationSidebarRow(cidLower);
+    if (row && row.getAttribute('data-pinned') === 'true') {
       const pinBtn = row.querySelector('[data-testid="conversation-pin-button"]');
       if (pinBtn && typeof pinBtn.click === 'function') {
         pinBtn.click();
         return true;
       }
     }
+    const meta = state.trajMetaById[cidLower];
+    if (meta?.pinned) {
+      void updateConversationAnnotationPinnedRpc(meta.cascadeId || cid, false);
+      return true;
+    }
     return false;
+  }
+
+  function restorePinConversation(cascadeId) {
+    const cid = String(cascadeId || '').trim();
+    const cidLower = cid.toLowerCase();
+    if (!/^[0-9a-f-]{36}$/i.test(cidLower)) return false;
+    const row = findConversationSidebarRow(cidLower);
+    if (row) {
+      if (row.getAttribute('data-pinned') === 'true') return true;
+      const pinBtn = row.querySelector('[data-testid="conversation-pin-button"]');
+      if (pinBtn && typeof pinBtn.click === 'function') {
+        pinBtn.click();
+        return true;
+      }
+    }
+    const meta = state.trajMetaById[cidLower];
+    void updateConversationAnnotationPinnedRpc(meta?.cascadeId || cid, true);
+    return true;
+  }
+
+  function collectSubtreeItemCids(rootGroupId) {
+    const out = [];
+    const queue = [String(rootGroupId || '').trim()];
+    const seen = new Set();
+    while (queue.length > 0) {
+      const gid = queue.shift();
+      if (!gid || seen.has(gid)) continue;
+      seen.add(gid);
+      const grp = state.groups.find((g) => g.id === gid);
+      if (grp && Array.isArray(grp.items)) {
+        for (let i = 0; i < grp.items.length; i++) {
+          const cid = String(grp.items[i]?.cascadeId || '').trim().toLowerCase();
+          if (/^[0-9a-f-]{36}$/i.test(cid)) out.push(cid);
+        }
+      }
+      for (let i = 0; i < state.groups.length; i++) {
+        if (state.groups[i]?.parentId === gid) {
+          queue.push(state.groups[i].id);
+        }
+      }
+    }
+    return out;
   }
 
   function sendGroupAction(payload) {
@@ -3083,6 +3892,17 @@
         (type === 'add-item' || type === 'move-item' || type === 'create')
       ) {
         state.pendingUnpinCascadeIds.add(itemCid);
+      }
+      if (type === 'remove-item') {
+        const rmCid = String(payload?.cascadeId || '').trim().toLowerCase();
+        if (/^[0-9a-f-]{36}$/i.test(rmCid)) {
+          state.pendingRestorePinCascadeIds.add(rmCid);
+        }
+      } else if (type === 'delete') {
+        const delCids = collectSubtreeItemCids(payload?.groupId);
+        for (let i = 0; i < delCids.length; i++) {
+          state.pendingRestorePinCascadeIds.add(delCids[i]);
+        }
       }
       window.__aqGroupAction(JSON.stringify(payload || {}));
       return true;
@@ -3332,7 +4152,14 @@
 
   function saveSmartGroupCollapsed() {
     try {
-      localStorage.setItem('aq_smart_groups_collapsed_v1', JSON.stringify({ active: state.smartActiveCollapsed }));
+      localStorage.setItem(
+        'aq_smart_groups_collapsed_v1',
+        JSON.stringify({
+          active: state.smartActiveCollapsed,
+          folders: state.foldersCollapsed,
+          recent: state.recentCollapsed,
+        })
+      );
     } catch {}
   }
 
@@ -3404,6 +4231,7 @@
   function collectAllConversationStates(activeCid) {
     const domStatus = Object.create(null);
     const domInfo = Object.create(null);
+    const domOrder = Object.create(null);
     const rank = { idle: 0, unread: 1, running: 2, waiting: 3 };
     const rows = document.querySelectorAll('.bg-sidebar [data-testid="conversation-row-sidebar"][data-cascade-id]');
     for (let i = 0; i < rows.length; i++) {
@@ -3411,6 +4239,7 @@
       if (row.closest('[aria-hidden="true"]')) continue;
       const cid = String(row.getAttribute('data-cascade-id') || '').toLowerCase();
       if (!cid) continue;
+      if (!(cid in domOrder)) domOrder[cid] = i;
       let status = 'idle';
       if (row.querySelector('[data-testid="attention-dot"]')) {
         status = 'waiting';
@@ -3444,11 +4273,14 @@
       const items = state.groups[i]?.items || [];
       for (let j = 0; j < items.length; j++) {
         const cid = String(items[j]?.cascadeId || '').toLowerCase();
-        if (cid) allPrimaryCids.add(cid);
+        if (cid) {
+          allPrimaryCids.add(cid);
+        }
       }
     }
 
     const activeItems = [];
+    const recentCandidates = [];
     for (const cid of allPrimaryCids) {
       const meta = state.trajMetaById[cid] || null;
       if (meta?.archived && !(cid in domStatus)) continue;
@@ -3469,10 +4301,11 @@
       if (status === 'unread' && activeCid && cid === activeCid && !meta?.markedAsUnread) {
         status = '';
       }
-      if (!status) continue;
-      statusById[cid] = status;
+      if (status) {
+        statusById[cid] = status;
+      }
 
-      // Only list primary / sidebar-visible conversations inside smart group
+      // Only list primary / sidebar-visible conversations inside smart & recent groups
       if (!(cid in domStatus) && !(meta?.isPrimary && !meta?.archived)) continue;
 
       const dInfo = domInfo[cid];
@@ -3482,13 +4315,26 @@
         dInfo?.title ||
         '未命名对话';
       const project = dInfo?.project || meta?.project || '';
-      activeItems.push({
+      const lastOperatedMs = Math.max(
+        meta?.lastOperatedMs || 0,
+        meta?.lastModifiedMs || 0,
+        meta?.lastUserInputMs || 0,
+        meta?.lastUserViewMs || 0,
+        state.localViewedAtById[cid] || 0
+      );
+      const resolvedItem = {
         cascadeId: dInfo?.cascadeId || meta?.cascadeId || cid,
         title,
         project,
         status,
         lastModifiedMs: meta?.lastModifiedMs || 0,
-      });
+        lastOperatedMs,
+        domIndex: cid in domOrder ? domOrder[cid] : 99999,
+      };
+      if (status) {
+        activeItems.push(resolvedItem);
+      }
+      recentCandidates.push(resolvedItem);
     }
 
     const orderPriority = { waiting: 3, unread: 2, running: 1 };
@@ -3499,7 +4345,15 @@
       return (b.lastModifiedMs || 0) - (a.lastModifiedMs || 0);
     });
 
-    return { statusById, activeItems };
+    recentCandidates.sort((a, b) => {
+      if ((b.lastOperatedMs || 0) !== (a.lastOperatedMs || 0)) {
+        return (b.lastOperatedMs || 0) - (a.lastOperatedMs || 0);
+      }
+      return a.domIndex - b.domIndex;
+    });
+    const recentItems = recentCandidates.slice(0, 10);
+
+    return { statusById, activeItems, recentItems };
   }
 
   async function refreshTrajectoryMetadata(force = false, minIntervalMs = 60_000) {
@@ -3539,6 +4393,7 @@
           .trim()
           .toLowerCase();
         const archived = Boolean(entry.annotations?.archived);
+        const pinned = Boolean(entry.annotations?.pinned);
         const killed = Boolean(entry.killed);
         const isPrimary =
           !archived &&
@@ -3556,7 +4411,9 @@
             Boolean(entry.notFullyIdle) ||
             Boolean(entry.hasRunningSubagents));
         const lastModifiedMs = Date.parse(entry.lastModifiedTime || '') || 0;
-        let lastUserViewMs = Date.parse(entry.annotations?.lastUserViewTime || '') || 0;
+        const lastUserInputMs = Date.parse(entry.lastUserInputTime || '') || 0;
+        const rawUserViewMs = Date.parse(entry.annotations?.lastUserViewTime || '') || 0;
+        let lastUserViewMs = rawUserViewMs;
         let markedAsUnread = Boolean(entry.annotations?.markedAsUnread);
         const localViewedAt = state.localViewedAtById[key] || 0;
         if (localViewedAt && Date.now() - localViewedAt < 60_000) {
@@ -3564,11 +4421,13 @@
           if (lastModifiedMs <= localViewedAt) markedAsUnread = false;
         }
         const prev = state.trajMetaById[key] || {};
+        const lastOperatedMs = Math.max(lastModifiedMs, lastUserInputMs, rawUserViewMs, localViewedAt);
         nextById[key] = {
           cascadeId: cid,
           title: title || prev.title || '',
           project: project || prev.project || '',
           archived,
+          pinned,
           killed,
           isPrimary,
           parentId,
@@ -3578,7 +4437,9 @@
           subagentRunning: false,
           markedAsUnread,
           lastModifiedMs,
+          lastUserInputMs,
           lastUserViewMs,
+          lastOperatedMs,
         };
       }
       // Bubble subagent waiting/running state up to root parent conversation
@@ -3609,8 +4470,168 @@
     }
   }
 
+  function buildConversationInfoById(cascadeId, anchorEl = null) {
+    const cidLower = String(cascadeId || '').trim().toLowerCase();
+    const row = findConversationSidebarRow(cidLower);
+    const meta = state.trajMetaById[cidLower];
+    if (row) {
+      const info = extractRowConversationInfo(row);
+      if (info) return info;
+    }
+    return {
+      cascadeId: meta?.cascadeId || String(cascadeId || '').trim(),
+      title:
+        meta?.title ||
+        anchorEl?.querySelector?.('.aq-grp-item-title')?.textContent?.trim() ||
+        '未命名对话',
+      project: meta?.project || anchorEl?.getAttribute?.('data-aq-project') || '',
+    };
+  }
+
+  function openNativeConversationContextMenu(cascadeId, clientX, clientY) {
+    const cidLower = String(cascadeId || '').trim().toLowerCase();
+    if (!cidLower) return false;
+    const row = findConversationSidebarRow(cidLower);
+    const kebab = row?.querySelector?.('[data-testid="conversation-kebab"]');
+    if (!kebab || typeof kebab.click !== 'function') {
+      return false;
+    }
+    state.lastNativeMenuConv = {
+      ...buildConversationInfoById(cidLower),
+      at: Date.now(),
+    };
+    kebab.click();
+    let tries = 0;
+    const positionMenu = () => {
+      const menu = document.querySelector('[role="menu"]');
+      if (menu) {
+        const posEl = menu.closest('[style*="transform"]') || menu.parentElement;
+        if (posEl) {
+          const mr = menu.getBoundingClientRect();
+          const mw = mr.width || 180;
+          const mh = mr.height || 220;
+          const left = Math.max(8, Math.min(Math.round(clientX), window.innerWidth - mw - 8));
+          const top = Math.max(8, Math.min(Math.round(clientY), window.innerHeight - mh - 8));
+          posEl.style.left = '0px';
+          posEl.style.top = '0px';
+          posEl.style.transform = `translate(${left}px, ${top}px)`;
+        }
+        syncNativeConversationMenus();
+        applyUiTranslations();
+        return;
+      }
+      if (tries++ < 5) {
+        requestAnimationFrame(positionMenu);
+      }
+    };
+    requestAnimationFrame(positionMenu);
+    return true;
+  }
+
+  function closeGroupCtxMenu() {
+    const el = document.getElementById('aq-grp-ctx-menu');
+    if (el) el.classList.remove('is-visible');
+  }
+
+  function openGroupCtxMenu(clientX, clientY, { groupId = '', depth = 0, item = null, itemGroupId = '' } = {}) {
+    closeGroupMenu();
+    let menu = document.getElementById('aq-grp-ctx-menu');
+    if (menu && menu.dataset.aqOwner !== INSTANCE_TOKEN) {
+      menu.remove();
+      menu = null;
+    }
+    if (!menu) {
+      menu = document.createElement('div');
+      menu.id = 'aq-grp-ctx-menu';
+      menu.dataset.aqOwner = INSTANCE_TOKEN;
+      document.body.appendChild(menu);
+      menu.addEventListener('click', (ev) => {
+        const btn = ev.target?.closest?.('[data-aq-ctx-act]');
+        if (!btn) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        const act = btn.getAttribute('data-aq-ctx-act') || '';
+        const gid = btn.getAttribute('data-aq-ctx-gid') || '';
+        const cid = btn.getAttribute('data-aq-ctx-cid') || '';
+        closeGroupCtxMenu();
+        if (act === 'new-root') {
+          triggerNewTopFolder();
+        } else if (act === 'new-child' && gid) {
+          state.groupsError = '';
+          state.groupRenamingId = '';
+          clearGroupDeleteConfirm();
+          state.groupCreateInitialItem = null;
+          state.groupCreateParentId = gid;
+          state.groupCreating = true;
+          renderSidebarGroupsPanel(true);
+        } else if (act === 'rename' && gid) {
+          state.groupsError = '';
+          state.groupCreating = false;
+          state.groupCreateParentId = '';
+          state.groupCreateInitialItem = null;
+          clearGroupDeleteConfirm();
+          state.groupRenamingId = gid;
+          renderSidebarGroupsPanel(true);
+        } else if (act === 'delete' && gid) {
+          state.groupsError = '';
+          sendGroupAction({ type: 'delete', groupId: gid });
+        } else if (act === 'remove-from-group' && gid && cid) {
+          state.groupsError = '';
+          sendGroupAction({ type: 'remove-item', groupId: gid, cascadeId: cid });
+        } else if (act === 'item-menu' && cid) {
+          const anchor = document.querySelector(`#aq-conv-groups [data-aq-grp-open="${cid}"]`);
+          const info = buildConversationInfoById(cid, anchor);
+          if (anchor) {
+            openGroupMenu(anchor, info);
+          }
+        }
+      });
+    }
+
+    const actionsHtml = [];
+    if (groupId) {
+      if (depth < MAX_GROUP_DEPTH - 1) {
+        actionsHtml.push(
+          `<button type="button" class="aq-ctx-item" data-aq-ctx-act="new-child" data-aq-ctx-gid="${escapeHtml(groupId)}">${SVG_FOLDER_PLUS}<span>新建子文件夹</span></button>`
+        );
+      }
+      actionsHtml.push(
+        `<button type="button" class="aq-ctx-item" data-aq-ctx-act="new-root">${SVG_PLUS}<span>新建根文件夹</span></button>`,
+        '<div class="aq-ctx-sep"></div>',
+        `<button type="button" class="aq-ctx-item" data-aq-ctx-act="rename" data-aq-ctx-gid="${escapeHtml(groupId)}">${SVG_EDIT}<span>重命名</span></button>`,
+        `<button type="button" class="aq-ctx-item is-danger" data-aq-ctx-act="delete" data-aq-ctx-gid="${escapeHtml(groupId)}">${SVG_CLOSE}<span>删除文件夹</span></button>`
+      );
+    } else {
+      if (item?.cascadeId) {
+        actionsHtml.push(
+          `<button type="button" class="aq-ctx-item" data-aq-ctx-act="item-menu" data-aq-ctx-cid="${escapeHtml(item.cascadeId)}">${SVG_FOLDER_PLUS}<span>加入文件夹</span></button>`
+        );
+        if (itemGroupId) {
+          actionsHtml.push(
+            `<button type="button" class="aq-ctx-item" data-aq-ctx-act="remove-from-group" data-aq-ctx-cid="${escapeHtml(item.cascadeId)}" data-aq-ctx-gid="${escapeHtml(itemGroupId)}">${SVG_CLOSE}<span>移出此文件夹</span></button>`
+          );
+        }
+        actionsHtml.push('<div class="aq-ctx-sep"></div>');
+      }
+      actionsHtml.push(
+        `<button type="button" class="aq-ctx-item" data-aq-ctx-act="new-root">${SVG_FOLDER_PLUS}<span>新建根文件夹</span></button>`
+      );
+    }
+
+    menu.innerHTML = actionsHtml.join('');
+    menu.classList.add('is-visible');
+    const mRect = menu.getBoundingClientRect();
+    const mw = mRect.width || 160;
+    const mh = mRect.height || 100;
+    const left = Math.max(8, Math.min(clientX, window.innerWidth - mw - 8));
+    const top = Math.max(8, Math.min(clientY, window.innerHeight - mh - 8));
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(top)}px`;
+  }
+
   function closeGroupMenu() {
     state.groupMenuTarget = null;
+    document.querySelectorAll('[data-aq-menu-open]').forEach((el) => el.removeAttribute('data-aq-menu-open'));
     const menu = document.getElementById('aq-group-menu');
     if (menu) menu.classList.remove('is-visible');
   }
@@ -3673,15 +4694,28 @@
     return menu;
   }
 
-  function renderGroupMenuContent() {
-    const menu = document.getElementById('aq-group-menu');
-    const target = state.groupMenuTarget;
-    if (!menu || !target || !menu.classList.contains('is-visible')) return;
-    const prevInput = menu.querySelector('input[data-aq-gm-input]');
-    const preservedValue = prevInput ? prevInput.value : '';
-    const hadFocus = Boolean(prevInput && document.activeElement === prevInput);
-    const cidLower = target.cascadeId.toLowerCase();
+  function getConversationAssignedGroups(cascadeId) {
+    const cidLower = String(cascadeId || '').trim().toLowerCase();
+    if (!cidLower) return [];
+    const tree = buildGroupTreeIndex(state.groups);
+    const matched = [];
+    for (let i = 0; i < tree.orderedFlat.length; i++) {
+      const g = tree.orderedFlat[i]?.group;
+      const items = Array.isArray(g?.items) ? g.items : [];
+      if (items.some((it) => String(it?.cascadeId || '').toLowerCase() === cidLower)) {
+        matched.push(g);
+      }
+    }
+    return matched;
+  }
 
+  function buildFolderPickerBodyHtml(
+    cascadeId,
+    headerText,
+    preservedValue,
+    { toggleAttr, inputAttr, btnAttr }
+  ) {
+    const cidLower = String(cascadeId || '').trim().toLowerCase();
     const tree = buildGroupTreeIndex(state.groups);
     const listHtml = tree.orderedFlat.length
       ? tree.orderedFlat
@@ -3691,7 +4725,7 @@
             const indentPx = 6 + depth * 14;
             const branchHtml = depth > 0 ? '<span class="aq-gm-tree-branch">↳</span>' : '';
             return `
-              <button type="button" class="aq-gm-opt ${checked ? 'is-checked' : ''}" data-aq-gm-toggle="${escapeHtml(g.id)}" style="padding-left:${indentPx}px">
+              <button type="button" class="aq-gm-opt ${checked ? 'is-checked' : ''}" ${toggleAttr}="${escapeHtml(g.id)}" style="padding-left:${indentPx}px">
                 <span class="aq-gm-check">${checked ? '✓' : ''}</span>
                 ${branchHtml}
                 <span class="aq-gm-opt-name">${escapeHtml(g.name)}</span>
@@ -3701,20 +4735,37 @@
           })
           .join('')
       : '<div class="aq-grp-empty">暂无分组，在下方新建</div>';
-
     const errHtml = state.groupsError
       ? `<div class="aq-grp-error">${escapeHtml(state.groupsError)}</div>`
       : '';
-
-    menu.innerHTML = `
-      <div class="aq-gm-hdr" title="${escapeHtml(target.title)}">归组：${escapeHtml(target.title)}</div>
+    return `
+      <div class="aq-gm-hdr" title="${escapeHtml(headerText)}">${escapeHtml(headerText)}</div>
       <div class="aq-gm-list">${listHtml}</div>
       ${errHtml}
       <div class="aq-gm-create">
-        <input type="text" class="aq-grp-input" data-aq-gm-input="1" maxlength="48" placeholder="新分组名，回车创建" value="${escapeHtml(preservedValue)}" />
-        <button type="button" class="aq-grp-mini-btn is-primary" data-aq-gm-create-btn="1">新建</button>
+        <input type="text" class="aq-grp-input" ${inputAttr}="1" maxlength="48" placeholder="新分组名，回车创建" value="${escapeHtml(preservedValue)}" />
+        <button type="button" class="aq-grp-mini-btn is-primary" ${btnAttr}="1">新建</button>
       </div>
     `;
+  }
+
+  function renderGroupMenuContent() {
+    const menu = document.getElementById('aq-group-menu');
+    const target = state.groupMenuTarget;
+    if (!menu || !target || !menu.classList.contains('is-visible')) return;
+    const prevInput = menu.querySelector('input[data-aq-gm-input]');
+    const preservedValue = prevInput ? prevInput.value : '';
+    const hadFocus = Boolean(prevInput && document.activeElement === prevInput);
+    menu.innerHTML = buildFolderPickerBodyHtml(
+      target.cascadeId,
+      `归组：${target.title}`,
+      preservedValue,
+      {
+        toggleAttr: 'data-aq-gm-toggle',
+        inputAttr: 'data-aq-gm-input',
+        btnAttr: 'data-aq-gm-create-btn',
+      }
+    );
     if (hadFocus) {
       const nextInput = menu.querySelector('input[data-aq-gm-input]');
       if (nextInput) {
@@ -3724,8 +4775,286 @@
     }
   }
 
+  function resolveNativeMenuConversation() {
+    const expandedKebab = document.querySelector(
+      '.bg-sidebar [data-testid="conversation-kebab"][aria-expanded="true"], .bg-sidebar [data-testid="conversation-kebab"][data-popup-open]'
+    );
+    const expandedRow = expandedKebab?.closest?.('[data-testid="conversation-row-sidebar"][data-cascade-id]');
+    if (expandedRow) {
+      const info = extractRowConversationInfo(expandedRow);
+      if (info?.cascadeId) return info;
+    }
+    if (state.lastNativeMenuConv?.cascadeId && Date.now() - (state.lastNativeMenuConv.at || 0) < 8000) {
+      return {
+        cascadeId: state.lastNativeMenuConv.cascadeId,
+        title: state.lastNativeMenuConv.title || '未命名对话',
+        project: state.lastNativeMenuConv.project || '',
+      };
+    }
+    return null;
+  }
+
+  function closeNativeBaseUiMenu(menu) {
+    try {
+      const portal = menu?.closest?.('[data-base-ui-portal]');
+      const backdrop = portal?.querySelector?.('[data-base-ui-inert]');
+      if (backdrop) {
+        backdrop.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }));
+        backdrop.click?.();
+      }
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+    } catch {}
+  }
+
+  function positionNativeFolderSubmenu(entryEl, subEl) {
+    if (!entryEl || !subEl) return;
+    subEl.classList.remove('is-left');
+    subEl.style.top = '-4px';
+    const rect = entryEl.getBoundingClientRect();
+    const sRect = subEl.getBoundingClientRect();
+    const sw = sRect.width || 224;
+    const sh = sRect.height || 180;
+    if (rect.right + 6 + sw > window.innerWidth - 8 && rect.left - 6 - sw >= 8) {
+      subEl.classList.add('is-left');
+    }
+    if (rect.top - 4 + sh > window.innerHeight - 8) {
+      const shift = Math.max(-rect.top + 8, window.innerHeight - 8 - (rect.top + sh));
+      subEl.style.top = `${Math.round(shift)}px`;
+    }
+  }
+
+  function renderNativeFolderEntryContent(entryEl, rmEl, convInfo) {
+    if (!entryEl || !convInfo?.cascadeId) return;
+    const assigned = getConversationAssignedGroups(convInfo.cascadeId);
+    const labelText = assigned.length > 0 ? '管理文件夹' : '加入文件夹';
+    const countBadge = assigned.length > 0 ? `<span class="aq-nmf-count">${assigned.length}</span>` : '';
+    const subEl = entryEl.querySelector('.aq-native-folder-sub');
+    const wasOpen = Boolean(subEl?.classList.contains('is-open'));
+    const prevInput = subEl?.querySelector('input[data-aq-nmf-input]');
+    const preservedValue = prevInput ? prevInput.value : '';
+    const hadFocus = Boolean(prevInput && document.activeElement === prevInput);
+
+    const lblSpan = entryEl.querySelector('.aq-nmf-label');
+    if (lblSpan) lblSpan.textContent = labelText;
+    const badgeSlot = entryEl.querySelector('.aq-nmf-badge-slot');
+    if (badgeSlot) badgeSlot.innerHTML = countBadge;
+
+    if (subEl) {
+      subEl.innerHTML = buildFolderPickerBodyHtml(
+        convInfo.cascadeId,
+        `归组：${convInfo.title || '未命名对话'}`,
+        preservedValue,
+        {
+          toggleAttr: 'data-aq-nmf-toggle',
+          inputAttr: 'data-aq-nmf-input',
+          btnAttr: 'data-aq-nmf-create',
+        }
+      );
+      if (wasOpen) {
+        subEl.classList.add('is-open');
+        positionNativeFolderSubmenu(entryEl, subEl);
+      }
+      if (hadFocus) {
+        const nextInp = subEl.querySelector('input[data-aq-nmf-input]');
+        if (nextInp) {
+          nextInp.focus();
+          nextInp.setSelectionRange(nextInp.value.length, nextInp.value.length);
+        }
+      }
+    }
+
+    if (rmEl) {
+      if (assigned.length > 0) {
+        rmEl.style.display = '';
+        rmEl.removeAttribute('aria-hidden');
+        rmEl.setAttribute('role', 'menuitem');
+        const rmTxt =
+          assigned.length === 1
+            ? `移出「${assigned[0].name}」`
+            : `移出全部文件夹 (${assigned.length})`;
+        const rmSpan = rmEl.querySelector('.aq-nmf-rm-label');
+        if (rmSpan) rmSpan.textContent = rmTxt;
+      } else {
+        rmEl.style.display = 'none';
+        rmEl.setAttribute('aria-hidden', 'true');
+        rmEl.removeAttribute('role');
+      }
+    }
+  }
+
+  function refreshOpenNativeMenuFolders() {
+    const menus = document.querySelectorAll('[role="menu"]');
+    for (let i = 0; i < menus.length; i++) {
+      const menu = menus[i];
+      const entryEl = menu.querySelector('.aq-native-folder-entry');
+      if (!entryEl) continue;
+      const cid = entryEl.getAttribute('data-aq-nmf-cid') || '';
+      if (!cid) continue;
+      const convInfo = buildConversationInfoById(cid);
+      const rmEl = menu.querySelector('.aq-native-folder-rm-btn');
+      renderNativeFolderEntryContent(entryEl, rmEl, convInfo);
+    }
+  }
+
+  function syncNativeConversationMenus() {
+    const menus = document.querySelectorAll('[data-base-ui-portal] [role="menu"]');
+    for (let i = 0; i < menus.length; i++) {
+      const menu = menus[i];
+      if (menu.matches('[data-testid="context-menu-submenu-popup"]')) continue;
+      if (menu.querySelector('[data-aq-native-menu-ext]')) continue;
+      const isConvMenu = Boolean(
+        menu.querySelector(
+          '[data-testid="conversation-rename-menu-item"], [data-testid="conversation-pin-menu-item"], [data-testid="conversation-delete-menu-item"]'
+        )
+      );
+      if (!isConvMenu) continue;
+      const convInfo = resolveNativeMenuConversation();
+      if (!convInfo?.cascadeId) continue;
+
+      const sep = document.createElement('div');
+      sep.setAttribute('data-orientation', 'horizontal');
+      sep.setAttribute('role', 'separator');
+      sep.setAttribute('aria-orientation', 'horizontal');
+      sep.setAttribute('data-aq-native-menu-ext', '1');
+      sep.className = 'h-px bg-border my-1 -mx-1';
+
+      const entryEl = document.createElement('div');
+      entryEl.setAttribute('role', 'menuitem');
+      entryEl.setAttribute('tabindex', '-1');
+      entryEl.setAttribute('data-aq-native-menu-ext', '1');
+      entryEl.setAttribute('data-aq-nmf-cid', convInfo.cascadeId);
+      entryEl.className =
+        'agy-overlay-item group w-full pr-2 pl-1.5 text-left text-compact cursor-pointer outline-none no-focus-ring transition-colors select-none flex items-center rounded-md py-1 gap-1.5 hover:bg-secondary hover:text-foreground text-secondary-foreground justify-between aq-native-folder-entry';
+      entryEl.innerHTML = `
+        <span class="flex items-center gap-1.5 min-w-0 flex-1 truncate">${SVG_FOLDER_PLUS}<span class="truncate aq-nmf-label">加入文件夹</span></span>
+        <span class="flex items-center gap-1 shrink-0 pl-1"><span class="aq-nmf-badge-slot"></span><span class="opacity-50 flex items-center">${SVG_CHEVRON}</span></span>
+        <div class="aq-native-folder-sub" data-aq-native-folder-sub="1"></div>
+      `;
+
+      const rmEl = document.createElement('div');
+      rmEl.setAttribute('role', 'menuitem');
+      rmEl.setAttribute('tabindex', '-1');
+      rmEl.setAttribute('data-aq-native-menu-ext', '1');
+      rmEl.className =
+        'agy-overlay-item group w-full pr-2 pl-1.5 text-left text-compact cursor-pointer outline-none no-focus-ring transition-colors select-none flex items-center rounded-md py-1 gap-1.5 hover:bg-secondary hover:text-foreground text-secondary-foreground aq-native-folder-rm-btn';
+      rmEl.innerHTML = `${SVG_CLOSE}<span class="truncate aq-nmf-rm-label">移出文件夹</span>`;
+
+      renderNativeFolderEntryContent(entryEl, rmEl, convInfo);
+
+      const subEl = entryEl.querySelector('.aq-native-folder-sub');
+      let hoverCloseTimer = null;
+      const openSub = () => {
+        if (hoverCloseTimer) {
+          clearTimeout(hoverCloseTimer);
+          hoverCloseTimer = null;
+        }
+        if (!subEl) return;
+        subEl.classList.add('is-open');
+        positionNativeFolderSubmenu(entryEl, subEl);
+      };
+      const scheduleCloseSub = () => {
+        if (hoverCloseTimer) clearTimeout(hoverCloseTimer);
+        hoverCloseTimer = setTimeout(() => {
+          subEl?.classList.remove('is-open');
+        }, 120);
+      };
+
+      entryEl.addEventListener('pointerenter', openSub);
+      entryEl.addEventListener('pointerleave', scheduleCloseSub);
+      entryEl.addEventListener('click', (ev) => {
+        if (ev.target?.closest?.('.aq-native-folder-sub')) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        openSub();
+        if (!state.groups.length) {
+          subEl?.querySelector('input[data-aq-nmf-input]')?.focus();
+        }
+      });
+
+      if (subEl) {
+        for (const evtName of ['pointerdown', 'mousedown', 'click', 'keydown', 'keyup', 'keypress']) {
+          subEl.addEventListener(evtName, (ev) => {
+            if (evtName === 'keydown' && ev.key === 'Escape') {
+              return;
+            }
+            ev.stopPropagation();
+          });
+        }
+        subEl.addEventListener('click', (ev) => {
+          const opt = ev.target?.closest?.('[data-aq-nmf-toggle]');
+          if (opt) {
+            ev.preventDefault();
+            const groupId = opt.getAttribute('data-aq-nmf-toggle') || '';
+            if (!groupId) return;
+            const latestConv = buildConversationInfoById(convInfo.cascadeId);
+            if (opt.classList.contains('is-checked')) {
+              sendGroupAction({ type: 'remove-item', groupId, cascadeId: latestConv.cascadeId });
+            } else {
+              sendGroupAction({ type: 'add-item', groupId, item: latestConv });
+            }
+            return;
+          }
+          const createBtn = ev.target?.closest?.('[data-aq-nmf-create]');
+          if (createBtn) {
+            ev.preventDefault();
+            const inp = subEl.querySelector('input[data-aq-nmf-input]');
+            const name = String(inp?.value || '').trim();
+            if (!name) {
+              inp?.focus();
+              return;
+            }
+            sendGroupAction({ type: 'create', name, item: buildConversationInfoById(convInfo.cascadeId) });
+            if (inp) inp.value = '';
+          }
+        });
+        subEl.addEventListener('keydown', (ev) => {
+          const inp = ev.target?.closest?.('input[data-aq-nmf-input]');
+          if (!inp) return;
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            const name = String(inp.value || '').trim();
+            if (!name) return;
+            sendGroupAction({ type: 'create', name, item: buildConversationInfoById(convInfo.cascadeId) });
+            inp.value = '';
+          }
+        });
+      }
+
+      rmEl.addEventListener('pointerenter', () => subEl?.classList.remove('is-open'));
+      rmEl.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const assigned = getConversationAssignedGroups(convInfo.cascadeId);
+        for (let j = 0; j < assigned.length; j++) {
+          sendGroupAction({ type: 'remove-item', groupId: assigned[j].id, cascadeId: convInfo.cascadeId });
+        }
+        closeNativeBaseUiMenu(menu);
+      });
+
+      const firstSep = menu.querySelector(':scope > [role="separator"]');
+      if (firstSep) {
+        menu.insertBefore(sep, firstSep);
+        menu.insertBefore(entryEl, firstSep);
+        menu.insertBefore(rmEl, firstSep);
+      } else {
+        menu.appendChild(sep);
+        menu.appendChild(entryEl);
+        menu.appendChild(rmEl);
+      }
+
+      menu.addEventListener('pointerover', (ev) => {
+        const otherItem = ev.target?.closest?.('[role="menuitem"]:not([data-aq-native-menu-ext])');
+        if (otherItem) {
+          subEl?.classList.remove('is-open');
+        }
+      });
+    }
+  }
+
   function openGroupMenu(anchorEl, conversationInfo) {
     if (!anchorEl || !conversationInfo?.cascadeId) return;
+    document.querySelectorAll('[data-aq-menu-open]').forEach((el) => el.removeAttribute('data-aq-menu-open'));
+    anchorEl.setAttribute('data-aq-menu-open', '1');
     state.groupsError = '';
     state.groupMenuTarget = conversationInfo;
     const menu = ensureGroupMenuEl();
@@ -3752,6 +5081,10 @@
   }
 
   function clearConvDragExpandTimer() {
+    if (state.convDragLongPressTimer) {
+      clearTimeout(state.convDragLongPressTimer);
+      state.convDragLongPressTimer = null;
+    }
     if (state.convDragExpandTimer) {
       clearTimeout(state.convDragExpandTimer);
       state.convDragExpandTimer = null;
@@ -3774,11 +5107,11 @@
     return el;
   }
 
-  function cleanupConversationPointerDrag() {
+  function cleanupConversationPointerDrag(opts = {}) {
     clearConvDragExpandTimer();
     const d = state.convDrag;
     state.convDrag = null;
-    if (d?.mode === 'group-item') {
+    if (d?.mode === 'group-item' || d?.mode === 'group-folder' || d?.switchedFromProjects) {
       d.sourceEl?.classList?.remove('is-dragging');
       document.body.style.userSelect = '';
       document.body.style.cursor = '';
@@ -3787,16 +5120,52 @@
     const panel = document.getElementById('aq-conv-groups');
     if (panel) {
       panel.classList.remove('aq-grp-panel-drop-target');
-      panel.querySelectorAll('.aq-grp-drop-target').forEach((el) => el.classList.remove('aq-grp-drop-target'));
+      panel
+        .querySelectorAll('.aq-grp-drop-target, .aq-grp-drag-before, .aq-grp-drag-after, .aq-grp-drag-inside, .aq-grp-drag-root')
+        .forEach((el) =>
+          el.classList.remove('aq-grp-drop-target', 'aq-grp-drag-before', 'aq-grp-drag-after', 'aq-grp-drag-inside', 'aq-grp-drag-root')
+        );
     }
     const ghost = document.getElementById('aq-conv-drag-ghost');
     if (ghost) ghost.classList.remove('is-visible');
+    if (d?.switchedFromProjects && !opts.keepTab) {
+      state.sidebarTab = 'projects';
+      const sidebar = document.querySelector('.bg-sidebar');
+      if (sidebar) syncSidebarTabState(sidebar);
+    }
+  }
+
+  function activateConversationPointerDrag(d) {
+    if (!d || d.started || state.convDrag !== d) return;
+    if (state.convDragLongPressTimer) {
+      clearTimeout(state.convDragLongPressTimer);
+      state.convDragLongPressTimer = null;
+    }
+    d.started = true;
+    closeGroupMenu();
+    closeGroupCtxMenu();
+    if (d.mode === 'native-row' && state.sidebarTab === 'projects') {
+      d.switchedFromProjects = true;
+      state.sidebarTab = 'groups';
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'grabbing';
+      const sidebar = document.querySelector('.bg-sidebar');
+      if (sidebar) syncSidebarTabState(sidebar);
+      if (state.groupsCollapsedSection) {
+        state.groupsCollapsedSection = false;
+        renderSidebarGroupsPanel(true);
+      }
+    } else if (d.mode === 'group-item' || d.mode === 'group-folder') {
+      d.sourceEl?.classList?.add('is-dragging');
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'grabbing';
+    }
   }
 
   function startConversationPointerDrag({ mode, sourceGroupId = '', sourceEl = null, item, startX, startY }) {
     if (!item?.cascadeId) return;
-    cleanupConversationPointerDrag();
-    state.convDrag = {
+    cleanupConversationPointerDrag({ keepTab: true });
+    const d = {
       mode,
       sourceGroupId,
       sourceEl,
@@ -3806,10 +5175,142 @@
       lastX: startX,
       lastY: startY,
       started: false,
+      switchedFromProjects: false,
       overPanel: false,
       overGroupId: '',
       overEmptyPanel: false,
+      folderDragMode: '',
+      folderTargetId: '',
     };
+    state.convDrag = d;
+    if (mode === 'native-row' && state.sidebarTab === 'projects') {
+      state.convDragLongPressTimer = setTimeout(() => {
+        state.convDragLongPressTimer = null;
+        if (state.convDrag !== d || d.started) return;
+        activateConversationPointerDrag(d);
+        updateConversationDragTarget(d.lastX, d.lastY);
+      }, 260);
+    }
+  }
+
+  function updateFolderDragTarget(d, panel, clientX, clientY) {
+    panel
+      .querySelectorAll('.aq-grp-drag-before, .aq-grp-drag-after, .aq-grp-drag-inside, .aq-grp-drag-root')
+      .forEach((el) =>
+        el.classList.remove('aq-grp-drag-before', 'aq-grp-drag-after', 'aq-grp-drag-inside', 'aq-grp-drag-root')
+      );
+
+    const dragId = d.sourceGroupId;
+    const dragGrp = state.groups.find((g) => g.id === dragId);
+    const ghost = ensureConvDragGhostEl();
+    if (!dragGrp || !panel || !panel.isConnected) {
+      d.folderDragMode = '';
+      d.folderTargetId = '';
+      ghost.classList.remove('is-visible');
+      return;
+    }
+
+    let nextMode = '';
+    let nextTargetId = '';
+
+    const smartHdr = panel.querySelector('[data-aq-smart-hdr]');
+    if (smartHdr && dragGrp.parentId) {
+      const sRect = smartHdr.getBoundingClientRect();
+      if (sRect.height > 0 && clientY >= sRect.top - 4 && clientY <= sRect.bottom + 4 && clientX >= sRect.left - 8 && clientX <= sRect.right + 8) {
+        smartHdr.classList.add('aq-grp-drag-root');
+        nextMode = 'root';
+      }
+    }
+
+    if (!nextMode) {
+      const tree = buildGroupTreeIndex(state.groups);
+      const dragHeight = getGroupSubtreeHeight(tree.childrenByParent, dragId);
+      const blocks = panel.querySelectorAll('[data-aq-grp-block]');
+      let bestBlock = null;
+      let bestDepth = -1;
+      for (let i = 0; i < blocks.length; i++) {
+        const b = blocks[i];
+        const bRect = b.getBoundingClientRect();
+        if (bRect.height <= 0) continue;
+        if (clientY >= bRect.top - 2 && clientY <= bRect.bottom + 2 && clientX >= bRect.left - 8 && clientX <= bRect.right + 8) {
+          const depth = Number.parseInt(b.getAttribute('data-aq-grp-depth') || '0', 10) || 0;
+          if (depth >= bestDepth) {
+            bestDepth = depth;
+            bestBlock = b;
+          }
+        }
+      }
+
+      if (bestBlock) {
+        const targetId = bestBlock.getAttribute('data-aq-grp-block') || '';
+        if (targetId && targetId !== dragId && !isGroupDescendant(state.groups, dragId, targetId)) {
+          const targetDepth = tree.depthById.get(targetId) ?? 0;
+          const canNestInside = targetDepth + 1 + dragHeight < MAX_GROUP_DEPTH;
+          const hdr = bestBlock.querySelector(':scope > [data-aq-grp-hdr]');
+          const hRect = hdr?.getBoundingClientRect?.();
+          let mode = 'after';
+          if (hRect && hRect.height > 0 && clientY <= hRect.bottom) {
+            const rel = (clientY - hRect.top) / hRect.height;
+            if (rel <= (canNestInside ? 0.34 : 0.5)) {
+              mode = 'before';
+            } else if (canNestInside && rel < 0.66) {
+              mode = 'inside';
+            } else {
+              mode = 'after';
+            }
+          }
+          const targetGrp = tree.byId.get(targetId);
+          const targetParentDepth = targetGrp?.parentId ? (tree.depthById.get(targetGrp.parentId) ?? 0) : -1;
+          if ((mode === 'before' || mode === 'after') && targetParentDepth + 1 + dragHeight >= MAX_GROUP_DEPTH) {
+            mode = canNestInside ? 'inside' : '';
+          }
+          if (mode) {
+            bestBlock.classList.add(
+              mode === 'inside'
+                ? 'aq-grp-drag-inside'
+                : mode === 'before'
+                  ? 'aq-grp-drag-before'
+                  : 'aq-grp-drag-after'
+            );
+            nextMode = mode;
+            nextTargetId = targetId;
+          }
+        }
+      }
+    }
+
+    d.folderDragMode = nextMode;
+    d.folderTargetId = nextTargetId;
+
+    let badgeText = '';
+    if (nextMode === 'root') {
+      badgeText = '移至顶层';
+    } else if (nextTargetId) {
+      const tGrp = state.groups.find((g) => g.id === nextTargetId);
+      if (tGrp?.name) {
+        badgeText =
+          nextMode === 'inside'
+            ? `放入 ${tGrp.name}`
+            : nextMode === 'before'
+              ? `移到 ${tGrp.name} 前`
+              : `移到 ${tGrp.name} 后`;
+      }
+    }
+
+    const ghostSig = `folder|${d.item.title}|${badgeText}`;
+    if (ghost.dataset.sig !== ghostSig) {
+      ghost.dataset.sig = ghostSig;
+      ghost.innerHTML = `
+        <span class="aq-cdg-ico">${SVG_FOLDER}</span>
+        <span class="aq-cdg-title">${escapeHtml(d.item.title)}</span>
+        ${badgeText ? `<span class="aq-cdg-badge">${escapeHtml(badgeText)}</span>` : ''}
+      `;
+    }
+    const left = Math.min(window.innerWidth - 236, Math.max(8, Math.round(clientX + 12)));
+    const top = Math.min(window.innerHeight - 38, Math.max(8, Math.round(clientY - 14)));
+    ghost.style.left = `${left}px`;
+    ghost.style.top = `${top}px`;
+    ghost.classList.add('is-visible');
   }
 
   function updateConversationDragTarget(clientX, clientY) {
@@ -3818,6 +5319,10 @@
     d.lastX = clientX;
     d.lastY = clientY;
     const panel = document.getElementById('aq-conv-groups');
+    if (d.mode === 'group-folder') {
+      updateFolderDragTarget(d, panel, clientX, clientY);
+      return;
+    }
     if (!panel || !panel.isConnected) {
       d.overPanel = false;
       d.overGroupId = '';
@@ -3837,22 +5342,18 @@
       clientY >= pRect.top - 4 &&
       clientY <= pRect.bottom + 4;
 
+    const topWrap = panel.querySelector('.aq-grp-top-wrap') || panel;
+    const tRect = topWrap.getBoundingClientRect();
+    const inTopArea =
+      tRect.width > 0 &&
+      tRect.height > 0 &&
+      clientX >= tRect.left - 8 &&
+      clientX <= tRect.right + 8 &&
+      clientY >= tRect.top - 4 &&
+      clientY <= tRect.bottom + 4;
+
     if (d.mode === 'native-row') {
       document.body.classList.toggle('aq-dragging-to-group', inPanel);
-    }
-
-    if (inPanel && state.groupsCollapsedSection && state.groups.length > 0) {
-      if (!state.convDragExpandTimer) {
-        state.convDragExpandTimer = setTimeout(() => {
-          state.convDragExpandTimer = null;
-          if (state.convDrag?.started && state.groupsCollapsedSection) {
-            sendGroupAction({ type: 'toggle-collapse', section: true });
-          }
-        }, 320);
-      }
-    } else if (state.convDragExpandTimer) {
-      clearTimeout(state.convDragExpandTimer);
-      state.convDragExpandTimer = null;
     }
 
     let hitGroupId = '';
@@ -3884,10 +5385,9 @@
         }
       }
 
-      // Hovering over a collapsed folder auto-expands it so users can drop into nested subgroups
+      // Hovering over any collapsed folder auto-expands it so users can inspect or drop inside
       const hitGrp = hitGroupId ? state.groups.find((g) => g.id === hitGroupId) : null;
-      const hasSubgroups = hitGrp ? state.groups.some((g) => g.parentId === hitGrp.id) : false;
-      if (hitGrp && hitGrp.collapsed && hasSubgroups) {
+      if (hitGrp && hitGrp.collapsed) {
         if (state.convDragHoverGroupId !== hitGrp.id) {
           if (state.convDragHoverGroupTimer) clearTimeout(state.convDragHoverGroupTimer);
           state.convDragHoverGroupId = hitGrp.id;
@@ -3901,7 +5401,7 @@
                 sendGroupAction({ type: 'toggle-collapse', groupId: gid });
               }
             }
-          }, 420);
+          }, 350);
         }
       } else {
         if (state.convDragHoverGroupTimer) {
@@ -3925,14 +5425,14 @@
       b.classList.toggle('aq-grp-drop-target', Boolean(hitGroupId && gid === hitGroupId));
     });
 
-    const overEmptyPanel = Boolean(inPanel && state.groups.length === 0 && !state.groupCreating);
+    const overEmptyPanel = Boolean(inTopArea && state.groups.length === 0 && !state.groupCreating);
     panel.classList.toggle('aq-grp-panel-drop-target', overEmptyPanel);
 
     d.overPanel = inPanel;
     d.overGroupId = hitGroupId;
     d.overEmptyPanel = overEmptyPanel;
 
-    const showGhost = d.mode === 'group-item' || inPanel;
+    const showGhost = Boolean(d.switchedFromProjects || d.mode === 'group-item' || inPanel);
     const ghost = ensureConvDragGhostEl();
     if (!showGhost) {
       ghost.classList.remove('is-visible');
@@ -3983,12 +5483,30 @@
   function stabilizeSmartActiveItems(rawItems, activeCid) {
     const now = Date.now();
     const freshByCid = new Map();
+    const brandNew = [];
     for (let i = 0; i < rawItems.length; i++) {
       const it = rawItems[i];
       const key = String(it.cascadeId || '').toLowerCase();
       if (!key) continue;
       freshByCid.set(key, it);
-      state.smartStableMap.set(key, { item: it, missingSince: 0 });
+      const prev = state.smartStableMap.get(key);
+      if (prev) {
+        prev.item = it;
+        prev.missingSince = 0;
+      } else {
+        brandNew.push({ key, item: it });
+      }
+    }
+    if (brandNew.length > 0) {
+      brandNew.sort((a, b) => (b.item.lastModifiedMs || 0) - (a.item.lastModifiedMs || 0));
+      for (let i = 0; i < brandNew.length; i++) {
+        const { key, item } = brandNew[i];
+        state.smartStableMap.set(key, {
+          item,
+          missingSince: 0,
+          seq: state.smartNextSeq++,
+        });
+      }
     }
 
     let nextWakeInMs = 0;
@@ -4025,15 +5543,10 @@
       state.smartGraceTimer = null;
     }
 
-    const orderPriority = { waiting: 3, unread: 2, running: 1 };
-    const result = [...state.smartStableMap.values()].map((e) => e.item);
-    result.sort((a, b) => {
-      const pa = orderPriority[a.status] || 0;
-      const pb = orderPriority[b.status] || 0;
-      if (pa !== pb) return pb - pa;
-      return (b.lastModifiedMs || 0) - (a.lastModifiedMs || 0);
-    });
-    return result;
+    // Lock relative order by first-seen sequence so running/waiting transitions never reshuffle items
+    const entries = [...state.smartStableMap.values()];
+    entries.sort((a, b) => a.seq - b.seq);
+    return entries.map((e) => e.item);
   }
 
   function patchItemStatusBadgeInPlace(itemEl, nextStatus) {
@@ -4057,22 +5570,26 @@
     }
   }
 
+  function renderConvProjectSubHtml(project) {
+    return project
+      ? `<span class="aq-grp-item-sub">${SVG_FOLDER}<span>${escapeHtml(project)}</span></span>`
+      : '';
+  }
+
   function createSmartSlotEl(it, activeCid, animateEnter) {
     const cid = String(it.cascadeId || '');
     const cidLower = cid.toLowerCase();
     const isActive = Boolean(activeCid && cidLower === activeCid);
-    const subHtml = it.project
-      ? `<span class="aq-grp-item-sub">${SVG_FOLDER}<span>${escapeHtml(it.project)}</span></span>`
-      : '';
+    const tipText = it.project ? `${it.title} · ${it.project}` : it.title;
     const slot = document.createElement('div');
     slot.className = animateEnter ? 'aq-smart-slot is-entering' : 'aq-smart-slot';
     slot.setAttribute('data-aq-smart-cid', cidLower);
     slot.innerHTML = `
       <div class="aq-smart-slot-inner">
-        <div class="aq-grp-item ${isActive ? 'is-active' : ''}" data-aq-grp-open="${escapeHtml(cid)}" data-aq-smart-item="active" data-aq-status="${escapeHtml(it.status || '')}" title="${escapeHtml(it.title)}">
+        <div class="aq-grp-item ${isActive ? 'is-active' : ''}" data-aq-grp-open="${escapeHtml(cid)}" data-aq-smart-item="active" data-aq-status="${escapeHtml(it.status || '')}" data-aq-project="${escapeHtml(it.project || '')}" title="${escapeHtml(tipText)}">
           <div class="aq-grp-item-main">
             <span class="aq-grp-item-title">${escapeHtml(it.title)}</span>
-            ${subHtml}
+            ${renderConvProjectSubHtml(it.project)}
           </div>
           ${renderConvStatusBadgeHtml(it.status)}
           <span class="aq-grp-item-actions">
@@ -4096,35 +5613,39 @@
     if (!itemEl) return;
     const cidLower = String(it.cascadeId || '').toLowerCase();
     itemEl.classList.toggle('is-active', Boolean(activeCid && cidLower === activeCid));
-    if (itemEl.getAttribute('title') !== it.title) {
-      itemEl.setAttribute('title', it.title);
+    const tipText = it.project ? `${it.title} · ${it.project}` : it.title;
+    if (itemEl.getAttribute('title') !== tipText) {
+      itemEl.setAttribute('title', tipText);
     }
-    const titleEl = itemEl.querySelector('.aq-grp-item-title');
+    const prevProj = itemEl.getAttribute('data-aq-project') || '';
+    const nextProj = it.project || '';
+    if (prevProj !== nextProj) {
+      itemEl.setAttribute('data-aq-project', nextProj);
+    }
+    const mainEl = itemEl.querySelector('.aq-grp-item-main');
+    const titleEl = mainEl?.querySelector('.aq-grp-item-title');
     if (titleEl && titleEl.textContent !== it.title) {
       titleEl.textContent = it.title;
     }
-    const mainEl = itemEl.querySelector('.aq-grp-item-main');
-    const subEl = mainEl?.querySelector('.aq-grp-item-sub');
-    if (it.project) {
-      if (subEl) {
-        const subText = subEl.querySelector('span');
-        if (subText && subText.textContent !== it.project) {
-          subText.textContent = it.project;
+    if (mainEl) {
+      const existingSub = mainEl.querySelector('.aq-grp-item-sub');
+      if (nextProj) {
+        if (existingSub) {
+          const spanEl = existingSub.querySelector('span');
+          if (spanEl && spanEl.textContent !== nextProj) spanEl.textContent = nextProj;
+        } else {
+          mainEl.insertAdjacentHTML('beforeend', renderConvProjectSubHtml(nextProj));
         }
-      } else if (mainEl) {
-        mainEl.insertAdjacentHTML(
-          'beforeend',
-          `<span class="aq-grp-item-sub">${SVG_FOLDER}<span>${escapeHtml(it.project)}</span></span>`
-        );
+      } else if (existingSub) {
+        existingSub.remove();
       }
-    } else if (subEl) {
-      subEl.remove();
     }
     patchItemStatusBadgeInPlace(itemEl, it.status);
   }
 
-  function patchSidebarGroupsDynamicState(panel, activeCid, convStatuses, stableActiveItems) {
+  function patchSidebarGroupsDynamicState(panel, activeCid, convStatuses, stableActiveItems, recentItems = []) {
     // 1. Update smart group header, collapse state, count, empty placeholder, and keyed list
+    const activeBlockEl = panel.querySelector('[data-aq-smart-block="active"]');
     const chevEl = panel.querySelector('[data-aq-smart-chev]');
     const countEl = panel.querySelector('[data-aq-smart-count]');
     const childrenEl = panel.querySelector('[data-aq-smart-children]');
@@ -4133,6 +5654,7 @@
 
     const smartExpanded = !state.smartActiveCollapsed;
     const count = stableActiveItems.length;
+    if (activeBlockEl) activeBlockEl.classList.toggle('is-empty', count === 0);
     if (chevEl) chevEl.classList.toggle('is-open', smartExpanded);
     if (countEl) {
       const countText = String(count);
@@ -4224,6 +5746,98 @@
       patchItemStatusBadgeInPlace(itemEl, convStatuses[cidLower] || '');
     }
 
+    // 2b. Patch recent 10 conversations section at the bottom of Groups tab in-place
+    const recentChevEl = panel.querySelector('[data-aq-recent-chev]');
+    const recentChildrenEl = panel.querySelector('[data-aq-recent-children]');
+    const recentListEl = panel.querySelector('[data-aq-recent-list]');
+    const recentExpanded = !state.recentCollapsed;
+    if (recentChevEl) recentChevEl.classList.toggle('is-open', recentExpanded);
+    if (recentChildrenEl) recentChildrenEl.classList.toggle('is-collapsed', !recentExpanded);
+    if (recentListEl && Array.isArray(recentItems)) {
+      const existingRecentByCid = new Map();
+      const curRecentNodes = [...recentListEl.querySelectorAll(':scope > .aq-grp-item[data-aq-recent-cid]')];
+      for (let i = 0; i < curRecentNodes.length; i++) {
+        const el = curRecentNodes[i];
+        const k = el.getAttribute('data-aq-recent-cid') || '';
+        if (k) existingRecentByCid.set(k, el);
+      }
+      const desiredRecentKeys = new Set();
+      let rCursor = null;
+      for (let i = 0; i < recentItems.length; i++) {
+        const it = recentItems[i];
+        const cid = String(it.cascadeId || '');
+        const key = cid.toLowerCase();
+        if (!key) continue;
+        desiredRecentKeys.add(key);
+        const isActive = Boolean(activeCid && key === activeCid);
+        const tipText = it.project ? `${it.title} · ${it.project}` : it.title;
+        let itemEl = existingRecentByCid.get(key);
+        if (itemEl) {
+          itemEl.classList.toggle('is-active', isActive);
+          if (itemEl.getAttribute('title') !== tipText) itemEl.setAttribute('title', tipText);
+          const nextProj = it.project || '';
+          if ((itemEl.getAttribute('data-aq-project') || '') !== nextProj) {
+            itemEl.setAttribute('data-aq-project', nextProj);
+          }
+          const mainEl = itemEl.querySelector('.aq-grp-item-main');
+          const titleEl = mainEl?.querySelector('.aq-grp-item-title');
+          if (titleEl && titleEl.textContent !== it.title) titleEl.textContent = it.title;
+          if (mainEl) {
+            const existingSub = mainEl.querySelector('.aq-grp-item-sub');
+            if (nextProj) {
+              if (existingSub) {
+                const sp = existingSub.querySelector('span');
+                if (sp && sp.textContent !== nextProj) sp.textContent = nextProj;
+              } else {
+                mainEl.insertAdjacentHTML('beforeend', renderConvProjectSubHtml(nextProj));
+              }
+            } else if (existingSub) {
+              existingSub.remove();
+            }
+          }
+          patchItemStatusBadgeInPlace(itemEl, it.status);
+        } else {
+          itemEl = document.createElement('div');
+          itemEl.className = `aq-grp-item ${isActive ? 'is-active' : ''}`;
+          itemEl.setAttribute('data-aq-grp-open', cid);
+          itemEl.setAttribute('data-aq-recent-cid', key);
+          itemEl.setAttribute('data-aq-status', it.status || '');
+          itemEl.setAttribute('data-aq-project', it.project || '');
+          itemEl.setAttribute('title', tipText);
+          itemEl.innerHTML = `
+            <div class="aq-grp-item-main">
+              <span class="aq-grp-item-title">${escapeHtml(it.title)}</span>
+              ${renderConvProjectSubHtml(it.project)}
+            </div>
+            ${renderConvStatusBadgeHtml(it.status)}
+            <span class="aq-grp-item-actions">
+              <button type="button" class="aq-grp-icon-btn" data-aq-grp-item-menu="${escapeHtml(cid)}" title="管理所属分组">${SVG_FOLDER_PLUS}</button>
+            </span>
+          `;
+        }
+        const expectedNext = rCursor ? rCursor.nextElementSibling : recentListEl.firstElementChild;
+        if (itemEl !== expectedNext) {
+          recentListEl.insertBefore(itemEl, expectedNext || null);
+        }
+        rCursor = itemEl;
+      }
+      for (const [k, el] of existingRecentByCid.entries()) {
+        if (!desiredRecentKeys.has(k)) el.remove();
+      }
+      let recentEmpty = recentListEl.querySelector(':scope > .aq-grp-item-empty[data-aq-recent-empty]');
+      if (desiredRecentKeys.size === 0) {
+        if (!recentEmpty) {
+          recentEmpty = document.createElement('div');
+          recentEmpty.className = 'aq-grp-item-empty';
+          recentEmpty.setAttribute('data-aq-recent-empty', '1');
+          recentEmpty.textContent = '暂无未归档会话';
+          recentListEl.appendChild(recentEmpty);
+        }
+      } else if (recentEmpty) {
+        recentEmpty.remove();
+      }
+    }
+
     // 3. Keep max-height ceiling synced without disturbing active drag or spring-back animation
     if (!state.groupResizeDrag && !state.groupResizeSnapTimer) {
       const bodyEl = panel.querySelector('.aq-grp-body');
@@ -4250,12 +5864,11 @@
     }
 
     const activeCid = extractCascadeId().toLowerCase();
-    const { statusById: convStatuses, activeItems } = collectAllConversationStates(activeCid);
+    const { statusById: convStatuses, activeItems, recentItems } = collectAllConversationStates(activeCid);
     const stableActiveItems = stabilizeSmartActiveItems(activeItems, activeCid);
 
     // Only structural changes rebuild panel.innerHTML; status/active/smart-list updates patch in-place!
     const structureKey = JSON.stringify({
-      c: state.groupsCollapsedSection,
       g: state.groups,
       err: state.groupsError,
       cr: state.groupCreating,
@@ -4265,9 +5878,9 @@
       dc: state.groupDeleteConfirmId,
     });
 
-    const needRebuild = force || structureKey !== state.groupRenderKey || !panel.querySelector('[data-aq-grp-sec-hdr]');
+    const needRebuild = force || structureKey !== state.groupRenderKey || !panel.querySelector('.aq-grp-body');
     if (!needRebuild) {
-      patchSidebarGroupsDynamicState(panel, activeCid, convStatuses, stableActiveItems);
+      patchSidebarGroupsDynamicState(panel, activeCid, convStatuses, stableActiveItems, recentItems);
       return;
     }
 
@@ -4276,12 +5889,11 @@
 
     const smartExpanded = !state.smartActiveCollapsed;
     const smartGroupsHtml = `
-      <div class="aq-grp-block" data-aq-smart-block="active">
-        <div class="aq-grp-hdr is-smart" data-aq-smart-hdr="active" title="未确认 / 运行中">
+      <div class="aq-grp-active-sec ${stableActiveItems.length === 0 ? 'is-empty' : ''}" data-aq-smart-block="active">
+        <div class="aq-grp-hdr is-smart" data-aq-smart-hdr="active" title="进行中：正在运行、待确认或未读会话">
+          <span class="aq-grp-active-dot" aria-hidden="true"></span>
+          <span class="aq-grp-name">进行中</span>
           <span class="aq-grp-chev ${smartExpanded ? 'is-open' : ''}" data-aq-smart-chev="1">${SVG_CHEVRON}</span>
-          <span class="aq-grp-folder-ico">${SVG_SMART_ACTIVE}</span>
-          <span class="aq-grp-name">未确认 / 运行中</span>
-          <span class="aq-grp-count" data-aq-smart-count="1">0</span>
         </div>
         <div class="aq-smart-children ${smartExpanded ? '' : 'is-collapsed'}" data-aq-smart-children="1">
           <div class="aq-smart-children-inner">
@@ -4289,7 +5901,7 @@
               <div class="aq-smart-list" data-aq-smart-list="1"></div>
               <div class="aq-smart-empty-wrap" data-aq-smart-empty="1">
                 <div class="aq-smart-empty-inner">
-                  <div class="aq-grp-item-empty">暂无未确认或运行中的对话</div>
+                  <div class="aq-grp-item-empty">暂无进行中会话</div>
                 </div>
               </div>
             </div>
@@ -4342,11 +5954,10 @@
           </div>
         `
         : `
-          <div class="aq-grp-hdr ${isDeleteConfirm ? 'has-confirm' : ''}" draggable="true" data-aq-grp-hdr="${escapeHtml(g.id)}" title="${escapeHtml(g.name)}">
+          <div class="aq-grp-hdr ${isDeleteConfirm ? 'has-confirm' : ''}" data-aq-grp-hdr="${escapeHtml(g.id)}" title="${escapeHtml(g.name)}">
             <span class="aq-grp-chev ${isExpanded ? 'is-open' : ''}">${SVG_CHEVRON}</span>
             <span class="aq-grp-folder-ico">${SVG_FOLDER}</span>
             <span class="aq-grp-name">${escapeHtml(g.name)}</span>
-            <span class="aq-grp-count">${totalCount}</span>
             <span class="aq-grp-actions">
               ${newChildBtnHtml}
               <button type="button" class="aq-grp-icon-btn" data-aq-grp-rename="${escapeHtml(g.id)}" title="重命名分组">${SVG_EDIT}</button>
@@ -4365,18 +5976,15 @@
             const isActive = activeCid && cidLower === activeCid;
             const status = convStatuses[cidLower] || '';
             const statusHtml = renderConvStatusBadgeHtml(status);
-            const subHtml = it.project
-              ? `<span class="aq-grp-item-sub">${SVG_FOLDER}<span>${escapeHtml(it.project)}</span></span>`
-              : '';
+            const tipText = it.project ? `${it.title} · ${it.project}` : it.title;
             return `
-              <div class="aq-grp-item ${isActive ? 'is-active' : ''}" data-aq-grp-open="${escapeHtml(it.cascadeId)}" data-aq-grp-gid="${escapeHtml(g.id)}" data-aq-status="${escapeHtml(status)}" title="${escapeHtml(it.title)}">
+              <div class="aq-grp-item ${isActive ? 'is-active' : ''}" data-aq-grp-open="${escapeHtml(it.cascadeId)}" data-aq-grp-gid="${escapeHtml(g.id)}" data-aq-status="${escapeHtml(status)}" data-aq-project="${escapeHtml(it.project || '')}" title="${escapeHtml(tipText)}">
                 <div class="aq-grp-item-main">
                   <span class="aq-grp-item-title">${escapeHtml(it.title)}</span>
-                  ${subHtml}
+                  ${renderConvProjectSubHtml(it.project)}
                 </div>
                 ${statusHtml}
                 <span class="aq-grp-item-actions">
-                  <button type="button" class="aq-grp-icon-btn" data-aq-grp-item-menu="${escapeHtml(it.cascadeId)}" data-aq-grp-gid="${escapeHtml(g.id)}" title="管理所属分组">${SVG_FOLDER_PLUS}</button>
                   <button type="button" class="aq-grp-icon-btn" data-aq-grp-item-rm="${escapeHtml(it.cascadeId)}" data-aq-grp-gid="${escapeHtml(g.id)}" title="移出此分组">${SVG_CLOSE}</button>
                 </span>
               </div>
@@ -4385,9 +5993,7 @@
           .join('');
         const emptyHtml =
           !isCreatingChildHere && childGroups.length === 0 && items.length === 0
-            ? `<div class="aq-grp-item-empty">${
-                canCreateChild ? '暂无对话 · 拖入对话或点右侧新建子分组' : '暂无对话 · 直接拖入对话'
-              }</div>`
+            ? '<div class="aq-grp-item-empty">暂无对话</div>'
             : '';
         childrenHtml = `<div class="aq-grp-children">${childCreateHtml}${subGroupsHtml}${itemsListHtml}${emptyHtml}</div>`;
       }
@@ -4398,7 +6004,7 @@
     const topGroups = tree.childrenByParent.get('') || [];
     const groupsHtml = topGroups.map((g) => renderGroupBlock(g, 0)).join('');
 
-    const showBody = !state.groupsCollapsedSection || state.groupCreating;
+    const recentExpanded = !state.recentCollapsed;
     const errHtml = state.groupsError
       ? `<div class="aq-grp-error">${escapeHtml(state.groupsError)}</div>`
       : '';
@@ -4406,38 +6012,42 @@
       state.groupsBodyHeight > 0
         ? ` style="max-height:${clampGroupsBodyHeight(state.groupsBodyHeight, panel)}px"`
         : '';
-    const resizerHtml = showBody
-      ? '<div class="aq-grp-resizer" data-aq-grp-resizer="1" title="上下拖动设置分组最大高度，双击恢复默认"><span class="aq-grp-resizer-badge" data-aq-grp-resizer-badge="1"></span></div>'
-      : '';
-    const bodyHtml = showBody
-      ? `
-        ${errHtml}
-        ${topCreateFormHtml}
-        <div class="aq-grp-body"${bodyHeightStyle}>
-          ${smartGroupsHtml}
-          ${totalGroups ? `<div class="aq-grp-smart-sep"></div>${groupsHtml}` : ''}
+    const resizerHtml =
+      '<div class="aq-grp-resizer" data-aq-grp-resizer="1" title="上下拖动设置分组最大高度，双击恢复默认"><span class="aq-grp-resizer-badge" data-aq-grp-resizer-badge="1"></span></div>';
+    const recentSectionHtml = `
+      <div class="aq-grp-recent-sec" data-aq-recent-sec="1">
+        <div class="aq-grp-hdr is-smart" data-aq-recent-hdr="1" title="最近会话（最多 10 条）">
+          <span class="aq-grp-chev ${recentExpanded ? 'is-open' : ''}" data-aq-recent-chev="1">${SVG_CHEVRON}</span>
+          <span class="aq-grp-name">最近会话</span>
         </div>
-        ${
-          !totalGroups && !state.groupCreating
-            ? '<div class="aq-grp-empty">点击右侧 + 新建，或直接拖入下方对话</div>'
-            : ''
-        }
-      `
-      : '';
-
-    panel.innerHTML = `
-      <div class="aq-grp-sec-hdr" data-aq-grp-sec-hdr="1">
-        <button type="button" class="aq-grp-sec-toggle" data-aq-grp-sec-toggle="1" title="${state.groupsCollapsedSection ? '展开分组' : '折叠分组'}">
-          <span class="aq-grp-chev ${state.groupsCollapsedSection ? '' : 'is-open'}">${SVG_CHEVRON}</span>
-          <span>分组${totalGroups ? ` (${totalGroups})` : ''}</span>
-        </button>
-        <button type="button" class="aq-grp-icon-btn" data-aq-grp-new="1" title="新建分组">${SVG_PLUS}</button>
+        <div class="aq-smart-children ${recentExpanded ? '' : 'is-collapsed'}" data-aq-recent-children="1">
+          <div class="aq-smart-children-inner">
+            <div class="aq-grp-children" data-aq-recent-list="1"></div>
+          </div>
+        </div>
       </div>
-      ${bodyHtml}
-      ${resizerHtml}
+    `;
+    const rootAddRowHtml = creatingTop
+      ? topCreateFormHtml
+      : totalGroups === 0
+        ? `<button type="button" class="aq-grp-empty-cta" data-aq-grp-new="1">${SVG_FOLDER_PLUS}<span>新建根文件夹，或拖入下方会话</span></button>`
+        : '';
+    const bodyHtml = `
+      ${smartGroupsHtml}
+      <div class="aq-grp-top-wrap">
+        ${errHtml}
+        <div class="aq-grp-body"${bodyHeightStyle}>
+          ${groupsHtml}
+          ${rootAddRowHtml}
+        </div>
+        ${resizerHtml}
+      </div>
+      ${recentSectionHtml}
     `;
 
-    patchSidebarGroupsDynamicState(panel, activeCid, convStatuses, stableActiveItems);
+    panel.innerHTML = bodyHtml;
+
+    patchSidebarGroupsDynamicState(panel, activeCid, convStatuses, stableActiveItems, recentItems);
 
     if (prevScrollTop > 0) {
       const nextBody = panel.querySelector('.aq-grp-body');
@@ -4640,6 +6250,26 @@
         return;
       }
 
+      const foldersHdr = target?.closest?.('[data-aq-folders-hdr]');
+      if (foldersHdr) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        state.foldersCollapsed = !state.foldersCollapsed;
+        saveSmartGroupCollapsed();
+        renderSidebarGroupsPanel(false);
+        return;
+      }
+
+      const recentHdr = target?.closest?.('[data-aq-recent-hdr]');
+      if (recentHdr) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        state.recentCollapsed = !state.recentCollapsed;
+        saveSmartGroupCollapsed();
+        renderSidebarGroupsPanel(false);
+        return;
+      }
+
       const hdr = target?.closest?.('[data-aq-grp-hdr]');
       if (hdr) {
         ev.preventDefault();
@@ -4672,6 +6302,7 @@
             '未命名对话';
           const project =
             meta?.project ||
+            rowEl?.getAttribute('data-aq-project') ||
             rowEl?.querySelector('.aq-grp-item-sub > span')?.textContent?.trim() ||
             '';
           item = { cascadeId: cid, title, project };
@@ -4764,133 +6395,259 @@
       }
     });
 
-    const clearGroupDragHighlights = () => {
-      panel
-        .querySelectorAll('.aq-grp-drag-before, .aq-grp-drag-inside, .aq-grp-drag-root')
-        .forEach((el) => el.classList.remove('aq-grp-drag-before', 'aq-grp-drag-inside', 'aq-grp-drag-root'));
-    };
-
-    panel.addEventListener('dragstart', (ev) => {
+    panel.addEventListener('contextmenu', (ev) => {
+      if (ev.target?.closest?.('input, textarea')) return;
+      ev.preventDefault();
+      ev.stopPropagation();
       const hdr = ev.target?.closest?.('[data-aq-grp-hdr]');
-      if (!hdr || state.groupRenamingId || state.groupCreating) {
-        ev.preventDefault();
+      if (hdr) {
+        const gid = hdr.getAttribute('data-aq-grp-hdr') || '';
+        const block = hdr.closest('[data-aq-grp-block]');
+        const depth = Number.parseInt(block?.getAttribute('data-aq-grp-depth') || '0', 10) || 0;
+        openGroupCtxMenu(ev.clientX, ev.clientY, { groupId: gid, depth });
         return;
       }
-      state.groupDragId = hdr.getAttribute('data-aq-grp-hdr') || '';
-      state.groupDragMode = '';
-      state.groupDragTargetId = '';
-      try {
-        ev.dataTransfer.effectAllowed = 'move';
-        ev.dataTransfer.setData('text/plain', state.groupDragId);
-      } catch {}
-    });
-
-    panel.addEventListener('dragover', (ev) => {
-      if (!state.groupDragId) return;
-      const dragId = state.groupDragId;
-      const dragGrp = state.groups.find((g) => g.id === dragId);
-      if (!dragGrp) return;
-
-      const secHdr = ev.target?.closest?.('[data-aq-grp-sec-hdr]');
-      if (secHdr) {
-        if (!dragGrp.parentId) {
-          clearGroupDragHighlights();
-          state.groupDragMode = '';
-          state.groupDragTargetId = '';
+      const activeOrRecent = ev.target?.closest?.('[data-aq-recent-cid], [data-aq-smart-item="active"]');
+      if (activeOrRecent) {
+        const cid =
+          activeOrRecent.getAttribute('data-aq-grp-open') ||
+          activeOrRecent.getAttribute('data-aq-recent-cid') ||
+          '';
+        closeGroupCtxMenu();
+        if (openNativeConversationContextMenu(cid, ev.clientX, ev.clientY)) {
           return;
         }
+        openGroupCtxMenu(ev.clientX, ev.clientY, { item: cid ? { cascadeId: cid } : null });
+        return;
+      }
+      const rowEl = ev.target?.closest?.('[data-aq-grp-open]');
+      const cid = rowEl?.getAttribute?.('data-aq-grp-open') || '';
+      const itemGroupId = rowEl?.getAttribute?.('data-aq-grp-gid') || '';
+      openGroupCtxMenu(ev.clientX, ev.clientY, {
+        item: cid ? { cascadeId: cid } : null,
+        itemGroupId,
+      });
+    });
+  }
+
+  function saveSidebarTab(tab) {
+    try {
+      localStorage.setItem('aq_sidebar_tab_v1', tab === 'projects' ? 'projects' : 'groups');
+    } catch {}
+  }
+
+  function parseTranslateYPx(el) {
+    if (!el) return null;
+    const tf = el.style?.transform || '';
+    const m = tf.match(/translateY\(([-\d.]+)px\)/i);
+    if (!m) return null;
+    const v = Number(m[1]);
+    return Number.isFinite(v) ? v : null;
+  }
+
+  function triggerNewTopFolder() {
+    state.sidebarTab = 'groups';
+    saveSidebarTab('groups');
+    state.groupsError = '';
+    state.groupRenamingId = '';
+    clearGroupDeleteConfirm();
+    state.groupCreateParentId = '';
+    state.groupCreateInitialItem = null;
+    state.groupCreating = true;
+    state.groupsCollapsedSection = false;
+    const sb = document.querySelector('.bg-sidebar');
+    if (sb) syncSidebarTabState(sb);
+    renderSidebarGroupsPanel(true);
+  }
+
+  function syncPinnedNewFolderButton(sidebar) {
+    const pinnedHdr = sidebar?.querySelector?.('[data-testid="pinned-section-header"]');
+    if (!pinnedHdr) return;
+    let btn = pinnedHdr.querySelector('[data-aq-pinned-new-grp="1"]');
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'aq-grp-icon-btn aq-pinned-add-folder-btn';
+      btn.setAttribute('data-aq-pinned-new-grp', '1');
+      btn.setAttribute('title', '新建文件夹');
+      btn.setAttribute('aria-label', '新建文件夹');
+      btn.innerHTML = SVG_PLUS;
+      btn.addEventListener('click', (ev) => {
         ev.preventDefault();
-        clearGroupDragHighlights();
-        secHdr.classList.add('aq-grp-drag-root');
-        state.groupDragMode = 'root';
-        state.groupDragTargetId = '';
-        return;
+        ev.stopPropagation();
+        triggerNewTopFolder();
+      });
+      const anchor = pinnedHdr.querySelector('h2') || pinnedHdr.firstElementChild;
+      if (anchor) {
+        anchor.insertAdjacentElement('afterend', btn);
+      } else {
+        pinnedHdr.appendChild(btn);
       }
+    }
+  }
 
-      const block = ev.target?.closest?.('[data-aq-grp-block]');
-      if (!block) return;
-      const targetId = block.getAttribute('data-aq-grp-block') || '';
-      if (!targetId || targetId === dragId || isGroupDescendant(state.groups, dragId, targetId)) {
-        clearGroupDragHighlights();
-        state.groupDragMode = '';
-        state.groupDragTargetId = '';
-        return;
-      }
+  function syncProjectRowGroupButtons(sidebar) {
+    if (!sidebar) return;
+    const rows = sidebar.querySelectorAll('[data-testid="conversation-row-sidebar"][data-cascade-id]');
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (row.closest('[aria-hidden="true"]')) continue;
+      const cid = String(row.getAttribute('data-cascade-id') || '').trim();
+      if (!cid) continue;
+      const actionsEl = row.querySelector('.agy-row-actions');
+      if (!actionsEl) continue;
 
-      const tree = buildGroupTreeIndex(state.groups);
-      const targetDepth = tree.depthById.get(targetId) ?? 0;
-      const dragHeight = getGroupSubtreeHeight(tree.childrenByParent, dragId);
-      const canNestInside = targetDepth + 1 + dragHeight < MAX_GROUP_DEPTH;
-
-      const hdr = block.querySelector(':scope > [data-aq-grp-hdr]');
-      const hRect = hdr?.getBoundingClientRect?.();
-      let mode = canNestInside ? 'inside' : 'before';
-      if (hRect && hRect.height > 0 && ev.clientY <= hRect.top + hRect.height * 0.28) {
-        mode = 'before';
-      }
-
-      const targetGrp = tree.byId.get(targetId);
-      const targetParentDepth = targetGrp?.parentId ? (tree.depthById.get(targetGrp.parentId) ?? 0) : -1;
-      if (mode === 'before' && targetParentDepth + 1 + dragHeight >= MAX_GROUP_DEPTH) {
-        if (!canNestInside) {
-          clearGroupDragHighlights();
-          state.groupDragMode = '';
-          state.groupDragTargetId = '';
-          return;
-        }
-        mode = 'inside';
-      }
-
-      ev.preventDefault();
-      clearGroupDragHighlights();
-      block.classList.add(mode === 'inside' ? 'aq-grp-drag-inside' : 'aq-grp-drag-before');
-      state.groupDragMode = mode;
-      state.groupDragTargetId = targetId;
-    });
-
-    panel.addEventListener('dragleave', (ev) => {
-      if (!panel.contains(ev.relatedTarget)) {
-        clearGroupDragHighlights();
-        state.groupDragMode = '';
-        state.groupDragTargetId = '';
-      }
-    });
-
-    panel.addEventListener('drop', (ev) => {
-      if (!state.groupDragId) return;
-      const dragId = state.groupDragId;
-      const mode = state.groupDragMode;
-      const targetId = state.groupDragTargetId;
-      state.groupDragId = '';
-      state.groupDragMode = '';
-      state.groupDragTargetId = '';
-      clearGroupDragHighlights();
-      if (!mode) return;
-      ev.preventDefault();
-      if (mode === 'root') {
-        sendGroupAction({ type: 'move-group', groupId: dragId, parentId: '' });
-        return;
-      }
-      if (!targetId || targetId === dragId || isGroupDescendant(state.groups, dragId, targetId)) return;
-      if (mode === 'inside') {
-        sendGroupAction({ type: 'move-group', groupId: dragId, parentId: targetId });
-      } else if (mode === 'before') {
-        const targetGrp = state.groups.find((g) => g.id === targetId);
-        sendGroupAction({
-          type: 'move-group',
-          groupId: dragId,
-          parentId: targetGrp?.parentId || '',
-          beforeGroupId: targetId,
+      let btn = actionsEl.querySelector('[data-aq-row-grp-btn]');
+      if (!btn || btn.dataset.aqOwner !== INSTANCE_TOKEN) {
+        if (btn) btn.remove();
+        btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'aq-row-grp-btn';
+        btn.dataset.aqOwner = INSTANCE_TOKEN;
+        btn.setAttribute('data-aq-row-grp-btn', cid);
+        btn.innerHTML = SVG_FOLDER_PLUS;
+        btn.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const curRow = btn.closest('[data-testid="conversation-row-sidebar"][data-cascade-id]');
+          const curCid = String(btn.getAttribute('data-aq-row-grp-btn') || '').trim();
+          const info = (curRow && extractRowConversationInfo(curRow)) || {
+            cascadeId: curCid,
+            title: state.trajMetaById[curCid.toLowerCase()]?.title || '未命名对话',
+            project: state.trajMetaById[curCid.toLowerCase()]?.project || '',
+          };
+          if (info?.cascadeId) {
+            openGroupMenu(btn, info);
+          }
         });
+        actionsEl.insertBefore(btn, actionsEl.firstElementChild);
+      } else if (btn.getAttribute('data-aq-row-grp-btn') !== cid) {
+        btn.setAttribute('data-aq-row-grp-btn', cid);
       }
-    });
 
-    panel.addEventListener('dragend', () => {
-      state.groupDragId = '';
-      state.groupDragMode = '';
-      state.groupDragTargetId = '';
-      clearGroupDragHighlights();
-    });
+      const grouped = isConversationGrouped(cid);
+      btn.classList.toggle('is-grouped', grouped);
+      const label = grouped ? '管理所属分组' : '加入文件夹';
+      if (btn.getAttribute('title') !== label) {
+        btn.setAttribute('title', label);
+        btn.setAttribute('aria-label', label);
+      }
+    }
+  }
+
+  function syncProjectSplitCards(sidebar) {
+    const convList = sidebar?.querySelector?.('[data-testid="conversation-list-sidebar"]');
+    const inner = convList?.firstElementChild;
+    if (!convList || !inner) return;
+
+    if (state.projScrollEl !== convList) {
+      if (state.projScrollEl && state.onProjScroll) {
+        state.projScrollEl.removeEventListener('scroll', state.onProjScroll);
+      }
+      state.onProjScroll = () => syncProjectSplitCards(document.querySelector('.bg-sidebar'));
+      convList.addEventListener('scroll', state.onProjScroll, { passive: true });
+      state.projScrollEl = convList;
+    }
+
+    let pinnedCard = inner.querySelector('[data-aq-proj-card="pinned"]');
+    if (pinnedCard && pinnedCard.dataset.aqOwner !== INSTANCE_TOKEN) {
+      pinnedCard.remove();
+      pinnedCard = null;
+    }
+    if (!pinnedCard) {
+      pinnedCard = document.createElement('div');
+      pinnedCard.className = 'aq-proj-card';
+      pinnedCard.dataset.aqOwner = INSTANCE_TOKEN;
+      pinnedCard.setAttribute('data-aq-proj-card', 'pinned');
+      pinnedCard.setAttribute('aria-hidden', 'true');
+      inner.insertBefore(pinnedCard, inner.firstElementChild);
+    }
+
+    let projectsCard = inner.querySelector('[data-aq-proj-card="projects"]');
+    if (projectsCard && projectsCard.dataset.aqOwner !== INSTANCE_TOKEN) {
+      projectsCard.remove();
+      projectsCard = null;
+    }
+    if (!projectsCard) {
+      projectsCard = document.createElement('div');
+      projectsCard.className = 'aq-proj-card';
+      projectsCard.dataset.aqOwner = INSTANCE_TOKEN;
+      projectsCard.setAttribute('data-aq-proj-card', 'projects');
+      projectsCard.setAttribute('aria-hidden', 'true');
+      inner.insertBefore(projectsCard, pinnedCard.nextSibling || inner.firstElementChild);
+    }
+
+    let pinnedLastBottom = 0;
+    let mainHdrTop = null;
+    const children = inner.children;
+    for (let i = 0; i < children.length; i++) {
+      const c = children[i];
+      if (!c.hasAttribute('data-index')) continue;
+      const dropId = c.getAttribute('data-sidebar-section-drop-id');
+      const secId = c.getAttribute('data-sidebar-section-id');
+      if (dropId === 'pinned') {
+        const y = parseTranslateYPx(c);
+        if (y !== null) {
+          pinnedLastBottom = Math.max(pinnedLastBottom, y + (c.offsetHeight || 28));
+        } else if (c.style.position === 'sticky' && convList.scrollTop < 4) {
+          pinnedLastBottom = Math.max(pinnedLastBottom, c.offsetHeight || 28);
+        }
+      } else if (secId === 'pinned') {
+        const y = parseTranslateYPx(c);
+        if (y !== null) {
+          pinnedLastBottom = Math.max(pinnedLastBottom, y + (c.offsetHeight || 48));
+        }
+      } else if (dropId === 'main-section-header') {
+        const y = parseTranslateYPx(c);
+        if (y !== null) {
+          mainHdrTop = y;
+        }
+      }
+    }
+
+    let split = state.cachedProjSplit;
+    if (mainHdrTop !== null) {
+      split =
+        mainHdrTop >= 16
+          ? { pinnedCardH: Math.max(28, mainHdrTop - 12), projectsTop: mainHdrTop - 4 }
+          : { pinnedCardH: 0, projectsTop: 0 };
+      state.cachedProjSplit = split;
+    } else if (pinnedLastBottom > 0) {
+      split = { pinnedCardH: pinnedLastBottom + 4, projectsTop: pinnedLastBottom + 12 };
+      state.cachedProjSplit = split;
+    } else if (!split) {
+      split = { pinnedCardH: 0, projectsTop: 0 };
+    }
+
+    if (split.pinnedCardH > 0) {
+      pinnedCard.style.display = 'block';
+      pinnedCard.style.top = '0px';
+      pinnedCard.style.height = `${Math.round(split.pinnedCardH)}px`;
+    } else {
+      pinnedCard.style.display = 'none';
+    }
+    projectsCard.style.display = 'block';
+    projectsCard.style.top = `${Math.round(split.projectsTop)}px`;
+    projectsCard.style.bottom = '0px';
+  }
+
+  function syncSidebarTabState(sidebar) {
+    if (!sidebar) return;
+    const activeTab = state.sidebarTab === 'projects' ? 'projects' : 'groups';
+    if (sidebar.getAttribute('data-aq-tab') !== activeTab) {
+      sidebar.setAttribute('data-aq-tab', activeTab);
+    }
+    const tabBar = document.getElementById('aq-sidebar-tabs');
+    if (tabBar) {
+      tabBar.querySelectorAll('[data-aq-sidebar-tab]').forEach((btn) => {
+        const isOn = btn.getAttribute('data-aq-sidebar-tab') === activeTab;
+        btn.classList.toggle('is-active', isOn);
+        btn.setAttribute('aria-selected', isOn ? 'true' : 'false');
+      });
+    }
+    syncPinnedNewFolderButton(sidebar);
+    syncProjectRowGroupButtons(sidebar);
+    syncProjectSplitCards(sidebar);
   }
 
   function ensureSidebarGroupsPanel() {
@@ -4905,16 +6662,55 @@
     }
     if (!scrollWrap || scrollWrap.parentElement !== sidebar) return;
 
+    document.getElementById('aq-sidebar-tabs-row')?.remove();
+    let tabBar = document.getElementById('aq-sidebar-tabs');
+    if (tabBar && tabBar.dataset.aqOwner !== INSTANCE_TOKEN) {
+      tabBar.remove();
+      tabBar = null;
+    }
+    if (!tabBar) {
+      tabBar = document.createElement('div');
+      tabBar.id = 'aq-sidebar-tabs';
+      tabBar.dataset.aqOwner = INSTANCE_TOKEN;
+      tabBar.setAttribute('role', 'tablist');
+      tabBar.setAttribute('aria-label', '侧栏视图切换');
+      tabBar.innerHTML =
+        '<button type="button" class="aq-st-tab" role="tab" data-aq-sidebar-tab="groups" aria-selected="true">分组</button>' +
+        '<button type="button" class="aq-st-tab" role="tab" data-aq-sidebar-tab="projects" aria-selected="false">项目</button>';
+      tabBar.addEventListener('click', (ev) => {
+        const btn = ev.target?.closest?.('[data-aq-sidebar-tab]');
+        if (!btn) return;
+        const nextTab = btn.getAttribute('data-aq-sidebar-tab') === 'projects' ? 'projects' : 'groups';
+        if (nextTab === state.sidebarTab) return;
+        state.sidebarTab = nextTab;
+        saveSidebarTab(nextTab);
+        const sb = document.querySelector('.bg-sidebar');
+        if (sb) syncSidebarTabState(sb);
+        if (nextTab === 'groups') {
+          renderSidebarGroupsPanel(false);
+        }
+      });
+    }
+
     let panel = document.getElementById('aq-conv-groups');
+    if (panel && panel.dataset.aqOwner !== INSTANCE_TOKEN) {
+      panel.remove();
+      panel = null;
+    }
     if (!panel) {
       panel = document.createElement('div');
       panel.id = 'aq-conv-groups';
+      panel.dataset.aqOwner = INSTANCE_TOKEN;
       bindSidebarGroupsEvents(panel);
+    }
+    if (tabBar.parentElement !== sidebar || tabBar.nextElementSibling !== panel) {
+      sidebar.insertBefore(tabBar, panel.parentElement === sidebar ? panel : scrollWrap);
     }
     if (panel.parentElement !== sidebar || panel.nextElementSibling !== scrollWrap) {
       sidebar.insertBefore(panel, scrollWrap);
       state.groupRenderKey = '';
     }
+    syncSidebarTabState(sidebar);
     renderSidebarGroupsPanel(false);
     syncGroupedConversationMetadata();
   }
@@ -4947,10 +6743,12 @@
     if (state.renderRaf) return;
     state.renderRaf = requestAnimationFrame(() => {
       state.renderRaf = 0;
+      ensureWebContextMenuMode();
       syncCascadeRoute();
       ensureQuotaChip();
       ensureSidebarGroupsPanel();
       renderTurnUsageLines();
+      syncNativeConversationMenus();
       applyUiTranslations();
     });
   }
@@ -4981,6 +6779,9 @@
       state.lastTurnActivitySig = activitySig;
       state.lastTurnCompleted = lastCompleted;
       state.turnsPayload = payload;
+      if (cid && activityChanged) {
+        state.localViewedAtById[cid.toLowerCase()] = Date.now();
+      }
       scheduleRenderAll();
       if (sameChat && !document.hidden) {
         if (lastCompleted && (activityChanged || !prevCompleted)) {
@@ -5056,6 +6857,7 @@
       ensureSidebarGroupsPanel();
       renderSidebarGroupsPanel(true);
       renderGroupMenuContent();
+      refreshOpenNativeMenuFolders();
       if (state.pendingUnpinCascadeIds.size > 0) {
         const pendingIds = [...state.pendingUnpinCascadeIds];
         state.pendingUnpinCascadeIds.clear();
@@ -5063,7 +6865,22 @@
           for (let i = 0; i < pendingIds.length; i++) {
             const cid = pendingIds[i];
             if (isConversationGrouped(cid)) {
-              unpinConversationIfPinned(cid);
+              if (unpinConversationIfPinned(cid)) {
+                markAutoUnpinned(cid);
+              }
+            }
+          }
+        }
+      }
+      if (state.pendingRestorePinCascadeIds.size > 0) {
+        const restoreIds = [...state.pendingRestorePinCascadeIds];
+        state.pendingRestorePinCascadeIds.clear();
+        if (!state.groupsError) {
+          for (let i = 0; i < restoreIds.length; i++) {
+            const cid = restoreIds[i];
+            if (!isConversationGrouped(cid) && state.autoUnpinnedCids.has(cid)) {
+              unmarkAutoUnpinned(cid);
+              restorePinConversation(cid);
             }
           }
         }
@@ -5148,7 +6965,10 @@
         }
       }
     }
-    if (shouldFlushNow) applyUiTranslations();
+    if (shouldFlushNow) {
+      syncNativeConversationMenus();
+      applyUiTranslations();
+    }
     if (relevant) scheduleRenderAll();
   });
   state.domObserver.observe(document.body, {
@@ -5183,13 +7003,29 @@
       void refreshTrajectoryMetadata(false, 5_000);
     }
   };
+  const recordNativeMenuTargetFromEvent = (ev) => {
+    const row = ev.target?.closest?.('[data-testid="conversation-row-sidebar"][data-cascade-id]');
+    if (row && !row.closest('[aria-hidden="true"]')) {
+      const info = extractRowConversationInfo(row);
+      if (info?.cascadeId) {
+        state.lastNativeMenuConv = { ...info, at: Date.now() };
+      }
+    }
+  };
+  const onDocContextMenuCapture = (ev) => {
+    recordNativeMenuTargetFromEvent(ev);
+  };
   const onDocPointerDown = (ev) => {
+    recordNativeMenuTargetFromEvent(ev);
     const t = ev.target;
     if (state.quotaTooltipPinned && !t?.closest?.('#aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-quota-chip, #aq-context-chip')) {
       closeQuotaTooltip();
     }
-    if (state.groupMenuTarget && !t?.closest?.('#aq-group-menu, [data-aq-grp-item-menu]')) {
+    if (state.groupMenuTarget && !t?.closest?.('#aq-group-menu, [data-aq-grp-item-menu], [data-aq-row-grp-btn]')) {
       closeGroupMenu();
+    }
+    if (!t?.closest?.('#aq-grp-ctx-menu')) {
+      closeGroupCtxMenu();
     }
     if (ev.button !== 0) return;
     const resizer = t?.closest?.('#aq-conv-groups [data-aq-grp-resizer]');
@@ -5223,23 +7059,57 @@
     }
     if (
       t?.closest?.(
-        'button, input, textarea, [contenteditable="true"], [data-no-drag], #aq-group-menu, [data-aq-grp-hdr], .aq-grp-item-actions'
+        'button, input, textarea, [contenteditable="true"], [data-no-drag], #aq-group-menu, #aq-grp-ctx-menu, .aq-grp-item-actions, .aq-grp-actions'
       )
     ) {
+      return;
+    }
+    const grpHdrEl = t?.closest?.('#aq-conv-groups [data-aq-grp-hdr]');
+    if (grpHdrEl) {
+      const gid = grpHdrEl.getAttribute('data-aq-grp-hdr') || '';
+      const grp = state.groups.find((g) => g.id === gid);
+      const blockEl = grpHdrEl.closest('[data-aq-grp-block]');
+      if (grp && blockEl && !state.groupRenamingId && !state.groupCreating) {
+        startConversationPointerDrag({
+          mode: 'group-folder',
+          sourceGroupId: gid,
+          sourceEl: blockEl,
+          item: { cascadeId: gid, title: grp.name },
+          startX: ev.clientX,
+          startY: ev.clientY,
+        });
+      }
       return;
     }
     const grpItemEl = t?.closest?.('#aq-conv-groups [data-aq-grp-open]');
     if (grpItemEl) {
       const cid = grpItemEl.getAttribute('data-aq-grp-open') || '';
       const gid = grpItemEl.getAttribute('data-aq-grp-gid') || '';
-      const grp = state.groups.find((g) => g.id === gid);
-      const found = grp?.items?.find((it) => String(it.cascadeId || '') === cid);
-      if (found && gid) {
+      if (gid) {
+        const grp = state.groups.find((g) => g.id === gid);
+        const found = grp?.items?.find((it) => String(it.cascadeId || '') === cid);
+        if (found) {
+          startConversationPointerDrag({
+            mode: 'group-item',
+            sourceGroupId: gid,
+            sourceEl: grpItemEl,
+            item: { cascadeId: found.cascadeId, title: found.title, project: found.project || '' },
+            startX: ev.clientX,
+            startY: ev.clientY,
+          });
+        }
+      } else if (cid) {
+        const meta = state.trajMetaById[cid.toLowerCase()];
+        const title =
+          grpItemEl.querySelector('.aq-grp-item-title')?.textContent?.trim() ||
+          meta?.title ||
+          '未命名对话';
+        const project = grpItemEl.getAttribute('data-aq-project') || meta?.project || '';
         startConversationPointerDrag({
-          mode: 'group-item',
-          sourceGroupId: gid,
+          mode: 'native-row',
+          sourceGroupId: '',
           sourceEl: grpItemEl,
-          item: { cascadeId: found.cascadeId, title: found.title, project: found.project || '' },
+          item: { cascadeId: cid, title, project },
           startX: ev.clientX,
           startY: ev.clientY,
         });
@@ -5290,16 +7160,12 @@
       return;
     }
     if (!d.started) {
+      d.lastX = ev.clientX;
+      d.lastY = ev.clientY;
       if (Math.max(Math.abs(ev.clientX - d.startX), Math.abs(ev.clientY - d.startY)) < 5) {
         return;
       }
-      d.started = true;
-      closeGroupMenu();
-      if (d.mode === 'group-item') {
-        d.sourceEl?.classList?.add('is-dragging');
-        document.body.style.userSelect = 'none';
-        document.body.style.cursor = 'grabbing';
-      }
+      activateConversationPointerDrag(d);
     }
     updateConversationDragTarget(ev.clientX, ev.clientY);
   };
@@ -5320,7 +7186,43 @@
     const overPanel = d.overPanel;
     const targetGroupId = d.overGroupId;
     const dropOnEmptyPanel = d.overEmptyPanel;
-    cleanupConversationPointerDrag();
+    const folderMode = d.folderDragMode;
+    const folderTargetId = d.folderTargetId;
+    const droppedInGroupTarget = Boolean(targetGroupId || dropOnEmptyPanel);
+    if (d.switchedFromProjects && droppedInGroupTarget) {
+      saveSidebarTab('groups');
+    }
+    cleanupConversationPointerDrag({ keepTab: droppedInGroupTarget });
+
+    if (d.mode === 'group-folder') {
+      state.suppressGroupClickUntil = Date.now() + 200;
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (folderMode === 'root') {
+        state.groupsError = '';
+        sendGroupAction({ type: 'move-group', groupId: d.sourceGroupId, parentId: '' });
+      } else if (
+        folderTargetId &&
+        folderTargetId !== d.sourceGroupId &&
+        !isGroupDescendant(state.groups, d.sourceGroupId, folderTargetId)
+      ) {
+        state.groupsError = '';
+        if (folderMode === 'inside') {
+          sendGroupAction({ type: 'move-group', groupId: d.sourceGroupId, parentId: folderTargetId });
+        } else if (folderMode === 'before' || folderMode === 'after') {
+          const targetGrp = state.groups.find((g) => g.id === folderTargetId);
+          sendGroupAction({
+            type: 'move-group',
+            groupId: d.sourceGroupId,
+            parentId: targetGrp?.parentId || '',
+            ...(folderMode === 'before'
+              ? { beforeGroupId: folderTargetId }
+              : { afterGroupId: folderTargetId }),
+          });
+        }
+      }
+      return;
+    }
 
     if (d.mode === 'native-row') {
       if (!overPanel) return;
@@ -5365,11 +7267,13 @@
     if (state.convDrag) cleanupConversationPointerDrag();
   };
   const onWinBlur = () => {
+    closeGroupCtxMenu();
     if (state.groupResizeDrag) cleanupGroupResizeDrag();
     if (state.convDrag) cleanupConversationPointerDrag();
   };
   const onDocKeyDown = (ev) => {
     if (ev.key === 'Escape') {
+      closeGroupCtxMenu();
       if (state.convDrag?.started) {
         const wasGroupItem = state.convDrag.mode === 'group-item';
         cleanupConversationPointerDrag();
@@ -5388,6 +7292,7 @@
   window.addEventListener('pointercancel', onWinPointerCancelCapture, true);
   window.addEventListener('blur', onWinBlur);
   document.addEventListener('visibilitychange', onVisChange);
+  document.addEventListener('contextmenu', onDocContextMenuCapture, true);
   document.addEventListener('pointerdown', onDocPointerDown, true);
   document.addEventListener('keydown', onDocKeyDown, true);
 
@@ -5409,6 +7314,15 @@
 
   window.__aqCleanup = function () {
     try {
+      if (state.contextMenuProto?.__aqOrigGet) {
+        state.contextMenuProto.get = state.contextMenuProto.__aqOrigGet;
+        delete state.contextMenuProto.__aqOrigGet;
+        if (state.contextMenuProviderFiber) {
+          bumpContextMenuProvider(state.contextMenuProviderFiber);
+        }
+      }
+    } catch {}
+    try {
       history.pushState = origPush;
       history.replaceState = origReplace;
     } catch {}
@@ -5418,11 +7332,13 @@
     window.removeEventListener('pointercancel', onWinPointerCancelCapture, true);
     window.removeEventListener('blur', onWinBlur);
     document.removeEventListener('visibilitychange', onVisChange);
+    document.removeEventListener('contextmenu', onDocContextMenuCapture, true);
     document.removeEventListener('pointerdown', onDocPointerDown, true);
     document.removeEventListener('keydown', onDocKeyDown, true);
     cleanupGroupResizeDrag();
     cleanupConversationPointerDrag();
     closeGroupMenu();
+    closeGroupCtxMenu();
     if (state.renderRaf) cancelAnimationFrame(state.renderRaf);
     if (state.routeTimer) clearInterval(state.routeTimer);
     if (state.trajStatusTimer) clearInterval(state.trajStatusTimer);
@@ -5447,11 +7363,27 @@
     document.getElementById('aq-quota-tooltip')?.remove();
     document.getElementById('aq-acct-quota-tooltip')?.remove();
     document.getElementById('aq-turn-tooltip')?.remove();
+    document.getElementById('aq-sidebar-tabs-row')?.remove();
+    document.getElementById('aq-sidebar-tabs')?.remove();
     document.getElementById('aq-conv-groups')?.remove();
     document.getElementById('aq-group-row-btn')?.remove();
     document.getElementById('aq-group-menu')?.remove();
+    document.getElementById('aq-grp-ctx-menu')?.remove();
     document.getElementById('aq-conv-drag-ghost')?.remove();
+    if (state.projScrollEl && state.onProjScroll) {
+      state.projScrollEl.removeEventListener('scroll', state.onProjScroll);
+      state.projScrollEl = null;
+      state.onProjScroll = null;
+    }
+    document.querySelectorAll('[data-aq-pinned-new-grp]').forEach((el) => el.remove());
+    document.querySelectorAll('[data-aq-proj-card]').forEach((el) => el.remove());
+    document.querySelectorAll('.bg-sidebar[data-aq-tab]').forEach((el) => {
+      el.removeAttribute('data-aq-tab');
+      el.style.removeProperty('--aq-pinned-height');
+      el.style.removeProperty('--aq-pinned-offset');
+    });
     document.querySelectorAll('[data-aq-row-grp-btn]').forEach((el) => el.remove());
+    document.querySelectorAll('[data-aq-native-menu-ext]').forEach((el) => el.remove());
     document.querySelectorAll('[data-aq-menu-open]').forEach((el) => el.removeAttribute('data-aq-menu-open'));
     document.querySelectorAll('[data-aq-turn-usage]').forEach((el) => el.remove());
     delete window.__aqRenderTurns;
@@ -5466,6 +7398,7 @@
 
   window.__aqHydrated = false;
   window.__aq_version = INJECT_VERSION;
+  ensureWebContextMenuMode();
   checkRoute();
   void fetchQuota({ force: false, includeUserStatus: true }).then(() => {
     if (!document.hidden) {

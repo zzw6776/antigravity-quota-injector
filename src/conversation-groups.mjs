@@ -291,6 +291,7 @@ export function addConversationToGroup(filePath, { groupId, item } = {}) {
   } else {
     target.items.unshift(normalizedItem);
   }
+  target.collapsed = false;
   expandAncestorChain(store, target.id);
   return writeConversationGroupsStore(filePath, store);
 }
@@ -338,17 +339,19 @@ export function moveConversationBetweenGroups(filePath, { fromGroupId, toGroupId
   } else {
     target.items.unshift(normalizedItem);
   }
+  target.collapsed = false;
   expandAncestorChain(store, target.id);
   return writeConversationGroupsStore(filePath, store);
 }
 
 export function moveConversationGroup(
   filePath,
-  { groupId, parentId = '', beforeGroupId = '' } = {}
+  { groupId, parentId = '', beforeGroupId = '', afterGroupId = '' } = {}
 ) {
   const id = String(groupId || '').trim();
   const nextParentId = String(parentId || '').trim();
   const beforeId = String(beforeGroupId || '').trim();
+  const afterId = String(afterGroupId || '').trim();
   const store = readConversationGroupsStore(filePath);
   const byId = new Map(store.groups.map((g) => [g.id, g]));
   const moving = byId.get(id);
@@ -387,6 +390,13 @@ export function moveConversationGroup(
     const targetIdx = without.findIndex((g) => g.id === beforeId);
     if (targetIdx >= 0) {
       without.splice(targetIdx, 0, moving);
+    } else {
+      without.push(moving);
+    }
+  } else if (afterId && afterId !== id) {
+    const targetIdx = without.findIndex((g) => g.id === afterId);
+    if (targetIdx >= 0) {
+      without.splice(targetIdx + 1, 0, moving);
     } else {
       without.push(moving);
     }

@@ -12,8 +12,8 @@ body[data-agy-font="google-sans"],
 body[data-agy-font="google-sans"] :where(.font-sans),
 body[data-agy-font="inter"],
 body[data-agy-font] :where(.font-sans) {
-  --vscode-font-family: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", sans-serif !important;
-  --font-sans: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", sans-serif !important;
+  --vscode-font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", system-ui, "Segoe UI", sans-serif !important;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", system-ui, "Segoe UI", sans-serif !important;
   --default-font-family: var(--font-sans) !important;
   --font-family: var(--font-sans) !important;
   --sdk-font-family: var(--font-sans) !important;
@@ -64,7 +64,7 @@ body[data-agy-font] .font-medium:not(.codicon):not(.google-symbols) {
 }
 
 /* ============================================================================
- * 2. Light Mode Palette (sampled from running Codex desktop)
+ * 2. Light Mode Palette (Codex pure neutral achromatic surface + crisp ink)
  * ============================================================================ */
 html:has(> body.theme-light),
 html:has(> body:not(.dark):not(.theme-dark)),
@@ -72,39 +72,39 @@ body.theme-light,
 body:not(.dark):not(.theme-dark) {
   --background: #ffffff !important;
   --content: #ffffff !important;
-  --foreground: #1a1c1f !important;
+  --foreground: #18181b !important;
   --sidebar: #fcfcfc !important;
-  --shell: #f6f6f6 !important;
-  --shell-canvas: #f6f6f6 !important;
-  --sidebar-secondary: rgba(26, 28, 31, 0.06) !important;
-  --sidebar-muted: rgba(26, 28, 31, 0.04) !important;
+  --shell: #fcfcfc !important;
+  --shell-canvas: #fcfcfc !important;
+  --sidebar-secondary: rgba(24, 24, 27, 0.068) !important;
+  --sidebar-muted: rgba(24, 24, 27, 0.04) !important;
   --card: #ffffff !important;
-  --card-border: rgba(26, 28, 31, 0.085) !important;
-  --card-edge: rgba(26, 28, 31, 0.085) !important;
-  --border: rgba(26, 28, 31, 0.078) !important;
-  --sash-line: rgba(26, 28, 31, 0.085) !important;
-  --secondary: rgba(26, 28, 31, 0.06) !important;
-  --secondary-foreground: rgba(26, 28, 31, 0.86) !important;
-  --muted: rgba(26, 28, 31, 0.038) !important;
-  --muted-foreground: rgba(26, 28, 31, 0.58) !important;
-  --placeholder: rgba(26, 28, 31, 0.44) !important;
-  --primary: #1a1c1f !important;
+  --card-border: rgba(24, 24, 27, 0.085) !important;
+  --card-edge: rgba(24, 24, 27, 0.085) !important;
+  --border: rgba(24, 24, 27, 0.078) !important;
+  --sash-line: rgba(24, 24, 27, 0.085) !important;
+  --secondary: rgba(24, 24, 27, 0.06) !important;
+  --secondary-foreground: #27272a !important;
+  --muted: rgba(24, 24, 27, 0.038) !important;
+  --muted-foreground: #71717a !important;
+  --placeholder: #a1a1aa !important;
+  --primary: #18181b !important;
   --primary-foreground: #ffffff !important;
-  --onyx-frame: #f6f6f6 !important;
-  --onyx-well: rgba(26, 28, 31, 0.045) !important;
+  --onyx-frame: #fcfcfc !important;
+  --onyx-well: rgba(24, 24, 27, 0.045) !important;
   --onyx-raised: #ffffff !important;
-  --onyx-selected: rgba(26, 28, 31, 0.065) !important;
+  --onyx-selected: rgba(24, 24, 27, 0.068) !important;
   --onyx-key: #ffffff !important;
   --glass: rgba(255, 255, 255, 0.96) !important;
-  --glass-border: rgba(26, 28, 31, 0.085) !important;
+  --glass-border: rgba(24, 24, 27, 0.085) !important;
   --home-glow: transparent !important;
   --link: #2563eb !important;
-  --code-foreground: #1a1c1f !important;
+  --code-foreground: #18181b !important;
   --editor-selection-background: rgba(59, 130, 246, 0.22) !important;
 }
 
 /* ============================================================================
- * 3. Dark Mode Palette (Codex deep slate)
+ * 3. Dark Mode Palette (Codex neutral dark)
  * ============================================================================ */
 html:has(> body.dark),
 html:has(> body.theme-dark),
@@ -116,7 +116,7 @@ body.theme-dark {
   --sidebar: #111116 !important;
   --shell: #111116 !important;
   --shell-canvas: #111116 !important;
-  --sidebar-secondary: rgba(255, 255, 255, 0.08) !important;
+  --sidebar-secondary: rgba(255, 255, 255, 0.09) !important;
   --sidebar-muted: rgba(255, 255, 255, 0.045) !important;
   --card: #191922 !important;
   --card-border: rgba(255, 255, 255, 0.1) !important;
@@ -143,7 +143,7 @@ body.theme-dark {
 }
 
 /* ============================================================================
- * 4. Shell, Main Canvas Elevation & Sidebar Pills
+ * 4. Shell, Main Canvas Elevation & macOS Sidebar Proportions
  * ============================================================================ */
 body:not([data-has-browser-hole="true"]):not([data-has-drawer-browser-hole="true"]) .agy-inset-shell,
 .agy-titlebar {
@@ -169,30 +169,84 @@ body:is(.dark, .theme-dark) .bg-sidebar {
 
 body:not(.dark):not(.theme-dark) .agy-sheet[data-sheet-inset] [data-main-content-body]:not(:has([data-browser-hole="true"])) {
   border-radius: 12px !important;
-  box-shadow: 0 0 0 0.5px rgba(26, 28, 31, 0.11), 0 3px 7.5px rgba(0, 0, 0, 0.03), 0 0 16px rgba(0, 0, 0, 0.02) !important;
+  box-shadow: 0 0 0 0.5px rgba(24, 24, 27, 0.11), 0 3px 7.5px rgba(0, 0, 0, 0.03), 0 0 16px rgba(0, 0, 0, 0.02) !important;
+}
+
+/* macOS HIG 13px unified sidebar typography */
+.bg-sidebar [data-testid="sidebar-navigation-items"] a,
+.bg-sidebar [data-testid="sidebar-navigation-items"] button {
+  font-size: 13px !important;
+  line-height: 1.35 !important;
+  letter-spacing: -0.006em !important;
+  border-radius: 8px !important;
+  color: var(--secondary-foreground) !important;
+}
+
+.bg-sidebar [data-testid="sidebar-navigation-items"] a:hover,
+.bg-sidebar [data-testid="sidebar-navigation-items"] button:hover {
+  color: var(--foreground) !important;
+}
+
+.bg-sidebar [data-testid="new-conversation-button"] {
+  background-color: transparent !important;
+  border-color: transparent !important;
+  border-width: 0 !important;
+  box-shadow: none !important;
+  padding: 6px 8px !important;
+}
+
+.bg-sidebar [data-testid="new-conversation-button"]:hover {
+  background-color: var(--sidebar-muted) !important;
+  color: var(--foreground) !important;
+}
+
+.bg-sidebar [data-testid="pinned-section-header"] h2,
+.bg-sidebar [data-testid="section-header"] h2 {
+  font-size: 11.5px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.01em !important;
+  opacity: 1 !important;
+  color: var(--muted-foreground) !important;
 }
 
 .agy-sidebar-row {
-  border-radius: 10px !important;
+  border-radius: 8px !important;
+  font-size: 13px !important;
+  line-height: 1.35 !important;
+  letter-spacing: -0.006em !important;
   font-weight: 400 !important;
+  color: var(--secondary-foreground) !important;
+}
+
+.agy-sidebar-row :where(span, div):not(.text-xs) {
+  font-size: 13px !important;
+  line-height: 1.35 !important;
+  letter-spacing: -0.006em !important;
 }
 
 body:not(.dark):not(.theme-dark) .agy-sidebar-row:hover:not([data-selected="true"]) {
-  background-color: rgba(26, 28, 31, 0.04) !important;
+  background-color: rgba(24, 24, 27, 0.04) !important;
   --row-bg: #f3f3f3 !important;
+  color: #18181b !important;
 }
 
 body:not(.dark):not(.theme-dark) .agy-sidebar-row[data-selected="true"] {
-  background-color: rgba(26, 28, 31, 0.06) !important;
-  --row-bg: #eeefef !important;
+  background-color: rgba(24, 24, 27, 0.068) !important;
+  --row-bg: #ededee !important;
   box-shadow: none !important;
-  color: #1a1c1f !important;
-  font-weight: 400 !important;
+  color: #18181b !important;
+  font-weight: 500 !important;
+}
+
+body:not(.dark):not(.theme-dark) .agy-sidebar-row[data-selected="true"] :where(span, div) {
+  color: #18181b !important;
+  font-weight: 500 !important;
 }
 
 body:is(.dark, .theme-dark) .agy-sidebar-row:hover:not([data-selected="true"]) {
   background-color: rgba(255, 255, 255, 0.045) !important;
   --row-bg: #1c1c20 !important;
+  color: #f4f4f7 !important;
 }
 
 body:is(.dark, .theme-dark) .agy-sidebar-row[data-selected="true"] {
@@ -200,7 +254,12 @@ body:is(.dark, .theme-dark) .agy-sidebar-row[data-selected="true"] {
   --row-bg: #26262b !important;
   box-shadow: none !important;
   color: #ffffff !important;
-  font-weight: 400 !important;
+  font-weight: 500 !important;
+}
+
+body:is(.dark, .theme-dark) .agy-sidebar-row[data-selected="true"] :where(span, div) {
+  color: #ffffff !important;
+  font-weight: 500 !important;
 }
 
 /* ============================================================================
@@ -297,28 +356,31 @@ body:is(.dark, .theme-dark) .agy-user-bubble {
   box-shadow: none !important;
 }
 
-body:not(.dark):not(.theme-dark) #antigravity\.agentSidePanelInputBox .surface-composer-card {
+#antigravity\.agentSidePanelInputBox .surface-composer-card {
   border-radius: 22px !important;
-  background-color: rgba(255, 255, 255, 0.96) !important;
   border: none !important;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.05), 0 2px 8px rgba(0, 0, 0, 0.04), 0 4px 24px rgba(0, 0, 0, 0.025) !important;
   padding: 6px 8px !important;
+  transition: box-shadow 180ms ease, border-color 180ms ease !important;
+}
+
+body:not(.dark):not(.theme-dark) #antigravity\.agentSidePanelInputBox .surface-composer-card {
+  background-color: rgba(255, 255, 255, 0.96) !important;
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.09), 0 0 7px rgba(59, 130, 246, 0.045), 0 2px 10px rgba(0, 0, 0, 0.025) !important;
 }
 
 body:not(.dark):not(.theme-dark) #antigravity\.agentSidePanelInputBox:focus-within .surface-composer-card {
-  box-shadow: 0 0 0 1px rgba(26, 28, 31, 0.1), 0 4px 14px rgba(0, 0, 0, 0.06), 0 8px 28px rgba(0, 0, 0, 0.03) !important;
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.16), 0 0 10px rgba(59, 130, 246, 0.075), 0 3px 14px rgba(0, 0, 0, 0.035) !important;
 }
 
 body:is(.dark, .theme-dark) #antigravity\.agentSidePanelInputBox .surface-composer-card {
-  border-radius: 22px !important;
   background-color: #191922 !important;
-  border: 1px solid rgba(255, 255, 255, 0.1) !important;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35) !important;
-  padding: 6px 8px !important;
+  border: 1px solid rgba(96, 165, 250, 0.12) !important;
+  box-shadow: 0 0 8px rgba(59, 130, 246, 0.055), 0 4px 18px rgba(0, 0, 0, 0.35) !important;
 }
 
 body:is(.dark, .theme-dark) #antigravity\.agentSidePanelInputBox:focus-within .surface-composer-card {
-  border-color: rgba(255, 255, 255, 0.18) !important;
+  border-color: rgba(96, 165, 250, 0.22) !important;
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.1), 0 4px 20px rgba(0, 0, 0, 0.38) !important;
 }
 
 body:not(.dark):not(.theme-dark) #antigravity\.agentSidePanelInputBox [data-testid="send-button"]:not(:disabled):not([aria-disabled="true"]) {

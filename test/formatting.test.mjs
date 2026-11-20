@@ -143,6 +143,7 @@ test('formatResetCountdown formats remaining time with local target time cleanly
   const crossDayTarget = new Date(2026, 10, 19, 12, 5, 0).toISOString();
   const expiredTarget = new Date(2026, 10, 17, 9, 59, 0).toISOString();
   assert.equal(formatResetCountdown(sameDayTarget, now), '4小时16分 (14:16)');
+  assert.equal(formatResetCountdown(sameDayTarget, now, { includeDate: true }), '4小时16分 (11/17 14:16)');
   assert.equal(formatResetCountdown(crossDayTarget, now), '2天2小时 (11/19 12:05)');
   assert.equal(formatResetCountdown(expiredTarget, now), '即将重置');
 });

@@ -514,6 +514,7 @@ export async function runDaemon({
           groupId: msg?.groupId,
           parentId: msg?.parentId || '',
           beforeGroupId: msg?.beforeGroupId || '',
+          afterGroupId: msg?.afterGroupId || '',
         });
         await pushGroupsToAllSessions({ store });
         return;
