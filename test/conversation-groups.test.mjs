@@ -206,6 +206,17 @@ test('nested subgroups support creation, same-name siblings across parents, dept
     const topIds = store.groups.filter((g) => !g.parentId).map((g) => g.id);
     assert.deepEqual(topIds, [work.id, lvl3.id, personal.id]);
 
+    // Move work after personal via afterGroupId
+    store = moveConversationGroup(filePath, {
+      groupId: work.id,
+      parentId: '',
+      afterGroupId: personal.id,
+    });
+    assert.deepEqual(
+      store.groups.filter((g) => !g.parentId).map((g) => g.id),
+      [lvl3.id, personal.id, work.id]
+    );
+
     // Move lvl3 into personalTodo
     store = moveConversationGroup(filePath, { groupId: lvl3.id, parentId: personalTodo.id });
     assert.equal(store.groups.find((g) => g.id === lvl3.id)?.parentId, personalTodo.id);

@@ -254,7 +254,7 @@ export function quotaLevelClass(fraction) {
   return 'aq-lvl-ok';
 }
 
-export function formatResetCountdown(resetTimeIso, nowMs = Date.now()) {
+export function formatResetCountdown(resetTimeIso, nowMs = Date.now(), { includeDate = false } = {}) {
   if (!resetTimeIso) return '';
   const ts = Date.parse(resetTimeIso);
   if (!Number.isFinite(ts)) return '';
@@ -280,9 +280,10 @@ export function formatResetCountdown(resetTimeIso, nowMs = Date.now()) {
     nowDate.getFullYear() === targetDate.getFullYear() &&
     nowDate.getMonth() === targetDate.getMonth() &&
     nowDate.getDate() === targetDate.getDate();
-  const targetStr = sameDay
-    ? hhmm
-    : `${targetDate.getMonth() + 1}/${targetDate.getDate()} ${hhmm}`;
+  const targetStr =
+    sameDay && !includeDate
+      ? hhmm
+      : `${targetDate.getMonth() + 1}/${targetDate.getDate()} ${hhmm}`;
   return `${countdown} (${targetStr})`;
 }
 

@@ -809,6 +809,9 @@ export const ZH_UI_EXACT = {
   'Reconnect': '重新连接',
   'Loading apps...': '正在加载应用...',
   'Apps connected to your account': '已连接到你账户的应用',
+  'just now': '刚刚',
+  '1 file changed': '1 个文件已更改',
+  '1 task running': '1 个任务运行中',
 };
 
 const ZH_UI_RULES = [
@@ -835,6 +838,48 @@ const ZH_UI_RULES = [
   {
     match: /^Send feedback as\s+(.+)$/i,
     replace: (_, email) => `以 ${email} 身份发送反馈`,
+  },
+  {
+    match: /^(\d+)\s+files?\s+changed$/i,
+    replace: (_, n) => `${n} 个文件已更改`,
+  },
+  {
+    match: /^Worked for\s+(.+)$/i,
+    replace: (_, dur) =>
+      `已运行 ${String(dur)
+        .replace(/(\d+)\s*d/gi, '$1天')
+        .replace(/(\d+)\s*h/gi, '$1小时')
+        .replace(/(\d+)\s*m/gi, '$1分')
+        .replace(/(\d+)\s*s/gi, '$1秒')}`,
+  },
+  {
+    match: /^Thought for\s+(.+)$/i,
+    replace: (_, dur) =>
+      `思考 ${String(dur)
+        .replace(/(\d+)\s*d/gi, '$1天')
+        .replace(/(\d+)\s*h/gi, '$1小时')
+        .replace(/(\d+)\s*m/gi, '$1分')
+        .replace(/(\d+)\s*s/gi, '$1秒')}`,
+  },
+  {
+    match: /^(\d+)\s*m ago$/i,
+    replace: (_, n) => `${n} 分钟前`,
+  },
+  {
+    match: /^(\d+)\s*h ago$/i,
+    replace: (_, n) => `${n} 小时前`,
+  },
+  {
+    match: /^(\d+)\s*d ago$/i,
+    replace: (_, n) => `${n} 天前`,
+  },
+  {
+    match: /^(\d+)\s+tasks?\s+running$/i,
+    replace: (_, n) => `${n} 个任务运行中`,
+  },
+  {
+    match: /^Updated\s+(.+)$/i,
+    replace: (_, t) => `更新于 ${t}`,
   },
 ];
 
