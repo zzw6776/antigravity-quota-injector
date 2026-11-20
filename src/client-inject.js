@@ -4318,9 +4318,7 @@
       const lastOperatedMs = Math.max(
         meta?.lastOperatedMs || 0,
         meta?.lastModifiedMs || 0,
-        meta?.lastUserInputMs || 0,
-        meta?.lastUserViewMs || 0,
-        state.localViewedAtById[cid] || 0
+        meta?.lastUserInputMs || 0
       );
       const resolvedItem = {
         cascadeId: dInfo?.cascadeId || meta?.cascadeId || cid,
@@ -4412,8 +4410,7 @@
             Boolean(entry.hasRunningSubagents));
         const lastModifiedMs = Date.parse(entry.lastModifiedTime || '') || 0;
         const lastUserInputMs = Date.parse(entry.lastUserInputTime || '') || 0;
-        const rawUserViewMs = Date.parse(entry.annotations?.lastUserViewTime || '') || 0;
-        let lastUserViewMs = rawUserViewMs;
+        let lastUserViewMs = Date.parse(entry.annotations?.lastUserViewTime || '') || 0;
         let markedAsUnread = Boolean(entry.annotations?.markedAsUnread);
         const localViewedAt = state.localViewedAtById[key] || 0;
         if (localViewedAt && Date.now() - localViewedAt < 60_000) {
@@ -4421,7 +4418,7 @@
           if (lastModifiedMs <= localViewedAt) markedAsUnread = false;
         }
         const prev = state.trajMetaById[key] || {};
-        const lastOperatedMs = Math.max(lastModifiedMs, lastUserInputMs, rawUserViewMs, localViewedAt);
+        const lastOperatedMs = Math.max(lastModifiedMs, lastUserInputMs);
         nextById[key] = {
           cascadeId: cid,
           title: title || prev.title || '',
@@ -6780,7 +6777,12 @@
       state.lastTurnCompleted = lastCompleted;
       state.turnsPayload = payload;
       if (cid && activityChanged) {
-        state.localViewedAtById[cid.toLowerCase()] = Date.now();
+        const meta = state.trajMetaById[cid.toLowerCase()];
+        if (meta) {
+          const now = Date.now();
+          meta.lastModifiedMs = Math.max(meta.lastModifiedMs || 0, now);
+          meta.lastOperatedMs = Math.max(meta.lastOperatedMs || 0, now);
+        }
       }
       scheduleRenderAll();
       if (sameChat && !document.hidden) {
