@@ -1059,13 +1059,18 @@ export async function runDaemon({
     return;
   }
 
-  const cleanupAndExit = () => {
+  const handleExitSignal = (signal) => {
+    log(`[antigravity-quota-injector] exiting (${signal})`);
     cleanupState();
     process.exit(0);
   };
+  const onSigInt = () => handleExitSignal('SIGINT');
+  const onSigTerm = () => handleExitSignal('SIGTERM');
+  const onSigHup = () => handleExitSignal('SIGHUP');
 
-  process.on('SIGINT', cleanupAndExit);
-  process.on('SIGTERM', cleanupAndExit);
+  process.on('SIGINT', onSigInt);
+  process.on('SIGTERM', onSigTerm);
+  process.on('SIGHUP', onSigHup);
 
   // Periodic sync loop (stat-gated, minimal overhead when idle)
   try {
@@ -1105,7 +1110,8 @@ export async function runDaemon({
     }
   } finally {
     cleanupState();
-    process.off('SIGINT', cleanupAndExit);
-    process.off('SIGTERM', cleanupAndExit);
+    process.off('SIGINT', onSigInt);
+    process.off('SIGTERM', onSigTerm);
+    process.off('SIGHUP', onSigHup);
   }
 }

@@ -1,8 +1,14 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { ensureAntigravityRunning } from '../src/launcher.mjs';
+import {
+  ensureAntigravityRunning,
+  launchDetachedMacLauncher,
+  shouldDetachMacDevLauncher,
+} from '../src/launcher.mjs';
 
 function makePaths(root = '/tmp/aq-launcher-test') {
   return {
@@ -184,4 +190,160 @@ test('ensureAntigravityRunning avoids killing Antigravity if executable is missi
   assert.equal(quitCalled, true);
   assert.equal(launchCalled, false);
   assert.deepEqual(inflight, [true, false]);
+});
+
+test('shouldDetachMacDevLauncher enables detachment only for interactive macOS dev runs', () => {
+  assert.equal(
+    shouldDetachMacDevLauncher({
+      platform: 'darwin',
+      sea: false,
+      explicitStart: true,
+      once: false,
+      argv: ['node', 'launcher.mjs', '--explicit-start'],
+      env: {},
+    }),
+    true
+  );
+  assert.equal(
+    shouldDetachMacDevLauncher({
+      platform: 'darwin',
+      sea: false,
+      explicitStart: true,
+      once: false,
+      argv: ['node', 'launcher.mjs', '--explicit-start'],
+      env: { AQ_DETACHED_CHILD: '1' },
+    }),
+    false
+  );
+  assert.equal(
+    shouldDetachMacDevLauncher({
+      platform: 'darwin',
+      sea: false,
+      explicitStart: true,
+      once: true,
+      argv: ['--explicit-start', '--once'],
+      env: {},
+    }),
+    false
+  );
+  assert.equal(
+    shouldDetachMacDevLauncher({
+      platform: 'darwin',
+      sea: false,
+      explicitStart: true,
+      once: false,
+      argv: ['--explicit-start', '--foreground'],
+      env: {},
+    }),
+    false
+  );
+  assert.equal(
+    shouldDetachMacDevLauncher({
+      platform: 'darwin',
+      sea: true,
+      explicitStart: true,
+      once: false,
+      argv: [],
+      env: {},
+    }),
+    false
+  );
+  assert.equal(
+    shouldDetachMacDevLauncher({
+      platform: 'win32',
+      sea: false,
+      explicitStart: true,
+      once: false,
+      argv: ['--explicit-start'],
+      env: {},
+    }),
+    false
+  );
+});
+
+test('launchDetachedMacLauncher detaches stdio/session, forwards ready logs, and cleans temp state', async () => {
+  const scratchRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'aq-detach-unit-'));
+  const logPath = path.join(scratchRoot, 'injector.log');
+  fs.writeFileSync(logPath, '[2026-11-21T00:00:00.000Z] [INFO] old-line\n', 'utf8');
+
+  let spawnCall = null;
+  let unrefCalled = false;
+  let createdDir = '';
+  const logs = [];
+  const errors = [];
+
+  try {
+    const code = await launchDetachedMacLauncher({
+      entrypointPath: '/repo/src/launcher.mjs',
+      argv: ['--explicit-start'],
+      env: { PATH: '/usr/bin' },
+      logPath,
+      mkdtempSyncFn: (prefix) => {
+        createdDir = fs.mkdtempSync(prefix);
+        return createdDir;
+      },
+      spawnFn: (execPath, args, opts) => {
+        spawnCall = { execPath, args, opts };
+        setTimeout(() => {
+          fs.appendFileSync(
+            logPath,
+            '[2026-11-21T00:00:01.000Z] [INFO] [launcher] 已启动 (dev v0.1.54)\n',
+            'utf8'
+          );
+          fs.writeFileSync(
+            opts.env.AQ_LAUNCH_STATUS_FILE,
+            JSON.stringify({ ok: true, phase: 'ready', exitCode: 0 }),
+            'utf8'
+          );
+        }, 20);
+        return {
+          once: () => {},
+          unref: () => {
+            unrefCalled = true;
+          },
+        };
+      },
+      sleepFn: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 15))),
+      log: (line) => logs.push(line),
+      error: (line) => errors.push(line),
+    });
+
+    assert.equal(code, 0);
+    assert.equal(unrefCalled, true);
+    assert.equal(spawnCall.opts.detached, true);
+    assert.deepEqual(spawnCall.opts.stdio, ['ignore', 'ignore', 'ignore']);
+    assert.equal(spawnCall.opts.env.AQ_DETACHED_CHILD, '1');
+    assert.deepEqual(logs, ['[launcher] 已启动 (dev v0.1.54)']);
+    assert.deepEqual(errors, []);
+    assert.equal(fs.existsSync(createdDir), false);
+
+    // Failures written to statusFile propagate non-zero exit code without echoing logs under EXTERNAL_START
+    const failLogs = [];
+    const failErrors = [];
+    const failCode = await launchDetachedMacLauncher({
+      entrypointPath: '/repo/src/launcher.mjs',
+      argv: ['--explicit-start'],
+      env: { ANTIGRAVITY_QUOTA_DEV_EXTERNAL_START: '1' },
+      logPath,
+      spawnFn: (_execPath, _args, opts) => {
+        setTimeout(() => {
+          fs.appendFileSync(logPath, '[2026-11-21T00:00:02.000Z] [INFO] duplicate-skip\n', 'utf8');
+          fs.writeFileSync(
+            opts.env.AQ_LAUNCH_STATUS_FILE,
+            JSON.stringify({ ok: false, phase: 'failed', exitCode: 1, reason: 'takeover denied' }),
+            'utf8'
+          );
+        }, 20);
+        return { once: () => {}, unref: () => {} };
+      },
+      sleepFn: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 15))),
+      log: (line) => failLogs.push(line),
+      error: (line) => failErrors.push(line),
+    });
+    assert.equal(failCode, 1);
+    assert.deepEqual(failLogs, []);
+    assert.deepEqual(failErrors, ['[launcher] takeover denied']);
+  } finally {
+    fs.rmSync(scratchRoot, { recursive: true, force: true });
+  }
 });

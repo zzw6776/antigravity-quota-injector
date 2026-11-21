@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
@@ -15,7 +16,7 @@ import {
   readUserConfig,
   runDaemon,
 } from './daemon.mjs';
-import { installFileLogger, getDefaultLogDir } from './file-logger.mjs';
+import { getDefaultLogDir, getDefaultLogPath, installFileLogger } from './file-logger.mjs';
 import { endDevConsoleOnFormalTakeover } from './macos-dev-console.mjs';
 import {
   hasAntigravityRemoteDebuggingFlag,
@@ -296,6 +297,162 @@ async function runUpdatePreparation(version) {
   }
 }
 
+function writeLaunchStatusFile(statusFile, payload) {
+  if (!statusFile) return;
+  const tmpFile = `${statusFile}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmpFile, JSON.stringify(payload), 'utf8');
+    fs.renameSync(tmpFile, statusFile);
+  } catch {
+    try {
+      if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+    } catch {}
+    try {
+      fs.writeFileSync(statusFile, JSON.stringify(payload), 'utf8');
+    } catch {}
+  }
+}
+
+export function shouldDetachMacDevLauncher({
+  platform = process.platform,
+  sea = isSea(),
+  explicitStart = false,
+  once = false,
+  argv = process.argv,
+  env = process.env,
+} = {}) {
+  if (platform !== 'darwin' || sea || !explicitStart || once) return false;
+  if (env?.AQ_DETACHED_CHILD === '1') return false;
+  const args = Array.isArray(argv) ? argv : [];
+  if (
+    args.includes('--version') ||
+    args.includes('--prepare-update') ||
+    args.includes('--foreground')
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export async function launchDetachedMacLauncher({
+  entrypointPath,
+  argv = [],
+  env = process.env,
+  execPath = process.execPath,
+  logPath = getDefaultLogPath(),
+  spawnFn = spawn,
+  existsSyncFn = fs.existsSync,
+  readFileSyncFn = fs.readFileSync,
+  statSyncFn = fs.statSync,
+  mkdtempSyncFn = fs.mkdtempSync,
+  rmSyncFn = fs.rmSync,
+  sleepFn = (ms) => new Promise((r) => setTimeout(r, ms)),
+  timeoutMs = 45_000,
+  log = console.log,
+  error = console.error,
+} = {}) {
+  const tmpDir = mkdtempSyncFn(path.join(os.tmpdir(), 'aq-detach-'));
+  const statusFile = path.join(tmpDir, 'status.json');
+  const forwardLogs = env?.ANTIGRAVITY_QUOTA_DEV_EXTERNAL_START !== '1';
+  let logOffset = 0;
+  try {
+    if (existsSyncFn(logPath)) {
+      logOffset = statSyncFn(logPath).size || 0;
+    }
+  } catch {}
+
+  const flushLogDelta = () => {
+    if (!forwardLogs) return;
+    try {
+      if (!existsSyncFn(logPath)) return;
+      const size = statSyncFn(logPath).size || 0;
+      if (size < logOffset) {
+        logOffset = 0;
+      }
+      if (size === logOffset) return;
+      const buf = readFileSyncFn(logPath);
+      const chunk = buf.subarray(logOffset, size).toString('utf8');
+      logOffset = size;
+      for (const line of chunk.split(/\r?\n/)) {
+        if (line) {
+          log(line.replace(/^\[\d{4}-\d{2}-\d{2}T[^\]]+\]\s+\[[A-Z]+\]\s+/, ''));
+        }
+      }
+    } catch {}
+  };
+
+  let exited = false;
+  let exitCode = null;
+  let exitSignal = null;
+  const child = spawnFn(execPath, [entrypointPath, ...argv], {
+    detached: true,
+    stdio: ['ignore', 'ignore', 'ignore'],
+    env: {
+      ...env,
+      AQ_DETACHED_CHILD: '1',
+      AQ_LAUNCH_STATUS_FILE: statusFile,
+    },
+  });
+  child?.once?.('exit', (code, signal) => {
+    exited = true;
+    exitCode = code;
+    exitSignal = signal;
+  });
+  child?.once?.('error', (err) => {
+    exited = true;
+    exitCode = 1;
+    error(`[launcher] 后台启动进程失败: ${err?.message || err}`);
+  });
+  child?.unref?.();
+
+  try {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      flushLogDelta();
+      if (existsSyncFn(statusFile)) {
+        try {
+          const parsed = JSON.parse(readFileSyncFn(statusFile, 'utf8'));
+          flushLogDelta();
+          if (parsed?.ok === false) {
+            if (parsed.reason) {
+              error(`[launcher] ${parsed.reason}`);
+            }
+            return Number.isInteger(parsed?.exitCode) && parsed.exitCode !== 0 ? parsed.exitCode : 1;
+          }
+          return 0;
+        } catch {}
+      }
+      if (exited) {
+        await sleepFn(50);
+        flushLogDelta();
+        if (existsSyncFn(statusFile)) {
+          try {
+            const parsed = JSON.parse(readFileSyncFn(statusFile, 'utf8'));
+            if (parsed?.ok === false) {
+              if (parsed.reason) error(`[launcher] ${parsed.reason}`);
+              return Number.isInteger(parsed?.exitCode) && parsed.exitCode !== 0 ? parsed.exitCode : 1;
+            }
+            return 0;
+          } catch {}
+        }
+        if (exitCode === 0) return 0;
+        error(
+          `[launcher] 后台启动进程异常退出 (code=${exitCode ?? 'null'}, signal=${exitSignal ?? 'none'})`
+        );
+        return exitCode || 1;
+      }
+      await sleepFn(80);
+    }
+    flushLogDelta();
+    error('[launcher] 等待后台注入器就绪超时');
+    return 1;
+  } finally {
+    try {
+      rmSyncFn(tmpDir, { recursive: true, force: true });
+    } catch {}
+  }
+}
+
 export async function runLauncher({
   once = false,
   explicitStart = isSea() ||
@@ -312,10 +469,13 @@ export async function runLauncher({
   }
 
   const mode = isSea() ? 'formal' : 'dev';
+  const statusFile = process.env.AQ_LAUNCH_STATUS_FILE || '';
   process.title = 'Antigravity Quota Injector';
   const logPath = installFileLogger();
   if (!explicitStart) {
-    console.warn('[launcher] 请通过桌面应用入口或 npm run launch 启动');
+    const reason = '请通过桌面应用入口或 npm run launch 启动';
+    console.warn(`[launcher] ${reason}`);
+    writeLaunchStatusFile(statusFile, { ok: false, phase: 'failed', exitCode: 1, reason });
     return 1;
   }
 
@@ -376,11 +536,18 @@ export async function runLauncher({
     } catch (err) {
       if (!(err instanceof SingleInstanceTakeoverError)) throw err;
       console.warn(`[launcher] ${err.message}`);
+      writeLaunchStatusFile(statusFile, {
+        ok: false,
+        phase: 'failed',
+        exitCode: 1,
+        reason: err.message,
+      });
       return 1;
     }
 
     if (!instanceLock) {
       console.log(`[launcher] 已有注入器保留运行，当前 ${mode} v${version} 退出`);
+      writeLaunchStatusFile(statusFile, { ok: true, phase: 'reused', exitCode: 0 });
       return 0;
     }
 
@@ -393,6 +560,12 @@ export async function runLauncher({
       if (!once) {
         showNativeFailureNotice('Antigravity Quota Injector', ensured.reason);
       }
+      writeLaunchStatusFile(statusFile, {
+        ok: false,
+        phase: 'failed',
+        exitCode: 1,
+        reason: ensured.reason,
+      });
       return 1;
     }
 
@@ -433,6 +606,7 @@ export async function runLauncher({
 
     launchStatus.phase = 'ready';
     console.log(`[launcher] 已启动 (${mode} v${version}), 日志=${logPath}`);
+    writeLaunchStatusFile(statusFile, { ok: true, phase: 'ready', exitCode: 0 });
 
     await runDaemon({
       once,
@@ -465,13 +639,29 @@ const isEntrypoint = (() => {
 
 if (isEntrypoint) {
   const once = process.argv.includes('--once');
-  runLauncher({ once, explicitStart: true })
+  const explicitStart =
+    isSea() ||
+    process.env.ANTIGRAVITY_QUOTA_EXPLICIT_START === '1' ||
+    process.argv.includes('--explicit-start');
+  const runner = shouldDetachMacDevLauncher({ explicitStart, once })
+    ? launchDetachedMacLauncher({
+        entrypointPath: fileURLToPath(import.meta.url),
+        argv: process.argv.slice(2),
+      })
+    : runLauncher({ once, explicitStart });
+  runner
     .then((code) => {
       if (typeof code === 'number' && code !== 0) {
         process.exitCode = code;
       }
     })
     .catch((err) => {
+      writeLaunchStatusFile(process.env.AQ_LAUNCH_STATUS_FILE || '', {
+        ok: false,
+        phase: 'failed',
+        exitCode: 1,
+        reason: err?.message || String(err),
+      });
       console.error(`[launcher] fatal: ${err?.stack || err}`);
       process.exitCode = 1;
     });
