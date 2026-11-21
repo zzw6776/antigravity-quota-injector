@@ -5,6 +5,8 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  encodePowerShellCommand,
+  escapePowerShellSingleQuoted,
   findRunningAntigravityPids,
   launchAntigravityExecutable,
   quitAndWaitAntigravityProcesses,
@@ -21,14 +23,126 @@ const VSCDB_AUTH_KEYS = [
 const APP_STORAGE_AUTH_KEYS = [
   'agy.onboarding.lastLoginUsername',
   'agy.onboarding.lastLoginIsGcpTos',
+  'jetski.onboarding.lastLoginUsername',
+  'jetski.onboarding.lastLoginIsGcpTos',
 ];
 
-export function getAccountSwitchSupport(platform = process.platform) {
-  if (platform === 'darwin') {
-    return { supported: true, reason: '' };
+const WINCRED_CSHARP_SOURCE = `
+using System;
+using System.Runtime.InteropServices;
+
+public static class AqWinCred {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct CREDENTIAL {
+    public uint Flags;
+    public uint Type;
+    public string TargetName;
+    public string Comment;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+    public uint CredentialBlobSize;
+    public IntPtr CredentialBlob;
+    public uint Persist;
+    public uint AttributeCount;
+    public IntPtr Attributes;
+    public string TargetAlias;
+    public string UserName;
   }
-  if (platform === 'win32') {
-    return { supported: false, reason: 'Windows 暂不支持账号快照与一键切换' };
+
+  [DllImport("Advapi32.dll", EntryPoint = "CredReadW", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool CredRead(string target, uint type, int reservedFlag, out IntPtr credentialPtr);
+
+  [DllImport("Advapi32.dll", EntryPoint = "CredWriteW", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool CredWrite([In] ref CREDENTIAL userCredential, uint flags);
+
+  [DllImport("Advapi32.dll", EntryPoint = "CredDeleteW", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool CredDelete(string target, uint type, int flags);
+
+  [DllImport("Advapi32.dll", EntryPoint = "CredFree", SetLastError = true)]
+  private static extern void CredFree(IntPtr cred);
+
+  public static string ReadBase64(string target) {
+    IntPtr ptr;
+    if (!CredRead(target, 1, 0, out ptr)) {
+      int err = Marshal.GetLastWin32Error();
+      if (err == 1168) return "";
+      throw new Exception("CredReadW failed with error " + err);
+    }
+    try {
+      CREDENTIAL c = (CREDENTIAL)Marshal.PtrToStructure(ptr, typeof(CREDENTIAL));
+      if (c.CredentialBlob == IntPtr.Zero || c.CredentialBlobSize == 0) return "";
+      byte[] bytes = new byte[c.CredentialBlobSize];
+      Marshal.Copy(c.CredentialBlob, bytes, 0, (int)c.CredentialBlobSize);
+      return Convert.ToBase64String(bytes);
+    } finally {
+      CredFree(ptr);
+    }
+  }
+
+  public static void WriteBase64(string target, string userName, string base64Payload) {
+    byte[] bytes = Convert.FromBase64String(base64Payload);
+    IntPtr blobPtr = Marshal.AllocCoTaskMem(bytes.Length);
+    try {
+      Marshal.Copy(bytes, 0, blobPtr, bytes.Length);
+      CREDENTIAL c = new CREDENTIAL();
+      c.Flags = 0;
+      c.Type = 1;
+      c.TargetName = target;
+      c.CredentialBlobSize = (uint)bytes.Length;
+      c.CredentialBlob = blobPtr;
+      c.Persist = 2;
+      c.UserName = userName;
+      if (!CredWrite(ref c, 0)) {
+        throw new Exception("CredWriteW failed with error " + Marshal.GetLastWin32Error());
+      }
+    } finally {
+      Marshal.FreeCoTaskMem(blobPtr);
+    }
+  }
+
+  public static bool Delete(string target) {
+    if (!CredDelete(target, 1, 0)) {
+      int err = Marshal.GetLastWin32Error();
+      if (err == 1168) return false;
+      throw new Exception("CredDeleteW failed with error " + err);
+    }
+    return true;
+  }
+}
+`;
+
+function runWinCredPowerShell(bodyLines, execFileSyncFn = execFileSync) {
+  const psScript = [
+    "$ErrorActionPreference = 'Stop'",
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+    "if (-not ('AqWinCred' -as [type])) {",
+    `  Add-Type -TypeDefinition @'\n${WINCRED_CSHARP_SOURCE}\n'@`,
+    '}',
+    ...bodyLines,
+  ].join('\n');
+  return execFileSyncFn(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-WindowStyle',
+      'Hidden',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-EncodedCommand',
+      encodePowerShellCommand(psScript),
+    ],
+    {
+      timeout: 8000,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    }
+  );
+}
+
+export function getAccountSwitchSupport(platform = process.platform) {
+  if (platform === 'darwin' || platform === 'win32') {
+    return { supported: true, reason: '' };
   }
   return { supported: false, reason: '当前系统暂不支持账号快照与一键切换' };
 }
@@ -91,12 +205,28 @@ export function parseKeychainSecretMetadata(secret) {
 export function readKeychainSecret({
   service = KEYCHAIN_SERVICE,
   account = KEYCHAIN_ACCOUNT,
+  platform = process.platform,
+  execFileSyncFn = execFileSync,
 } = {}) {
-  if (process.platform !== 'darwin') {
-    throw new Error('当前仅支持 macOS Keychain 账号快照');
+  if (platform === 'win32') {
+    const target = `${service}:${account}`;
+    try {
+      const out = runWinCredPowerShell(
+        [`Write-Output ([AqWinCred]::ReadBase64('${escapePowerShellSingleQuoted(target)}'))`],
+        execFileSyncFn
+      );
+      const b64 = String(out || '').trim();
+      if (!b64) return '';
+      return Buffer.from(b64, 'base64').toString('utf8').replace(/[\r\n]+$/, '');
+    } catch {
+      throw new Error('读取系统凭据管理器登录凭据失败');
+    }
+  }
+  if (platform !== 'darwin') {
+    throw new Error('当前系统暂不支持读取账号凭据');
   }
   try {
-    const out = execFileSync(
+    const out = execFileSyncFn(
       'security',
       ['find-generic-password', '-s', service, '-a', account, '-w'],
       {
@@ -121,12 +251,28 @@ export function readKeychainSecret({
 export function deleteKeychainSecret({
   service = KEYCHAIN_SERVICE,
   account = KEYCHAIN_ACCOUNT,
+  platform = process.platform,
+  execFileSyncFn = execFileSync,
 } = {}) {
-  if (process.platform !== 'darwin') {
-    throw new Error('当前仅支持 macOS Keychain 账号快照');
+  if (platform === 'win32') {
+    const target = `${service}:${account}`;
+    try {
+      const out = runWinCredPowerShell(
+        [
+          `if ([AqWinCred]::Delete('${escapePowerShellSingleQuoted(target)}')) { Write-Output 'DELETED' } else { Write-Output 'NOT_FOUND' }`,
+        ],
+        execFileSyncFn
+      );
+      return String(out || '').trim() === 'DELETED';
+    } catch {
+      throw new Error('清理系统凭据管理器登录凭据失败');
+    }
+  }
+  if (platform !== 'darwin') {
+    throw new Error('当前系统暂不支持清理账号凭据');
   }
   try {
-    execFileSync('security', ['delete-generic-password', '-a', account, '-s', service], {
+    execFileSyncFn('security', ['delete-generic-password', '-a', account, '-s', service], {
       timeout: 2500,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -145,16 +291,43 @@ export function deleteKeychainSecret({
 
 export function writeKeychainSecret(
   secret,
-  { service = KEYCHAIN_SERVICE, account = KEYCHAIN_ACCOUNT } = {}
+  {
+    service = KEYCHAIN_SERVICE,
+    account = KEYCHAIN_ACCOUNT,
+    platform = process.platform,
+    execFileSyncFn = execFileSync,
+  } = {}
 ) {
-  if (process.platform !== 'darwin') {
-    throw new Error('当前仅支持 macOS Keychain 账号快照');
-  }
   if (!secret || typeof secret !== 'string') {
     throw new Error('无效的账号凭据快照');
   }
+  if (platform === 'win32') {
+    const target = `${service}:${account}`;
+    let rawSecret = secret;
+    const b64Prefix = 'go-keyring-base64:';
+    if (rawSecret.startsWith(b64Prefix)) {
+      try {
+        rawSecret = Buffer.from(rawSecret.slice(b64Prefix.length), 'base64').toString('utf8');
+      } catch {}
+    }
+    const base64Payload = Buffer.from(rawSecret, 'utf8').toString('base64');
+    try {
+      runWinCredPowerShell(
+        [
+          `[AqWinCred]::WriteBase64('${escapePowerShellSingleQuoted(target)}', '${escapePowerShellSingleQuoted(account)}', '${base64Payload}')`,
+        ],
+        execFileSyncFn
+      );
+      return;
+    } catch {
+      throw new Error('写入系统凭据管理器登录凭据失败');
+    }
+  }
+  if (platform !== 'darwin') {
+    throw new Error('当前系统暂不支持写入账号凭据');
+  }
   try {
-    execFileSync(
+    execFileSyncFn(
       'security',
       ['add-generic-password', '-U', '-a', account, '-s', service, '-w', secret],
       {
@@ -164,12 +337,12 @@ export function writeKeychainSecret(
     );
   } catch {
     try {
-      execFileSync('security', ['delete-generic-password', '-a', account, '-s', service], {
+      execFileSyncFn('security', ['delete-generic-password', '-a', account, '-s', service], {
         timeout: 2500,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch {}
-    execFileSync(
+    execFileSyncFn(
       'security',
       ['add-generic-password', '-a', account, '-s', service, '-w', secret],
       {
@@ -408,7 +581,9 @@ export function clearCurrentAccountAuth({
 }
 
 function resolveEmailFromAppStorage(appStorageAuth) {
-  const raw = appStorageAuth?.['agy.onboarding.lastLoginUsername'];
+  const raw =
+    appStorageAuth?.['agy.onboarding.lastLoginUsername'] ||
+    appStorageAuth?.['jetski.onboarding.lastLoginUsername'];
   if (!raw || typeof raw !== 'string') return '';
   try {
     const parsed = JSON.parse(raw);
@@ -518,7 +693,10 @@ export function applyAccountSnapshot({
   const appAuth =
     target.appStorageAuth && Object.keys(target.appStorageAuth).length > 0
       ? target.appStorageAuth
-      : { 'agy.onboarding.lastLoginUsername': JSON.stringify(target.email) };
+      : {
+          'agy.onboarding.lastLoginUsername': JSON.stringify(target.email),
+          'jetski.onboarding.lastLoginUsername': target.email,
+        };
   writeAppStorageAuth(appSupportDir, appAuth);
   writeVscdbAuth(appSupportDir, target.vscdbAuth);
   return target;
@@ -609,6 +787,11 @@ export async function switchAccountWithRestart({
     throw new Error('Antigravity 未能及时退出，已取消写入凭据');
   }
 
+  try {
+    const portFile = path.join(appSupportDir, 'DevToolsActivePort');
+    if (fs.existsSync(portFile)) fs.unlinkSync(portFile);
+  } catch {}
+
   const applied = applyAccountSnapshot({ accountId, accountsFile, appSupportDir });
   await new Promise((r) => setTimeout(r, 250));
   const relaunched = await relaunchAntigravityWithRetry({
@@ -660,6 +843,11 @@ export async function prepareNewAccountWithRestart({
     } catch {}
     throw new Error('Antigravity 未能及时退出，已取消进入新账号登录');
   }
+
+  try {
+    const portFile = path.join(appSupportDir, 'DevToolsActivePort');
+    if (fs.existsSync(portFile)) fs.unlinkSync(portFile);
+  } catch {}
 
   clearCurrentAccountAuth({ appSupportDir, deleteSecretFn });
   await new Promise((r) => setTimeout(r, 250));

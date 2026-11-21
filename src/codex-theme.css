@@ -12,8 +12,8 @@ body[data-agy-font="google-sans"],
 body[data-agy-font="google-sans"] :where(.font-sans),
 body[data-agy-font="inter"],
 body[data-agy-font] :where(.font-sans) {
-  --vscode-font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", system-ui, "Segoe UI", sans-serif !important;
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", system-ui, "Segoe UI", sans-serif !important;
+  --vscode-font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", system-ui, "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif !important;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", system-ui, "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif !important;
   --default-font-family: var(--font-sans) !important;
   --font-family: var(--font-sans) !important;
   --sdk-font-family: var(--font-sans) !important;
@@ -34,6 +34,13 @@ body[data-agy-font] :where(.font-sans) {
   --agy-gsf-h1-wght: 600 !important;
   --agy-gsf-h3-wght: 600 !important;
   --agy-gsf-slnt: 0 !important;
+  --max-conversation-width: var(--aq-conv-max-width, 100%) !important;
+  --max-artifact-width: var(--aq-conv-max-width, 100%) !important;
+}
+
+[style*="--max-conversation-width"],
+[style*="--max-artifact-width"] {
+  max-width: min(100%, var(--aq-conv-max-width, 100%)) !important;
 }
 
 html,
@@ -212,16 +219,36 @@ body:not(.dark):not(.theme-dark) .agy-sheet[data-sheet-inset] [data-main-content
 .agy-sidebar-row {
   border-radius: 8px !important;
   font-size: 13px !important;
-  line-height: 1.35 !important;
+  line-height: 18px !important;
   letter-spacing: -0.006em !important;
   font-weight: 400 !important;
   color: var(--secondary-foreground) !important;
 }
 
-.agy-sidebar-row :where(span, div):not(.text-xs) {
+.agy-sidebar-row .flex-col > span:first-child {
   font-size: 13px !important;
-  line-height: 1.35 !important;
+  line-height: 18px !important;
   letter-spacing: -0.006em !important;
+}
+
+.agy-sidebar-row .flex-col > span.text-muted-foreground,
+.agy-sidebar-row .flex-col > span.text-muted-foreground > span {
+  font-size: 11px !important;
+  line-height: 14px !important;
+  letter-spacing: normal !important;
+  font-weight: 400 !important;
+  color: var(--muted-foreground) !important;
+}
+
+.agy-sidebar-row .flex-col > span.text-muted-foreground {
+  gap: 3px !important;
+  opacity: 0.9;
+}
+
+.agy-sidebar-row .flex-col > span.text-muted-foreground svg {
+  width: 11px !important;
+  height: 11px !important;
+  opacity: 0.78;
 }
 
 body:not(.dark):not(.theme-dark) .agy-sidebar-row:hover:not([data-selected="true"]) {
@@ -238,7 +265,7 @@ body:not(.dark):not(.theme-dark) .agy-sidebar-row[data-selected="true"] {
   font-weight: 500 !important;
 }
 
-body:not(.dark):not(.theme-dark) .agy-sidebar-row[data-selected="true"] :where(span, div) {
+body:not(.dark):not(.theme-dark) .agy-sidebar-row[data-selected="true"] .flex-col > span:first-child {
   color: #18181b !important;
   font-weight: 500 !important;
 }
@@ -257,7 +284,7 @@ body:is(.dark, .theme-dark) .agy-sidebar-row[data-selected="true"] {
   font-weight: 500 !important;
 }
 
-body:is(.dark, .theme-dark) .agy-sidebar-row[data-selected="true"] :where(span, div) {
+body:is(.dark, .theme-dark) .agy-sidebar-row[data-selected="true"] .flex-col > span:first-child {
   color: #ffffff !important;
   font-weight: 500 !important;
 }

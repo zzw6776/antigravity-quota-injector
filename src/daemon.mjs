@@ -138,15 +138,39 @@ export function readUserConfig(stateDir) {
   }
 }
 
+const CLIENT_SCRIPT_ASSETS = ['formatting.mjs', 'i18n-zh.mjs', 'codex-theme.css', 'client-inject.js'];
+let cachedClientBuild = null;
+
+function getClientAssetsSignature() {
+  if (isSea()) return 'sea';
+  const srcDir = resolveSrcDir();
+  const parts = [];
+  for (let i = 0; i < CLIENT_SCRIPT_ASSETS.length; i++) {
+    try {
+      const st = fs.statSync(path.join(srcDir, CLIENT_SCRIPT_ASSETS[i]), { throwIfNoEntry: false });
+      parts.push(st ? `${st.mtimeMs}:${st.size}` : '0:0');
+    } catch {
+      parts.push('0:0');
+    }
+  }
+  return parts.join('|');
+}
+
 export function buildClientScript({ codexTheme = true, zhUi = true } = {}) {
+  const normTheme = Boolean(codexTheme);
+  const normZh = Boolean(zhUi);
+  const cacheKey = `${normTheme ? 1 : 0}|${normZh ? 1 : 0}|${getClientAssetsSignature()}`;
+  if (cachedClientBuild && cachedClientBuild.cacheKey === cacheKey) {
+    return { version: cachedClientBuild.version, script: cachedClientBuild.script };
+  }
   const fmtSource = readAssetText('formatting.mjs').replace(
     /^\s*export\s+(?=(?:function|const|let|var)\b)/gm,
     ''
   );
-  const i18nSource = zhUi
+  const i18nSource = normZh
     ? readAssetText('i18n-zh.mjs').replace(/^\s*export\s+(?=(?:function|const|let|var)\b)/gm, '')
     : 'function translateUiText() { return null; }';
-  const themeCss = codexTheme ? readAssetText('codex-theme.css') : '';
+  const themeCss = normTheme ? readAssetText('codex-theme.css') : '';
   const clientTemplate = readAssetText('client-inject.js');
   const hash = crypto
     .createHash('sha256')
@@ -162,6 +186,7 @@ export function buildClientScript({ codexTheme = true, zhUi = true } = {}) {
     .replace('__AQ_CODEX_THEME_CSS__', () => JSON.stringify(themeCss))
     .replace('// __AQ_FORMATTING_HELPERS__', () => fmtSource)
     .replace('// __AQ_I18N_HELPERS__', () => i18nSource);
+  cachedClientBuild = { cacheKey, version, script };
   return { version, script };
 }
 

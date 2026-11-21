@@ -198,6 +198,8 @@ test('orderQuotaBuckets places 5h before weekly and filters disabled buckets', (
 
 test('translateUiText translates exact Settings/UI strings and skips arbitrary text', () => {
   assert.equal(translateUiText('New Conversation'), '新聊天');
+  assert.equal(translateUiText('View'), '视图');
+  assert.equal(translateUiText('Window'), '窗口');
   assert.equal(translateUiText('  Queued Messages  '), '  排队消息  ');
   assert.equal(translateUiText('Terminal Command Auto Execution'), '终端命令自动执行策略');
   assert.equal(translateUiText('2 attachment(s)'), '2 个附件');

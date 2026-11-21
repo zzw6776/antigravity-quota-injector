@@ -7,7 +7,9 @@ import test from 'node:test';
 
 import { downloadUpdate } from '../src/app-update/download.mjs';
 import {
+  applySelfUpdateAndRelaunch,
   buildWindowsUpdateHelperScript,
+  buildWindowsUpdateLauncherVbs,
   resolveInstalledAppPath,
   verifyWindowsInstallerPE,
 } from '../src/app-update/install.mjs';
@@ -168,6 +170,63 @@ test('resolveInstalledAppPath and Windows update helper script handle bundle/exe
   assert.match(ps, /Start-Process -FilePath \$SetupExe/);
   assert.match(ps, /\/S/);
   assert.doesNotMatch(ps, /Antigravity\.exe/);
+});
+
+test('applySelfUpdateAndRelaunch on win32 uses wscript.exe detached launcher with UTF-16LE EncodedCommand so PowerShell survives parent exit', async (t) => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'aq-win-apply-'));
+  t.after(() => fs.rm(tmp, { recursive: true, force: true }));
+
+  const installedApp = 'C:\\Users\\Alice\\AppData\\Local\\Programs\\Antigravity Quota Injector';
+  const installer = path.win32.join(tmp, 'Antigravity-Quota-Injector-0.2.0-windows-x64-Setup.exe');
+  const spawnCalls = [];
+  const exitCodes = [];
+  let beforeExitCalled = false;
+
+  await applySelfUpdateAndRelaunch({
+    asset: { platform: 'win32', version: '0.2.0' },
+    installedApp,
+    prepared: { installer },
+    updatesDir: tmp,
+    onBeforeExit: async () => {
+      beforeExitCalled = true;
+    },
+    spawnImpl: (exe, args, opts) => {
+      spawnCalls.push({ exe, args, opts });
+      return { unref() {} };
+    },
+    exitImpl: (code) => {
+      exitCodes.push(code);
+    },
+  });
+
+  assert.equal(beforeExitCalled, true);
+  assert.deepEqual(exitCodes, [0]);
+  assert.equal(spawnCalls.length, 1);
+  assert.equal(spawnCalls[0].exe, 'wscript.exe');
+  assert.equal(spawnCalls[0].args[0], '//B');
+  assert.equal(spawnCalls[0].args[1], '//Nologo');
+  assert.ok(spawnCalls[0].args[2].endsWith('apply-update.vbs'));
+  assert.equal(spawnCalls[0].opts.detached, true);
+  assert.equal(spawnCalls[0].opts.windowsHide, true);
+  assert.equal(spawnCalls[0].opts.cwd, tmp);
+
+  const vbsText = await fs.readFile(path.join(tmp, 'apply-update.vbs'), 'utf8');
+  const match = vbsText.match(/-EncodedCommand\s+([A-Za-z0-9+/=]+)/);
+  assert.ok(match, 'apply-update.vbs should pass -EncodedCommand to powershell.exe');
+  const decodedPs = Buffer.from(match[1], 'base64').toString('utf16le');
+  assert.ok(decodedPs.includes('apply-update.ps1'));
+  assert.ok(decodedPs.includes(installedApp));
+  assert.ok(decodedPs.includes(installer));
+
+  const customVbs = buildWindowsUpdateLauncherVbs({
+    helperPath: 'C:\\Users\\张三\\AppData\\Local\\Antigravity Quota Injector\\updates\\apply-update.ps1',
+    oldPid: 4321,
+    setupExe: 'C:\\Users\\张三\\Setup.exe',
+    installDir: installedApp,
+    mainExe: `${installedApp}\\Antigravity Quota Injector.exe`,
+    logPath: 'C:\\Users\\张三\\updater.log',
+  });
+  assert.match(customVbs, /^[\x00-\x7F]+$/);
 });
 
 test('openUpdate aligns with codex-quota-injector check/open semantics', async (t) => {

@@ -17,6 +17,7 @@ import {
   syncConversationMetadata,
   toggleConversationGroupCollapse,
 } from '../src/conversation-groups.mjs';
+import { buildClientScript } from '../src/daemon.mjs';
 
 const CID_1 = '8866de7d-15be-40b5-9a89-ece7bdc73e24';
 const CID_2 = '6eca6d45-0e6c-4724-bf7a-867c2f82ca4a';
@@ -232,5 +233,21 @@ test('nested subgroups support creation, same-name siblings across parents, dept
     assert.equal(remainingIds.includes(lvl3.id), true);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('sidebar conversation rows enforce uniform 42px height across groups and mixed native sections while keeping project tree children compact', () => {
+  for (const codexTheme of [true, false]) {
+    const { script } = buildClientScript({ codexTheme, zhUi: true });
+    assert.match(script, /\.aq-grp-item\s*\{[\s\S]*?height:\s*42px;[\s\S]*?min-height:\s*42px;/);
+    assert.match(
+      script,
+      /\.agy-sidebar-row:not\(\[class~="pl-\[30px\]"\]\):not\(\[class~="pl-2\.5"\]\)[\s\S]*?height:\s*42px\s*!important;/
+    );
+    assert.match(script, /\[data-sidebar-section-id="all"\]\s+\.agy-sidebar-row/);
+    assert.match(script, /\[data-sidebar-section-id\^="status-"\]\s+\.agy-sidebar-row/);
+    assert.match(script, /\[data-sidebar-section-id="standalone"\]\s+\.agy-sidebar-row/);
+    assert.match(script, /is-no-project[\s\S]*?无项目/);
+    assert.match(script, /\[data-subtext=""\]\[data-aq-no-project\]\s+\.flex-col::after/);
   }
 });

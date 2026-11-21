@@ -9,13 +9,16 @@ import {
   applyAccountSnapshot,
   clearCurrentAccountAuth,
   deleteAccount,
+  deleteKeychainSecret,
   getAccountSwitchSupport,
   listAccounts,
   parseKeychainSecretMetadata,
   prepareNewAccountWithRestart,
+  readKeychainSecret,
   sanitizeQuotaSnapshot,
   snapshotCurrentAccount,
   updateAccountQuotaSnapshot,
+  writeKeychainSecret,
 } from '../src/accounts.mjs';
 
 function makeTempFixture() {
@@ -140,11 +143,63 @@ test('snapshotCurrentAccount, listAccounts, applyAccountSnapshot, and deleteAcco
   fs.rmSync(fx.root, { recursive: true, force: true });
 });
 
-test('getAccountSwitchSupport enables darwin and reports Windows unsupported message', () => {
+test('getAccountSwitchSupport enables darwin and win32 and reports unsupported on other platforms', () => {
   assert.deepEqual(getAccountSwitchSupport('darwin'), { supported: true, reason: '' });
-  const win = getAccountSwitchSupport('win32');
-  assert.equal(win.supported, false);
-  assert.match(win.reason, /Windows/);
+  assert.deepEqual(getAccountSwitchSupport('win32'), { supported: true, reason: '' });
+  const linux = getAccountSwitchSupport('linux');
+  assert.equal(linux.supported, false);
+  assert.match(linux.reason, /暂不支持/);
+});
+
+test('Windows Credential Manager readKeychainSecret, writeKeychainSecret, and deleteKeychainSecret encode and decode payloads cleanly', () => {
+  const sampleJson = JSON.stringify({
+    token: { access_token: 'ya29.win', refresh_token: '1//win' },
+    auth_method: 'consumer',
+    id_token_email: 'winuser@example.com',
+  });
+  let storedB64 = '';
+
+  const mockExec = (cmd, args) => {
+    assert.equal(cmd, 'powershell.exe');
+    const encIdx = args.indexOf('-EncodedCommand');
+    assert.ok(encIdx >= 0);
+    const decodedScript = Buffer.from(args[encIdx + 1], 'base64').toString('utf16le');
+    if (decodedScript.includes('[AqWinCred]::WriteBase64')) {
+      const m = decodedScript.match(
+        /\[AqWinCred\]::WriteBase64\('([^']+)',\s*'([^']+)',\s*'([^']+)'\)/
+      );
+      assert.ok(m);
+      assert.equal(m[1], 'gemini:antigravity');
+      assert.equal(m[2], 'antigravity');
+      storedB64 = m[3];
+      return '';
+    }
+    if (decodedScript.includes('[AqWinCred]::ReadBase64')) {
+      return `${storedB64}\r\n`;
+    }
+    if (decodedScript.includes('[AqWinCred]::Delete')) {
+      if (storedB64) {
+        storedB64 = '';
+        return 'DELETED\r\n';
+      }
+      return 'NOT_FOUND\r\n';
+    }
+    return '';
+  };
+
+  // Supports both raw JSON and go-keyring-base64: prefixed secrets when writing on win32
+  writeKeychainSecret(`go-keyring-base64:${Buffer.from(sampleJson, 'utf8').toString('base64')}`, {
+    platform: 'win32',
+    execFileSyncFn: mockExec,
+  });
+  assert.equal(Buffer.from(storedB64, 'base64').toString('utf8'), sampleJson);
+
+  const readVal = readKeychainSecret({ platform: 'win32', execFileSyncFn: mockExec });
+  assert.equal(readVal, sampleJson);
+
+  assert.equal(deleteKeychainSecret({ platform: 'win32', execFileSyncFn: mockExec }), true);
+  assert.equal(deleteKeychainSecret({ platform: 'win32', execFileSyncFn: mockExec }), false);
+  assert.equal(readKeychainSecret({ platform: 'win32', execFileSyncFn: mockExec }), '');
 });
 
 test('parseKeychainSecretMetadata validates go-keyring-base64 StoredToken and rejects tokenless sign-out stubs', () => {

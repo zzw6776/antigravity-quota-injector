@@ -26,6 +26,8 @@ export const ZH_UI_EXACT = {
   'Preview': '预览',
   'Raw': '源码',
   'Workspace': '工作区',
+  'View': '视图',
+  'Window': '窗口',
   'Ask anything, @ to mention, / for actions': '输入任何内容，@ 引用，/ 选择操作',
   'Ask anything, @ to mention': '输入任何内容，@ 引用',
   'Message subagent, @ to mention, / for actions': '给子智能体发消息，@ 引用，/ 选择操作',
