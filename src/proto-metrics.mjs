@@ -231,10 +231,16 @@ export function parseConversationTurns(dbPath, cascadeId = '') {
       'idx',
       'step_type',
       'status',
-      ...(stepCols.has('metadata') ? ['metadata'] : []),
-      ...(stepCols.has('step_payload') ? ['step_payload'] : []),
+      ...(stepCols.has('metadata') ? ['CASE WHEN step_type = 132 THEN metadata ELSE NULL END AS metadata'] : []),
+      ...(stepCols.has('step_payload')
+        ? ['CASE WHEN step_type = 15 THEN step_payload ELSE NULL END AS step_payload']
+        : []),
     ];
-    const allSteps = db.prepare(`SELECT ${selectCols.join(', ')} FROM steps ORDER BY idx ASC`).all();
+    const allSteps = db
+      .prepare(
+        `SELECT ${selectCols.join(', ')} FROM steps WHERE step_type IN (14, 15, 132) OR status = 1 ORDER BY idx ASC`
+      )
+      .all();
     const stepByIdx = new Map();
     const userStepIndices = [];
     for (let i = 0; i < allSteps.length; i++) {

@@ -148,6 +148,10 @@ export function buildWindowsUpdateHelperScript() {
     '  } catch {}',
     '}',
     'try {',
+    '  $logDir = Split-Path -Parent $LogFile',
+    '  if ($logDir -and (Test-Path -LiteralPath $logDir)) {',
+    '    Set-Location -LiteralPath $logDir',
+    '  }',
     '  Write-UpdateLog "Waiting for old injector PID $OldPid to exit..."',
     '  $deadline = (Get-Date).AddSeconds(20)',
     '  while ((Get-Date) -lt $deadline) {',
@@ -166,14 +170,39 @@ export function buildWindowsUpdateHelperScript() {
     '    throw "Installer failed with exit code $($proc.ExitCode)"',
     '  }',
     '  Write-UpdateLog "Launching updated injector $MainExe..."',
-    '  Start-Process -FilePath $MainExe -WindowStyle Normal',
+    '  Start-Process -FilePath $MainExe -WorkingDirectory $InstallDir -WindowStyle Normal',
     '} catch {',
     '  Write-UpdateLog ("Update error: " + $_.Exception.Message)',
     '  if (Test-Path -LiteralPath $MainExe) {',
-    '    try { Start-Process -FilePath $MainExe -WindowStyle Normal } catch {}',
+    '    try { Start-Process -FilePath $MainExe -WorkingDirectory $InstallDir -WindowStyle Normal } catch {}',
     '  }',
     '}',
   ].join('\r\n');
+}
+
+function escapePowerShellSingleQuoted(value) {
+  return String(value ?? '').replace(/'/g, "''");
+}
+
+export function buildWindowsUpdateLauncherVbs({
+  helperPath,
+  oldPid = process.pid,
+  setupExe,
+  installDir,
+  mainExe,
+  logPath,
+}) {
+  const psInvoke = [
+    `& '${escapePowerShellSingleQuoted(helperPath)}'`,
+    `-OldPid ${Number(oldPid) || process.pid}`,
+    `-SetupExe '${escapePowerShellSingleQuoted(setupExe)}'`,
+    `-InstallDir '${escapePowerShellSingleQuoted(installDir)}'`,
+    `-MainExe '${escapePowerShellSingleQuoted(mainExe)}'`,
+    `-LogFile '${escapePowerShellSingleQuoted(logPath)}'`,
+  ].join(' ');
+  const encoded = Buffer.from(psInvoke, 'utf16le').toString('base64');
+  const cmd = `powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
+  return `CreateObject("WScript.Shell").Run "${cmd}", 0, False\r\n`;
 }
 
 export async function applySelfUpdateAndRelaunch({
@@ -207,41 +236,32 @@ export async function applySelfUpdateAndRelaunch({
   if (asset.platform === 'win32') {
     await mkdir(updatesDir, { recursive: true });
     const helperPath = path.win32.join(updatesDir, 'apply-update.ps1');
+    const launcherVbsPath = path.win32.join(updatesDir, 'apply-update.vbs');
     const logPath = path.win32.join(updatesDir, 'updater.log');
     const mainExe = path.win32.join(installedApp, 'Antigravity Quota Injector.exe');
     await writeFile(helperPath, buildWindowsUpdateHelperScript(), 'utf8');
+    await writeFile(
+      launcherVbsPath,
+      buildWindowsUpdateLauncherVbs({
+        helperPath,
+        oldPid: process.pid,
+        setupExe: prepared.installer,
+        installDir: installedApp,
+        mainExe,
+        logPath,
+      }),
+      'utf8'
+    );
 
     await onBeforeExit();
 
-    const child = spawnImpl(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-WindowStyle',
-        'Hidden',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-        helperPath,
-        '-OldPid',
-        String(process.pid),
-        '-SetupExe',
-        prepared.installer,
-        '-InstallDir',
-        installedApp,
-        '-MainExe',
-        mainExe,
-        '-LogFile',
-        logPath,
-      ],
-      {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
-        env: cleanUpdateEnvironment(),
-      }
-    );
+    const child = spawnImpl('wscript.exe', ['//B', '//Nologo', launcherVbsPath], {
+      cwd: updatesDir,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      env: cleanUpdateEnvironment(),
+    });
     child?.unref?.();
     exitImpl(0);
     return;
