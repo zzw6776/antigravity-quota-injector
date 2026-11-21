@@ -9,11 +9,14 @@ import {
   buildWindowsRemoveShortcutsScript,
   createFollowAppController,
   encodePowerShellCommand,
+  findRunningAntigravityPids,
+  hasAntigravityRemoteDebuggingFlag,
   installWindowsAppEntry,
   isNodeVersionSupported,
   launchAntigravityExecutable,
   matchesQuotaInjectorCommand,
   parseWindowsTasklistCsv,
+  quitAndWaitAntigravityProcesses,
   resolveAntigravityExecutable,
   uninstallWindowsAppEntry,
 } from '../src/platform.mjs';
@@ -233,4 +236,99 @@ test('matchesQuotaInjectorCommand matches both spaced and hyphenated injector pr
   assert.equal(matchesQuotaInjectorCommand('node src/cli.mjs start'), true);
   assert.equal(matchesQuotaInjectorCommand('/Applications/Antigravity.app/Contents/MacOS/Antigravity'), false);
   assert.equal(matchesQuotaInjectorCommand('Antigravity.exe'), false);
+});
+
+test('findRunningAntigravityPids and hasAntigravityRemoteDebuggingFlag inspect darwin and win32 processes cleanly', () => {
+  const macPids = findRunningAntigravityPids({
+    platform: 'darwin',
+    execFileSyncFn: () =>
+      [
+        '101 /Applications/Antigravity.app/Contents/MacOS/Antigravity',
+        '102 /Applications/Antigravity.app/Contents/Resources/bin/language_server',
+        '103 /Applications/Antigravity Quota Injector.app/Contents/MacOS/node',
+      ].join('\n'),
+  });
+  assert.deepEqual(macPids, [101, 102]);
+
+  assert.equal(
+    hasAntigravityRemoteDebuggingFlag({
+      platform: 'darwin',
+      execFileSyncFn: () =>
+        '/Applications/Antigravity.app/Contents/MacOS/Antigravity --remote-debugging-port=0\n',
+    }),
+    true
+  );
+  assert.equal(
+    hasAntigravityRemoteDebuggingFlag({
+      platform: 'darwin',
+      execFileSyncFn: () => '/Applications/Antigravity.app/Contents/MacOS/Antigravity\n',
+    }),
+    false
+  );
+
+  assert.equal(
+    hasAntigravityRemoteDebuggingFlag({
+      platform: 'win32',
+      spawnSyncFn: () => ({
+        status: 0,
+        stdout: '"C:\\Users\\Alice\\AppData\\Local\\Programs\\Antigravity\\Antigravity.exe" --remote-debugging-port=0\r\n',
+      }),
+    }),
+    true
+  );
+  assert.equal(
+    hasAntigravityRemoteDebuggingFlag({
+      platform: 'win32',
+      spawnSyncFn: () => ({
+        status: 0,
+        stdout: '"C:\\Users\\Alice\\AppData\\Local\\Programs\\Antigravity\\Antigravity.exe"\r\n',
+      }),
+    }),
+    false
+  );
+});
+
+test('quitAndWaitAntigravityProcesses quits gracefully and falls back cleanly on darwin and win32', async () => {
+  const winCalls = [];
+  let winAlive = true;
+  const winExited = await quitAndWaitAntigravityProcesses({
+    platform: 'win32',
+    timeoutMs: 100,
+    sleepFn: async () => {},
+    execFileSyncFn: (cmd, args) => {
+      winCalls.push([cmd, args]);
+      if (cmd === 'tasklist') {
+        return winAlive ? '"Antigravity.exe","4321","Console","1","100 K"\r\n' : 'INFO: No tasks\r\n';
+      }
+      if (cmd === 'taskkill' && !args.includes('/F')) {
+        winAlive = false;
+      }
+      return '';
+    },
+  });
+  assert.equal(winExited, true);
+  assert.equal(
+    winCalls.some(([cmd, args]) => cmd === 'taskkill' && args.includes('/IM') && !args.includes('/F')),
+    true
+  );
+
+  const macCalls = [];
+  let macAlive = true;
+  const macExited = await quitAndWaitAntigravityProcesses({
+    platform: 'darwin',
+    timeoutMs: 100,
+    sleepFn: async () => {},
+    execFileSyncFn: (cmd, args) => {
+      macCalls.push([cmd, args]);
+      if (cmd === 'ps') {
+        return macAlive ? '555 /Applications/Antigravity.app/Contents/MacOS/Antigravity\n' : '';
+      }
+      if (cmd === 'osascript') {
+        macAlive = false;
+      }
+      return '';
+    },
+  });
+  assert.equal(macExited, true);
+  assert.equal(macCalls.some(([cmd]) => cmd === 'osascript'), true);
 });

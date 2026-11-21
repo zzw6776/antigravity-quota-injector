@@ -376,4 +376,39 @@ test('resolveGeminiQuotaAvailability identifies available, depleted, inferred-re
     { isCurrent: false, nowMs }
   );
   assert.equal(depletedWeekly.state, 'depleted');
+
+  // Residual 1% (< 1.5%, displays as 1%) is treated as depleted rather than available green dot
+  const residual1Pct = resolveGeminiQuotaAvailability(
+    {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          buckets: [
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.5, resetTime: '2026-11-25T02:00:00Z' },
+            { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.01, resetTime: '2026-11-20T08:00:00Z' },
+          ],
+        },
+      ],
+    },
+    { isCurrent: false, nowMs }
+  );
+  assert.equal(residual1Pct.state, 'depleted');
+  assert.match(residual1Pct.label, /5h 1%/);
+
+  // 2%+ remains available
+  const twoPctAvailable = resolveGeminiQuotaAvailability(
+    {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          buckets: [
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.5, resetTime: '2026-11-25T02:00:00Z' },
+            { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.02, resetTime: '2026-11-20T08:00:00Z' },
+          ],
+        },
+      ],
+    },
+    { isCurrent: false, nowMs }
+  );
+  assert.equal(twoPctAvailable.state, 'available');
 });

@@ -320,6 +320,7 @@ export async function runDaemon({
   const turnsCache = new Map(); // dbPath -> { sig, payload }
   let stopping = false;
   let switchInFlight = false;
+  let externalRestartInFlight = false;
   let wakeLoop = null;
   let sleepTimer = null;
 
@@ -882,12 +883,16 @@ export async function runDaemon({
   onRegisterControls?.({
     stop: cleanupState,
     tickNow: () => tick(),
+    setRestartInFlight: (flag) => {
+      externalRestartInFlight = Boolean(flag);
+    },
   });
 
   const shouldStopFollowing = (tickRes) => {
     if (!followController) return false;
+    const effectiveSwitchInFlight = switchInFlight || externalRestartInFlight;
     let isProcessAlive = false;
-    if (tickRes.attachedCount === 0 && tickRes.liveCount === 0 && !switchInFlight) {
+    if (tickRes.attachedCount === 0 && tickRes.liveCount === 0 && !effectiveSwitchInFlight) {
       const extraExeNames = userCfg.antigravityExe ? [path.win32.basename(userCfg.antigravityExe)] : [];
       isProcessAlive = isAntigravityProcessRunning({ channel, extraExeNames });
     }
@@ -895,7 +900,7 @@ export async function runDaemon({
       hasAttachedTargets: tickRes.attachedCount > 0,
       hasLiveCdpTargets: tickRes.liveCount > 0,
       isProcessAlive,
-      switchInFlight,
+      switchInFlight: effectiveSwitchInFlight,
     });
     if (decision.shouldExit) {
       log(`[antigravity-quota-injector] exiting (${decision.reason})`);
