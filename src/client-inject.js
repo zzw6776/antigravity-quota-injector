@@ -1165,33 +1165,43 @@
         border: 1px solid transparent;
         transition: background-color 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
       }
-      .aq-q-acct-row.is-draggable {
-        cursor: grab;
+      .aq-q-acct-meta,
+      .aq-q-acct-email,
+      .aq-q-acct-sub,
+      .aq-acct-tt-email {
+        user-select: text;
+        -webkit-user-select: text;
+        cursor: text;
+      }
+      .aq-q-acct-list.is-reordering,
+      .aq-q-acct-list.is-reordering * {
+        user-select: none !important;
+        -webkit-user-select: none !important;
+        cursor: grabbing !important;
+      }
+      .aq-q-acct-list.is-reordering .aq-q-acct-row:not(.is-dragging) {
+        transition: transform 150ms cubic-bezier(0.2, 0, 0, 1), background-color 0.12s ease, border-color 0.12s ease;
       }
       .aq-q-acct-row.is-dragging {
-        opacity: 0.42;
+        z-index: 6;
+        opacity: 0.97;
         cursor: grabbing;
+        background: #ffffff;
+        border-color: rgba(59, 130, 246, 0.38);
+        box-shadow: 0 8px 20px -4px rgba(15, 23, 42, 0.16), 0 2px 6px -1px rgba(15, 23, 42, 0.08);
+        transition: box-shadow 0.12s ease, border-color 0.12s ease;
+        will-change: transform;
       }
-      .aq-q-acct-row.aq-acct-drag-before::before,
-      .aq-q-acct-row.aq-acct-drag-after::after {
-        content: "";
-        position: absolute;
-        left: 6px;
-        right: 6px;
-        height: 2px;
-        border-radius: 9999px;
-        background: #3b82f6;
-        pointer-events: none;
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-row.is-dragging {
+        background: #25272d;
+        border-color: rgba(96, 165, 250, 0.42);
+        box-shadow: 0 10px 24px -4px rgba(0, 0, 0, 0.55), 0 2px 8px -1px rgba(0, 0, 0, 0.35);
       }
-      .aq-q-acct-row.aq-acct-drag-before::before {
-        top: -3.5px;
+      .aq-q-acct-row.is-current.is-dragging {
+        background: #f2f7ff;
       }
-      .aq-q-acct-row.aq-acct-drag-after::after {
-        bottom: -3.5px;
-      }
-      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-row.aq-acct-drag-before::before,
-      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-row.aq-acct-drag-after::after {
-        background: #60a5fa;
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-row.is-current.is-dragging {
+        background: #222b3a;
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-row {
         background: rgba(255, 255, 255, 0.032);
@@ -3755,8 +3765,8 @@
           <div class="aq-qp-card${isMatched ? ' is-active' : ''}">
             <div class="aq-qp-card-hdr">
               <span class="aq-qp-card-title">
-                ${isMatched ? '<span class="aq-qp-active-dot" title="当前选中模型分组"></span>' : ''}
                 <span>${escapeHtml(g.displayName || '模型分组')}</span>
+                ${isMatched ? '<span class="aq-qp-active-dot" title="当前选中模型分组"></span>' : ''}
               </span>
               ${kaToggleHtml}
             </div>
@@ -4321,84 +4331,122 @@
     const d = state.acctDrag;
     if (!d) return;
     state.acctDrag = null;
+    if (d.timer) {
+      clearTimeout(d.timer);
+      d.timer = null;
+    }
     if (d.started) {
       document.body.style.userSelect = '';
       document.body.style.cursor = '';
     }
     const tt = document.getElementById('aq-quota-tooltip');
     if (tt) {
+      tt.querySelector('.aq-q-acct-list')?.classList?.remove('is-reordering');
       tt.querySelectorAll('.aq-q-acct-row').forEach((el) => {
-        el.classList.remove('is-dragging', 'aq-acct-drag-before', 'aq-acct-drag-after');
+        el.classList.remove('is-dragging');
+        el.style.transform = '';
       });
     }
   }
 
+  function startAccountDragSession(d) {
+    const tt = document.getElementById('aq-quota-tooltip');
+    const listEl = tt?.querySelector?.('.aq-q-acct-list') || null;
+    const rows = listEl ? [...listEl.querySelectorAll('.aq-q-acct-row[data-aq-acct-id]')] : [];
+    const fromIdx = rows.findIndex((r) => r.getAttribute('data-aq-acct-id') === d.sourceId);
+    if (fromIdx < 0 || rows.length <= 1) return false;
+    const rects = rows.map((r) => r.getBoundingClientRect());
+    const gap = rows.length > 1 ? Math.max(0, rects[1].top - rects[0].bottom) : 4.5;
+    d.started = true;
+    d.listEl = listEl;
+    d.rows = rows;
+    d.rects = rects;
+    d.fromIdx = fromIdx;
+    d.toIdx = fromIdx;
+    d.rowEl = rows[fromIdx];
+    d.shiftPx = (rects[fromIdx]?.height || 38) + gap;
+    state.quotaTooltipPinned = true;
+    hideAccountQuotaTooltip();
+    listEl?.classList?.add('is-reordering');
+    d.rowEl?.classList?.add('is-dragging');
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'grabbing';
+    return true;
+  }
+
   function updateAccountDragTarget(clientY) {
     const d = state.acctDrag;
-    if (!d || !d.started) return;
-    const tt = document.getElementById('aq-quota-tooltip');
-    if (!tt) return;
-    const rows = [...tt.querySelectorAll('.aq-q-acct-row[data-aq-acct-id]')];
-    for (let i = 0; i < rows.length; i++) {
-      rows[i].classList.remove('aq-acct-drag-before', 'aq-acct-drag-after');
+    if (!d || !d.started || !Array.isArray(d.rects) || d.fromIdx < 0) return;
+    const dragRect = d.rects[d.fromIdx];
+    if (!dragRect) return;
+    const firstRect = d.rects[0];
+    const lastRect = d.rects[d.rects.length - 1];
+    const minDeltaY = firstRect.top - dragRect.top - 6;
+    const maxDeltaY = lastRect.bottom - dragRect.bottom + 6;
+    const rawDeltaY = clientY - d.startY;
+    const clampedDeltaY = Math.max(minDeltaY, Math.min(maxDeltaY, rawDeltaY));
+
+    if (d.rowEl?.isConnected) {
+      d.rowEl.style.transform = `translate3d(0, ${Math.round(clampedDeltaY * 10) / 10}px, 0) scale(1.01)`;
     }
-    let bestRow = null;
-    let bestMode = '';
-    for (let i = 0; i < rows.length; i++) {
-      const r = rows[i];
-      const rect = r.getBoundingClientRect();
-      if (rect.height <= 0) continue;
-      const midY = rect.top + rect.height / 2;
-      if (clientY <= midY) {
-        bestRow = r;
-        bestMode = 'before';
-        break;
+
+    const dragCenterY = dragRect.top + dragRect.height / 2 + clampedDeltaY;
+    let toIdx = d.fromIdx;
+    if (clampedDeltaY > 0) {
+      for (let i = d.fromIdx + 1; i < d.rects.length; i++) {
+        const r = d.rects[i];
+        if (dragCenterY > r.top + r.height / 2) {
+          toIdx = i;
+        }
       }
-      bestRow = r;
-      bestMode = 'after';
+    } else if (clampedDeltaY < 0) {
+      for (let i = d.fromIdx - 1; i >= 0; i--) {
+        const r = d.rects[i];
+        if (dragCenterY < r.top + r.height / 2) {
+          toIdx = i;
+        }
+      }
     }
-    if (!bestRow) {
-      d.targetId = '';
-      d.dropMode = '';
-      return;
+    d.toIdx = toIdx;
+
+    for (let i = 0; i < d.rows.length; i++) {
+      if (i === d.fromIdx) continue;
+      let offset = 0;
+      if (d.fromIdx < toIdx && i > d.fromIdx && i <= toIdx) {
+        offset = -d.shiftPx;
+      } else if (d.fromIdx > toIdx && i >= toIdx && i < d.fromIdx) {
+        offset = d.shiftPx;
+      }
+      d.rows[i].style.transform = offset ? `translate3d(0, ${Math.round(offset * 10) / 10}px, 0)` : '';
     }
-    const targetId = bestRow.getAttribute('data-aq-acct-id') || '';
-    if (!targetId || targetId === d.sourceId) {
-      d.targetId = '';
-      d.dropMode = '';
-      return;
-    }
-    d.targetId = targetId;
-    d.dropMode = bestMode;
-    bestRow.classList.add(bestMode === 'before' ? 'aq-acct-drag-before' : 'aq-acct-drag-after');
   }
 
   function commitAccountDrag() {
     const d = state.acctDrag;
     if (!d) return;
-    const { started, sourceId, targetId, dropMode } = d;
+    const { started, sourceId, toIdx } = d;
     cleanupAccountDrag();
-    if (!started || !sourceId || !targetId || sourceId === targetId) return;
+    if (!started || !sourceId || !Number.isInteger(toIdx) || toIdx < 0) return;
     const list = Array.isArray(state.accounts) ? state.accounts.slice() : [];
     const fromIdx = list.findIndex((a) => a.id === sourceId);
-    if (fromIdx < 0) return;
+    if (fromIdx < 0 || fromIdx === toIdx) return;
     const [moved] = list.splice(fromIdx, 1);
-    const toIdx = list.findIndex((a) => a.id === targetId);
-    if (toIdx < 0) return;
-    const insertIdx = dropMode === 'after' ? toIdx + 1 : toIdx;
-    list.splice(insertIdx, 0, moved);
+    const boundedToIdx = Math.max(0, Math.min(list.length, toIdx));
+    list.splice(boundedToIdx, 0, moved);
     const orderedIds = list.map((a) => a.id);
     const prevIds = (Array.isArray(state.accounts) ? state.accounts : []).map((a) => a.id);
     if (orderedIds.length === prevIds.length && orderedIds.every((id, idx) => id === prevIds[idx])) {
       return;
     }
     state.accounts = list;
+    const tt = document.getElementById('aq-quota-tooltip');
+    if (tt) tt.__aqLastHtml = '';
     refreshQuotaTooltipIfVisible();
     sendAccountAction({ type: 'reorder', orderedIds });
   }
 
   function refreshQuotaTooltipIfVisible() {
-    if (state.acctDrag?.started) return;
+    if (state.acctDrag) return;
     const tt = document.getElementById('aq-quota-tooltip');
     const anchor = state.quotaTooltipAnchor?.isConnected
       ? state.quotaTooltipAnchor
@@ -4511,15 +4559,29 @@
       row.addEventListener('pointerdown', (ev) => {
         if (ev.button !== 0 || state.accountsBusy || !row.classList.contains('is-draggable')) return;
         if (ev.target?.closest?.('button, a, input')) return;
-        state.acctDrag = {
+        cleanupAccountDrag();
+        const d = {
           sourceId: acctId,
           rowEl: row,
           startX: ev.clientX,
           startY: ev.clientY,
+          lastY: ev.clientY,
           started: false,
-          targetId: '',
-          dropMode: '',
+          timer: null,
         };
+        d.timer = setTimeout(() => {
+          d.timer = null;
+          if (state.acctDrag !== d || d.started) return;
+          try {
+            window.getSelection?.()?.removeAllRanges?.();
+          } catch {}
+          if (!startAccountDragSession(d)) {
+            cleanupAccountDrag();
+            return;
+          }
+          updateAccountDragTarget(d.lastY);
+        }, 240);
+        state.acctDrag = d;
       });
       row.addEventListener('pointerenter', () => {
         if (state.acctDrag?.started) return;
@@ -9314,16 +9376,12 @@
         cleanupAccountDrag();
         return;
       }
+      ad.lastY = ev.clientY;
       if (!ad.started) {
-        if (Math.max(Math.abs(ev.clientX - ad.startX), Math.abs(ev.clientY - ad.startY)) < 4) {
-          return;
+        if (Math.max(Math.abs(ev.clientX - ad.startX), Math.abs(ev.clientY - ad.startY)) > 5) {
+          cleanupAccountDrag();
         }
-        ad.started = true;
-        state.quotaTooltipPinned = true;
-        hideAccountQuotaTooltip();
-        ad.rowEl?.classList?.add('is-dragging');
-        document.body.style.userSelect = 'none';
-        document.body.style.cursor = 'grabbing';
+        return;
       }
       updateAccountDragTarget(ev.clientY);
       ev.preventDefault();
