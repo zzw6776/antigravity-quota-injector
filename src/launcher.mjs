@@ -19,6 +19,7 @@ import { installFileLogger, getDefaultLogDir } from './file-logger.mjs';
 import { endDevConsoleOnFormalTakeover } from './macos-dev-console.mjs';
 import {
   hasAntigravityRemoteDebuggingFlag,
+  inspectAntigravityRemoteDebugging,
   isAntigravityProcessRunning,
   isPidAlive,
   launchAntigravityExecutable,
@@ -101,6 +102,7 @@ export async function ensureAntigravityRunning(
     readDebugPortFn = readDebugPort,
     fetchCdpTargetsFn = fetchCdpTargets,
     hasRemoteDebuggingFlagFn = hasAntigravityRemoteDebuggingFlag,
+    inspectRemoteDebuggingFn = null,
     resolveExecutableFn = resolveAntigravityExecutable,
     quitAntigravityFn = quitAndWaitAntigravityProcesses,
     launchExecutableFn = launchAntigravityExecutable,
@@ -128,11 +130,32 @@ export async function ensureAntigravityRunning(
     const hasLiveCdp =
       Array.isArray(initialTargets) &&
       initialTargets.some((t) => Boolean(t?.webSocketDebuggerUrl || t?.type === 'page'));
-    const injectable =
-      hasLiveCdp || hasRemoteDebuggingFlagFn({ channel: 'stable', extraExeNames });
+    let remoteDebugState = 'disabled';
+    if (!hasLiveCdp) {
+      if (typeof inspectRemoteDebuggingFn === 'function') {
+        remoteDebugState = inspectRemoteDebuggingFn({ channel: 'stable', extraExeNames });
+      } else if (hasRemoteDebuggingFlagFn !== hasAntigravityRemoteDebuggingFlag) {
+        remoteDebugState = hasRemoteDebuggingFlagFn({ channel: 'stable', extraExeNames })
+          ? 'enabled'
+          : 'disabled';
+      } else {
+        remoteDebugState = inspectAntigravityRemoteDebugging({ channel: 'stable', extraExeNames });
+      }
+    }
+    const injectable = hasLiveCdp || remoteDebugState === 'enabled';
     if (injectable) {
       log('[launcher] Antigravity 已在运行，直接附着注入');
       return { ok: true, launched: false, restarted: false, injectable: true };
+    }
+    if (remoteDebugState === 'unknown') {
+      warn('[launcher] 无法确认运行中 Antigravity 的远程调试参数状态，跳过自动重启');
+      return {
+        ok: true,
+        launched: false,
+        restarted: false,
+        injectable: false,
+        reason: 'unknown_debug_flag',
+      };
     }
 
     if (!allowRestart) {
@@ -304,6 +327,18 @@ export async function runLauncher({
   let daemonControls = null;
   let updateManager = null;
   let takeoverInProgress = false;
+  let ensureInFlight = null;
+  const runEnsureSingleFlight = (cfg, opts = {}) => {
+    if (!ensureInFlight) {
+      ensureInFlight = ensureAntigravityRunning(paths, cfg, {
+        ...opts,
+        setRestartInFlight: (flag) => daemonControls?.setRestartInFlight?.(flag),
+      }).finally(() => {
+        ensureInFlight = null;
+      });
+    }
+    return ensureInFlight;
+  };
 
   try {
     try {
@@ -334,9 +369,7 @@ export async function runLauncher({
           console.log(
             `[launcher] ${req?.mode ?? 'unknown'} v${req?.version ?? 'unknown'} 请求复用当前实例`
           );
-          await ensureAntigravityRunning(paths, readUserConfig(paths.stateDir), {
-            setRestartInFlight: (flag) => daemonControls?.setRestartInFlight?.(flag),
-          });
+          await runEnsureSingleFlight(readUserConfig(paths.stateDir));
           await daemonControls?.tickNow?.();
         },
       });
@@ -351,7 +384,7 @@ export async function runLauncher({
       return 0;
     }
 
-    const ensured = await ensureAntigravityRunning(paths, userCfg, {
+    const ensured = await runEnsureSingleFlight(userCfg, {
       allowMissingError: true,
       allowRestart: !once,
     });

@@ -304,7 +304,7 @@ export function findRunningAntigravityPids({
   }
 }
 
-export function hasAntigravityRemoteDebuggingFlag({
+export function inspectAntigravityRemoteDebugging({
   channel = 'stable',
   platform = process.platform,
   extraExeNames = [],
@@ -320,9 +320,13 @@ export function hasAntigravityRemoteDebuggingFlag({
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
       });
-      return String(out || '')
+      const matched = String(out || '')
         .split(/\r?\n/)
-        .some((line) => line.includes(marker) && /--remote-debugging-port=\d+/i.test(line));
+        .filter((line) => line.includes(marker));
+      if (matched.length === 0) return 'unknown';
+      return matched.some((line) => /--remote-debugging-port=\d+/i.test(line))
+        ? 'enabled'
+        : 'disabled';
     }
 
     if (platform === 'win32') {
@@ -355,10 +359,15 @@ export function hasAntigravityRemoteDebuggingFlag({
           windowsHide: true,
         }
       );
-      if (res?.status !== 0) return false;
-      return String(res.stdout || '')
+      if (res?.status !== 0) return 'unknown';
+      const lines = String(res.stdout || '')
         .split(/\r?\n/)
-        .some((line) => /--remote-debugging-port=\d+/i.test(line));
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (lines.length === 0) return 'unknown';
+      return lines.some((line) => /--remote-debugging-port=\d+/i.test(line))
+        ? 'enabled'
+        : 'disabled';
     }
 
     const expected = channel === 'insiders' ? ['antigravity-insiders', 'antigravity'] : ['antigravity'];
@@ -367,17 +376,25 @@ export function hasAntigravityRemoteDebuggingFlag({
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    return String(out || '')
+    const matched = String(out || '')
       .split(/\r?\n/)
-      .some((line) => {
-        const trimmed = line.trim();
+      .map((line) => line.trim())
+      .filter((trimmed) => {
         if (!trimmed) return false;
         const bin = path.posix.basename(trimmed.split(/\s+/)[0] || '');
-        return expected.includes(bin) && /--remote-debugging-port=\d+/i.test(trimmed);
+        return expected.includes(bin);
       });
+    if (matched.length === 0) return 'unknown';
+    return matched.some((trimmed) => /--remote-debugging-port=\d+/i.test(trimmed))
+      ? 'enabled'
+      : 'disabled';
   } catch {
-    return false;
+    return 'unknown';
   }
+}
+
+export function hasAntigravityRemoteDebuggingFlag(opts = {}) {
+  return inspectAntigravityRemoteDebugging(opts) === 'enabled';
 }
 
 export async function quitAndWaitAntigravityProcesses({
@@ -430,31 +447,17 @@ export async function quitAndWaitAntigravityProcesses({
     ];
     for (const exeName of exeNames) {
       try {
-        execFileSyncFn('taskkill', ['/IM', exeName, '/T'], {
+        execFileSyncFn('taskkill', ['/IM', exeName], {
           timeout: 3000,
           stdio: 'ignore',
           windowsHide: true,
         });
       } catch {}
     }
-    const softDeadline = Date.now() + Math.min(timeoutMs, 5000);
-    while (Date.now() < softDeadline) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
       if (getPids().length === 0) return true;
       await sleepFn(200);
-    }
-    for (const exeName of exeNames) {
-      try {
-        execFileSyncFn('taskkill', ['/IM', exeName, '/T', '/F'], {
-          timeout: 3000,
-          stdio: 'ignore',
-          windowsHide: true,
-        });
-      } catch {}
-    }
-    const hardDeadline = Date.now() + 2500;
-    while (Date.now() < hardDeadline) {
-      if (getPids().length === 0) return true;
-      await sleepFn(150);
     }
     return getPids().length === 0;
   }

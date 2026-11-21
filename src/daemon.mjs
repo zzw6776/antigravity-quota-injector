@@ -10,6 +10,8 @@ import {
   getAccountSwitchSupport,
   listAccounts,
   prepareNewAccountWithRestart,
+  readLastLoginEmail,
+  reorderAccounts,
   snapshotCurrentAccount,
   switchAccountWithRestart,
   updateAccountQuotaSnapshot,
@@ -419,9 +421,17 @@ export async function runDaemon({
     void pushUpdateToAllSessions();
   });
 
+  const resolveSessionEmail = (session, preferred = '') => {
+    const clean = String(preferred || session?.activeEmail || '').trim();
+    if (clean) return clean;
+    const stored = readLastLoginEmail(paths.appSupportDir);
+    if (stored && session) session.activeEmail = stored;
+    return stored;
+  };
+
   const pushAccountsToSession = async (session, extra = {}) => {
     if (!session?.client?.isOpen() || !session.hostConfirmed) return;
-    const activeEmail = extra.activeEmail ?? session.activeEmail ?? '';
+    const activeEmail = resolveSessionEmail(session, extra.activeEmail);
     const payload = {
       supported: accountSupport.supported,
       unsupportedReason: accountSupport.reason,
@@ -469,7 +479,7 @@ export async function runDaemon({
 
   const pushKeepAliveToSession = async (session, accountEmail = '') => {
     if (!session?.client?.isOpen() || !session.hostConfirmed) return;
-    const email = accountEmail || session.activeEmail || '';
+    const email = resolveSessionEmail(session, accountEmail);
     const payload = keepAliveManager.getState(email);
     try {
       await session.client.send('Runtime.evaluate', {
@@ -493,7 +503,7 @@ export async function runDaemon({
       return;
     }
     const type = String(msg?.type || '');
-    const accountEmail = String(msg?.accountEmail || session?.activeEmail || '').trim();
+    const accountEmail = resolveSessionEmail(session, msg?.accountEmail);
     if (accountEmail && session) {
       session.activeEmail = accountEmail;
     }
@@ -661,10 +671,14 @@ export async function runDaemon({
       return;
     }
     const profile = msg?.profile && typeof msg.profile === 'object' ? msg.profile : null;
+    const prevEmail = String(session?.activeEmail || '').trim().toLowerCase();
     if (profile?.email) {
       session.activeEmail = String(profile.email).trim();
     }
-    const activeEmail = String(profile?.email || session.activeEmail || '').trim();
+    const activeEmail = resolveSessionEmail(session, profile?.email || '');
+    if (activeEmail && activeEmail.toLowerCase() !== prevEmail) {
+      void pushKeepAliveToSession(session, activeEmail);
+    }
     const type = String(msg?.type || '');
 
     try {
@@ -743,6 +757,13 @@ export async function runDaemon({
       if (type === 'delete') {
         deleteAccount(paths.accountsFile, msg?.id);
         await pushAccountsToAllSessions({ activeEmail, status: '已删除账号快照' });
+        return;
+      }
+      if (type === 'reorder') {
+        const res = reorderAccounts(paths.accountsFile, msg?.orderedIds);
+        if (res.changed) {
+          await pushAccountsToAllSessions({ activeEmail });
+        }
         return;
       }
       if (type === 'switch') {
@@ -948,6 +969,9 @@ export async function runDaemon({
       if (resolvedCid && resolvedCid !== session.activeCascadeId) {
         session.activeCascadeId = resolvedCid;
         session.lastPushedKey = '';
+      }
+      if (!stateRes) {
+        continue;
       }
       if (!pageState || pageState.v !== version) {
         await session.client.send('Runtime.evaluate', { expression: script, returnByValue: false });

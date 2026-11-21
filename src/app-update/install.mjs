@@ -235,9 +235,9 @@ export async function applySelfUpdateAndRelaunch({
 
   if (asset.platform === 'win32') {
     await mkdir(updatesDir, { recursive: true });
-    const helperPath = path.win32.join(updatesDir, 'apply-update.ps1');
-    const launcherVbsPath = path.win32.join(updatesDir, 'apply-update.vbs');
-    const logPath = path.win32.join(updatesDir, 'updater.log');
+    const helperPath = path.join(updatesDir, 'apply-update.ps1');
+    const launcherVbsPath = path.join(updatesDir, 'apply-update.vbs');
+    const logPath = path.join(updatesDir, 'updater.log');
     const mainExe = path.win32.join(installedApp, 'Antigravity Quota Injector.exe');
     await writeFile(helperPath, buildWindowsUpdateHelperScript(), 'utf8');
     await writeFile(
