@@ -115,6 +115,29 @@ test('ensureAntigravityRunning avoids killing Antigravity if executable is missi
   let launchCalled = false;
   const inflight = [];
 
+  const unknownFlagRes = await ensureAntigravityRunning(paths, {}, {
+    setRestartInFlight: (flag) => inflight.push(flag),
+    isProcessRunningFn: () => true,
+    readDebugPortFn: () => null,
+    fetchCdpTargetsFn: async () => [],
+    inspectRemoteDebuggingFn: () => 'unknown',
+    resolveExecutableFn: () => ({ exePath: '/Applications/Antigravity.app', source: 'standard' }),
+    quitAntigravityFn: async () => {
+      quitCalled = true;
+      return true;
+    },
+    launchExecutableFn: () => {
+      launchCalled = true;
+      return { launched: true, exePath: '/Applications/Antigravity.app', source: 'standard' };
+    },
+    sleepFn: async () => {},
+    log: () => {},
+    warn: () => {},
+  });
+  assert.equal(unknownFlagRes.reason, 'unknown_debug_flag');
+  assert.equal(quitCalled, false);
+  assert.equal(launchCalled, false);
+
   const missingExeRes = await ensureAntigravityRunning(paths, {}, {
     setRestartInFlight: (flag) => inflight.push(flag),
     isProcessRunningFn: () => true,

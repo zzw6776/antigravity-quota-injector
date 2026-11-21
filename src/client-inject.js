@@ -198,6 +198,7 @@
     postSendRefreshTimers: [],
     wasComposerBusy: false,
     clientModelConfigs: [],
+    acctDrag: null,
     keepAliveState: { accountId: '', pools: {} },
     keepAliveClaims: new Map(),
     keepAliveDeadlineTimer: null,
@@ -756,181 +757,651 @@
         color: #9a9aa4;
       }
 
-      .aq-q-group {
-        padding: 6px 0;
+      #aq-quota-tooltip {
+        width: 344px;
+        min-width: 308px;
+        max-width: min(356px, calc(100vw - 24px));
+        padding: 13px 14px;
+        border-radius: 12px;
+        background: #ffffff;
+        color: #18181b;
+        border: 1px solid rgba(15, 23, 42, 0.085);
+        box-shadow: 0 18px 40px -8px rgba(15, 23, 42, 0.14), 0 3px 10px rgba(15, 23, 42, 0.05);
       }
-      .aq-q-group + .aq-q-group {
-        border-top: 1px dashed rgba(127, 127, 127, 0.22);
+      #aq-acct-quota-tooltip {
+        width: 294px;
+        min-width: 260px;
+        max-width: min(308px, calc(100vw - 24px));
+        padding: 12px 13px;
+        border-radius: 12px;
+        background: #ffffff;
+        color: #18181b;
+        border: 1px solid rgba(15, 23, 42, 0.085);
+        box-shadow: 0 18px 38px -8px rgba(15, 23, 42, 0.14), 0 3px 10px rgba(15, 23, 42, 0.05);
       }
-      .aq-q-group-hdr {
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-quota-tooltip,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-acct-quota-tooltip {
+        background: #191a20;
+        color: #f4f4f6;
+        border-color: rgba(255, 255, 255, 0.09);
+        box-shadow: 0 22px 48px -10px rgba(0, 0, 0, 0.65), 0 4px 14px rgba(0, 0, 0, 0.34);
+      }
+
+      .aq-qp-hdr {
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 8px;
+        margin-bottom: 8px;
+      }
+      .aq-qp-title-wrap {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+        flex: 1;
+      }
+      .aq-qp-title {
+        font-size: 12px;
         font-weight: 600;
-        font-size: 11px;
+        letter-spacing: -0.01em;
+        color: inherit;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .aq-qp-badge {
+        font-size: 9.5px;
+        font-weight: 550;
+        line-height: 15px;
+        padding: 0 6px;
+        border-radius: 9999px;
+        background: rgba(15, 23, 42, 0.055);
+        color: #52525b;
+        flex-shrink: 0;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-badge {
+        background: rgba(255, 255, 255, 0.08);
+        color: #b4b5c0;
+      }
+      .aq-qp-status {
+        font-size: 10px;
+        font-weight: 450;
+        color: #71717a;
+        flex-shrink: 0;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-status {
+        color: #9697a3;
+      }
+
+      .aq-qp-ctx {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 0 2px 7px;
+        margin-bottom: 0;
+        border-bottom: 1px solid rgba(127, 127, 127, 0.12);
+        font-size: 10.5px;
+      }
+      .aq-qp-ctx-lbl {
+        color: #71717a;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-ctx-lbl {
+        color: #9697a3;
+      }
+      .aq-qp-ctx-val {
+        font-variant-numeric: tabular-nums;
+        color: #71717a;
+        white-space: nowrap;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-ctx-val {
+        color: #9697a3;
+      }
+      .aq-qp-ctx-strong {
+        font-weight: 600;
+        color: #15803d;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-ctx-strong {
+        color: #4ade80;
+      }
+      .aq-qp-ctx-strong.aq-lvl-muted {
+        color: #71717a;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-ctx-strong.aq-lvl-muted {
+        color: #9697a3;
+      }
+      .aq-qp-ctx-strong.aq-lvl-warn {
+        color: #c27803;
+      }
+      .aq-qp-ctx-strong.aq-lvl-crit {
+        color: #dc2626;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-ctx-strong.aq-lvl-warn {
+        color: #fbbf24;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-ctx-strong.aq-lvl-crit {
+        color: #f87171;
+      }
+
+      .aq-qp-groups {
+        display: grid;
+        gap: 0;
+      }
+      .aq-qp-card {
+        padding: 7.5px 2px;
+        margin: 0;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+      }
+      .aq-qp-card + .aq-qp-card {
+        border-top: 1px dotted rgba(127, 127, 127, 0.25);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-card + .aq-qp-card {
+        border-top-color: rgba(255, 255, 255, 0.13);
+      }
+      .aq-qp-card-hdr {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
         margin-bottom: 4px;
       }
-      .aq-q-group-hdr-left,
-      .aq-q-group-hdr-right {
+      .aq-qp-card-title {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1.3;
+      }
+      .aq-qp-card-title > span:last-child {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .aq-qp-active-dot {
+        width: 5.5px;
+        height: 5.5px;
+        border-radius: 9999px;
+        flex-shrink: 0;
+        background: #3b82f6;
+        box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.16);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-active-dot {
+        background: #60a5fa;
+        box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.2);
+      }
+
+      /* Mini toggle switch for silent keep-alive: label stays neutral gray (never colored) */
+      .aq-qp-ka-switch {
+        appearance: none;
+        border: 0;
+        background: transparent;
+        padding: 1px 0 1px 4px;
+        margin: -1px 0;
         display: inline-flex;
         align-items: center;
         gap: 5px;
-        min-width: 0;
-      }
-      .aq-q-ka-toggle {
-        appearance: none;
-        border: 1px solid rgba(127, 127, 127, 0.25);
-        background: transparent;
-        color: var(--muted-foreground, #71717a);
-        border-radius: 9999px;
-        padding: 1px 7px;
         font: inherit;
-        font-size: 9.5px;
-        font-weight: 500;
-        line-height: 14px;
         cursor: pointer;
         flex-shrink: 0;
-        transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+        color: #8a8a93;
+        transition: color 0.14s ease, opacity 0.14s ease;
       }
-      .aq-q-ka-toggle:hover {
-        border-color: rgba(22, 163, 74, 0.38);
-        color: #15803d;
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-ka-switch {
+        color: #8c8c96;
       }
-      .aq-q-ka-toggle.is-on {
-        border-color: rgba(22, 163, 74, 0.42);
-        background: rgba(22, 163, 74, 0.14);
-        color: #15803d;
-      }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-ka-toggle:hover {
-        border-color: rgba(74, 222, 128, 0.35);
-        color: #4ade80;
-      }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-ka-toggle.is-on {
-        border-color: rgba(74, 222, 128, 0.42);
-        background: rgba(74, 222, 128, 0.16);
-        color: #4ade80;
-      }
-      .aq-q-active-tag {
+      .aq-qp-ka-lbl {
         font-size: 10px;
-        font-weight: 500;
-        padding: 1px 6px;
-        border-radius: 9999px;
-        background: rgba(59, 130, 246, 0.14);
-        color: #2563eb;
+        font-weight: 450;
+        line-height: 1;
+        color: #8a8a93;
+        transition: color 0.14s ease;
       }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-active-tag {
-        color: #60a5fa;
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-ka-lbl {
+        color: #8c8c96;
       }
-      .aq-q-group-desc {
-        font-size: 10.5px;
-        color: var(--muted-foreground, #71717a);
-        margin-bottom: 5px;
-        line-height: 1.35;
+      .aq-qp-ka-switch:hover .aq-qp-ka-lbl {
+        color: #52525b;
       }
-      .aq-q-bucket {
-        display: grid;
-        grid-template-columns: 1fr auto;
-        align-items: center;
-        gap: 4px 10px;
-        margin-top: 4px;
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-ka-switch:hover .aq-qp-ka-lbl {
+        color: #d4d4d8;
       }
-      .aq-q-bucket-top {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 8px;
-        grid-column: 1 / -1;
-        font-size: 11px;
-      }
-      .aq-q-bar {
-        height: 4px;
+      .aq-qp-ka-track {
+        position: relative;
+        width: 22px;
+        height: 12px;
         border-radius: 9999px;
         background: rgba(127, 127, 127, 0.18);
-        overflow: hidden;
+        transition: background-color 0.16s ease, box-shadow 0.16s ease;
+        flex-shrink: 0;
       }
-      .aq-q-bar-fill {
-        height: 100%;
+      .aq-qp-ka-switch:hover .aq-qp-ka-track {
+        background: rgba(127, 127, 127, 0.26);
+      }
+      .aq-qp-ka-switch.is-on .aq-qp-ka-track {
+        background: #3b82f6;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-ka-switch.is-on .aq-qp-ka-track {
+        background: #3b82f6;
+      }
+      .aq-qp-ka-switch.is-on:hover .aq-qp-ka-track {
+        background: #2563eb;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-ka-switch.is-on:hover .aq-qp-ka-track {
+        background: #60a5fa;
+      }
+      .aq-qp-ka-switch.is-running .aq-qp-ka-track {
+        box-shadow: 0 0 0 2.5px rgba(59, 130, 246, 0.24);
+      }
+      .aq-qp-ka-thumb {
+        position: absolute;
+        top: 1.5px;
+        left: 1.5px;
+        width: 9px;
+        height: 9px;
         border-radius: 9999px;
-        background: currentColor;
+        background: #ffffff;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+        transition: transform 0.16s cubic-bezier(0.22, 1, 0.36, 1);
       }
-      .aq-q-accounts {
-        margin-top: 6px;
-        padding-top: 7px;
-        border-top: 1px dashed rgba(127, 127, 127, 0.22);
+      .aq-qp-ka-switch.is-on .aq-qp-ka-thumb {
+        transform: translateX(10px);
+      }
+
+      .aq-qp-buckets {
         display: grid;
-        gap: 5px;
+        gap: 3.5px;
+      }
+      .aq-qp-bkt-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        font-size: 10.5px;
+        line-height: 1.38;
+      }
+      .aq-qp-bkt-win {
+        color: #71717a;
+        font-size: 10.5px;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-bkt-win {
+        color: #9697a3;
+      }
+      .aq-qp-bkt-val {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 4px;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
+      .aq-qp-bkt-pct {
+        font-weight: 600;
+        font-size: 11px;
+        color: #15803d;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-bkt-pct {
+        color: #4ade80;
+      }
+      .aq-qp-bkt-pct.is-muted {
+        color: #71717a;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-bkt-pct.is-muted {
+        color: #9697a3;
+      }
+      .aq-qp-bkt-pct.is-warn {
+        color: #c27803;
+      }
+      .aq-qp-bkt-pct.is-crit {
+        color: #dc2626;
+      }
+      .aq-qp-bkt-pct.is-reset {
+        color: #15803d;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-bkt-pct.is-warn {
+        color: #fbbf24;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-bkt-pct.is-crit {
+        color: #f87171;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-bkt-pct.is-reset {
+        color: #4ade80;
+      }
+      .aq-qp-bkt-sep {
+        font-size: 10px;
+        color: #a1a1aa;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-bkt-sep {
+        color: #5c5d69;
+      }
+      .aq-qp-bkt-reset {
+        font-size: 10px;
+        color: #71717a;
+        white-space: nowrap;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-bkt-reset {
+        color: #9697a3;
+      }
+
+      /* Unified classic account switcher (Scheme 1 refined, no scrollbar) */
+      .aq-q-accounts {
+        margin-top: 2px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(127, 127, 127, 0.14);
+        display: grid;
+        gap: 6px;
       }
       .aq-q-acct-hdr {
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 8px;
-        font-size: 11px;
+        padding: 0 2px;
+        font-size: 10.5px;
         font-weight: 600;
+        color: #71717a;
       }
-      .aq-q-acct-actions {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-hdr {
+        color: #9697a3;
       }
-      .aq-q-btn {
+      .aq-qp-add-btn {
         appearance: none;
-        border: 1px solid rgba(127, 127, 127, 0.24);
+        border: 0;
         background: transparent;
-        color: inherit;
-        border-radius: 6px;
+        color: #2563eb;
+        border-radius: 5px;
         padding: 1px 6px;
+        margin: -1px -6px -1px 0;
         font: inherit;
         font-size: 10px;
+        font-weight: 500;
         line-height: 16px;
         cursor: pointer;
         white-space: nowrap;
+        transition: background-color 0.12s ease, color 0.12s ease, opacity 0.12s ease;
       }
-      .aq-q-btn:hover:not(:disabled) {
-        background: rgba(127, 127, 127, 0.12);
-      }
-      .aq-q-btn:disabled {
-        opacity: 0.45;
-        cursor: not-allowed;
-      }
-      .aq-q-btn-primary {
-        border-color: rgba(37, 99, 235, 0.35);
-        color: #2563eb;
-      }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-btn-primary {
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-add-btn {
         color: #60a5fa;
       }
-      .aq-q-btn-warn {
-        border-color: rgba(217, 119, 6, 0.45);
+      .aq-qp-add-btn:hover:not(:disabled) {
+        background: rgba(59, 130, 246, 0.1);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-add-btn:hover:not(:disabled) {
+        background: rgba(96, 165, 250, 0.14);
+      }
+      .aq-qp-add-btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      .aq-qp-add-btn.is-warn,
+      .aq-qp-add-btn.is-warn:hover:not(:disabled) {
+        background: rgba(245, 158, 11, 0.15);
         color: #b45309;
       }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-btn-warn {
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-add-btn.is-warn,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-add-btn.is-warn:hover:not(:disabled) {
+        background: rgba(251, 191, 36, 0.16);
         color: #fbbf24;
       }
       .aq-q-acct-list {
         display: grid;
-        gap: 4px;
-        max-height: 140px;
-        overflow-y: auto;
+        gap: 4.5px;
       }
       .aq-q-acct-row {
+        position: relative;
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 8px;
+        min-height: 36px;
+        padding: 5px 8.5px;
+        margin: 0 -6px;
+        border-radius: 7.5px;
         font-size: 10.5px;
-        padding: 3px 6px;
-        border-radius: 6px;
-        background: rgba(127, 127, 127, 0.06);
-        transition: background-color 0.12s ease;
+        background: rgba(15, 23, 42, 0.028);
+        border: 1px solid transparent;
+        transition: background-color 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+      }
+      .aq-q-acct-row.is-draggable {
+        cursor: grab;
+      }
+      .aq-q-acct-row.is-dragging {
+        opacity: 0.42;
+        cursor: grabbing;
+      }
+      .aq-q-acct-row.aq-acct-drag-before::before,
+      .aq-q-acct-row.aq-acct-drag-after::after {
+        content: "";
+        position: absolute;
+        left: 6px;
+        right: 6px;
+        height: 2px;
+        border-radius: 9999px;
+        background: #3b82f6;
+        pointer-events: none;
+      }
+      .aq-q-acct-row.aq-acct-drag-before::before {
+        top: -3.5px;
+      }
+      .aq-q-acct-row.aq-acct-drag-after::after {
+        bottom: -3.5px;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-row.aq-acct-drag-before::before,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-row.aq-acct-drag-after::after {
+        background: #60a5fa;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-row {
+        background: rgba(255, 255, 255, 0.032);
+      }
+      .aq-q-acct-row.is-current {
+        background: rgba(59, 130, 246, 0.06);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-row.is-current {
+        background: rgba(59, 130, 246, 0.1);
       }
       .aq-q-acct-row:hover {
-        background: rgba(127, 127, 127, 0.14);
+        background: rgba(15, 23, 42, 0.055);
       }
-      #aq-acct-quota-tooltip {
-        width: 288px;
-        max-width: min(304px, calc(100vw - 24px));
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-row:hover {
+        background: rgba(255, 255, 255, 0.065);
+      }
+      .aq-q-acct-row.is-current:hover {
+        background: rgba(59, 130, 246, 0.085);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-row.is-current:hover {
+        background: rgba(59, 130, 246, 0.13);
+      }
+      .aq-q-acct-info {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 6.5px;
+      }
+      .aq-q-acct-meta {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+      }
+      .aq-q-acct-right {
+        flex-shrink: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .aq-q-acct-gem {
+        display: inline-block;
+        width: 5.5px;
+        height: 5.5px;
+        border-radius: 9999px;
+        flex-shrink: 0;
+        transition: opacity 0.12s ease, background-color 0.12s ease;
+      }
+      .aq-q-acct-gem.is-available {
+        background: #16a34a;
+      }
+      .aq-q-acct-gem.is-depleted {
+        background: #dc2626;
+      }
+      .aq-q-acct-gem.is-unknown {
+        background: rgba(127, 127, 127, 0.28);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-gem.is-available {
+        background: #34d399;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-gem.is-depleted {
+        background: #f87171;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-gem.is-unknown {
+        background: rgba(161, 161, 170, 0.28);
+      }
+      .aq-q-acct-email {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        line-height: 1.3;
+        color: #3f3f46;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-email {
+        color: #d4d4d8;
+      }
+      .aq-q-acct-row.is-current .aq-q-acct-email {
+        font-weight: 600;
+        color: #18181b;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-row.is-current .aq-q-acct-email {
+        color: #fafafa;
+      }
+      .aq-q-acct-sub {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 9.5px;
+        line-height: 1.25;
+        font-variant-numeric: tabular-nums;
+        color: #8a8a93;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-sub {
+        color: #8c8c96;
+      }
+      .aq-q-acct-sub.is-depleted {
+        color: #c27803;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-sub.is-depleted {
+        color: #fbbf24;
+      }
+      .aq-q-acct-plan {
+        font-size: 9.5px;
+        color: #8e8e98;
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+      .aq-q-active-tag {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 38px;
+        height: 19px;
+        padding: 0 7px;
+        border-radius: 5px;
+        font-size: 10px;
+        font-weight: 500;
+        background: rgba(59, 130, 246, 0.12);
+        color: #2563eb;
+        user-select: none;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-active-tag {
+        background: rgba(96, 165, 250, 0.16);
+        color: #93c5fd;
+      }
+      .aq-q-btn {
+        appearance: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 38px;
+        height: 19px;
+        padding: 0 7px;
+        border-radius: 5px;
+        border: 1px solid rgba(15, 23, 42, 0.14);
+        background: #ffffff;
+        color: #3f3f46;
+        font: inherit;
+        font-size: 10px;
+        font-weight: 500;
+        line-height: 1;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease, opacity 0.12s ease;
+      }
+      .aq-q-btn:hover:not(:disabled) {
+        border-color: #3b82f6;
+        color: #2563eb;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-btn {
+        background: rgba(255, 255, 255, 0.06);
+        border-color: rgba(255, 255, 255, 0.13);
+        color: #e4e4e7;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-btn:hover:not(:disabled) {
+        border-color: #60a5fa;
+        color: #93c5fd;
+      }
+      .aq-q-btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      .aq-q-btn-warn,
+      .aq-q-btn-warn:hover:not(:disabled) {
+        background: rgba(245, 158, 11, 0.14);
+        border-color: rgba(245, 158, 11, 0.36);
+        color: #b45309;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-btn-warn,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-btn-warn:hover:not(:disabled) {
+        background: rgba(251, 191, 36, 0.16);
+        border-color: rgba(245, 158, 11, 0.38);
+        color: #fbbf24;
+      }
+      .aq-q-btn-del {
+        appearance: none;
+        border: 0;
+        background: transparent;
+        color: #a1a1aa;
+        width: 18px;
+        height: 18px;
+        padding: 0;
+        border-radius: 5px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        opacity: 0.34;
+        transition: opacity 0.12s ease, background-color 0.12s ease, color 0.12s ease;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-btn-del {
+        color: #71717a;
+      }
+      .aq-q-acct-row:hover .aq-q-btn-del {
+        opacity: 0.78;
+      }
+      .aq-q-btn-del:hover:not(:disabled) {
+        opacity: 1;
+        background: rgba(239, 68, 68, 0.13);
+        color: #dc2626;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-btn-del:hover:not(:disabled) {
+        background: rgba(248, 113, 113, 0.16);
+        color: #f87171;
+      }
+      .aq-q-btn-del:disabled {
+        opacity: 0.2;
+        cursor: not-allowed;
       }
       .aq-acct-tt-hdr-left {
         display: inline-flex;
@@ -943,99 +1414,44 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+        font-size: 11.5px;
+        font-weight: 600;
       }
       .aq-acct-tt-foot {
-        margin-top: 7px;
+        margin-top: 8px;
         padding-top: 6px;
-        border-top: 1px solid rgba(127, 127, 127, 0.14);
-        font-size: 10px;
-        color: var(--muted-foreground, #71717a);
+        border-top: 1px solid rgba(127, 127, 127, 0.12);
+        font-size: 9.5px;
+        color: #71717a;
         line-height: 1.4;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-acct-tt-foot {
+        color: #8e8e98;
       }
       .aq-acct-tt-empty {
         padding: 4px 0 2px;
-        font-size: 11px;
-        color: var(--muted-foreground, #71717a);
+        font-size: 10.5px;
+        color: #71717a;
         line-height: 1.5;
       }
-      .aq-q-acct-info {
-        flex: 1;
-        min-width: 0;
-        display: flex;
-        align-items: center;
-        gap: 6px;
-      }
-      .aq-q-acct-gem {
-        display: inline-block;
-        width: 5px;
-        height: 5px;
-        border-radius: 9999px;
-        flex-shrink: 0;
-        transition: opacity 0.12s ease, background-color 0.12s ease;
-      }
-      .aq-q-acct-gem.is-available {
-        background: rgba(22, 163, 74, 0.56);
-      }
-      .aq-q-acct-row:hover .aq-q-acct-gem.is-available {
-        background: rgba(22, 163, 74, 0.82);
-      }
-      .aq-q-acct-gem.is-depleted {
-        background: rgba(220, 38, 38, 0.46);
-      }
-      .aq-q-acct-row:hover .aq-q-acct-gem.is-depleted {
-        background: rgba(220, 38, 38, 0.74);
-      }
-      .aq-q-acct-gem.is-unknown {
-        background: rgba(127, 127, 127, 0.22);
-      }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-gem.is-available {
-        background: rgba(74, 222, 128, 0.52);
-      }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-row:hover .aq-q-acct-gem.is-available {
-        background: rgba(74, 222, 128, 0.8);
-      }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-gem.is-depleted {
-        background: rgba(248, 113, 113, 0.48);
-      }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-row:hover .aq-q-acct-gem.is-depleted {
-        background: rgba(248, 113, 113, 0.76);
-      }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-gem.is-unknown {
-        background: rgba(161, 161, 170, 0.24);
-      }
-      .aq-q-acct-email {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      .aq-q-acct-plan {
-        margin-left: auto;
-        font-size: 9.5px;
-        padding: 0 5px;
-        border-radius: 9999px;
-        background: rgba(127, 127, 127, 0.14);
-        color: #71717a;
-        flex-shrink: 0;
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-acct-tt-empty {
+        color: #8e8e98;
       }
       .aq-q-acct-note {
         font-size: 10px;
         color: #71717a;
+        padding: 1px 0 0;
       }
       .aq-q-acct-err {
         font-size: 10px;
         color: #dc2626;
+        padding: 1px 0 0;
       }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-plan,
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-note {
-        color: #9a9aa4;
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-note {
+        color: #8e8e98;
       }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-err {
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-err {
         color: #f87171;
-      }
-      .aq-q-reset {
-        font-size: 10px;
-        color: var(--muted-foreground, #71717a);
-        white-space: nowrap;
       }
       .aq-update-dot {
         display: inline-block;
@@ -1047,12 +1463,10 @@
         flex-shrink: 0;
       }
       .aq-q-update {
-        margin-top: 6px;
-        padding-top: 7px;
-        border-top: 1px dashed rgba(127, 127, 127, 0.22);
+        margin-top: 5px;
         display: flex;
         flex-wrap: wrap;
-        align-items: baseline;
+        align-items: center;
         justify-content: flex-end;
         gap: 4px 10px;
         font-size: 10px;
@@ -1060,36 +1474,52 @@
       .aq-update-open {
         appearance: none;
         border: 0;
-        padding: 2px 0;
+        padding: 1px 7px;
         margin-left: auto;
-        background: transparent;
-        color: #16a34a;
+        border-radius: 9999px;
+        background: rgba(16, 185, 129, 0.12);
+        color: #059669;
         font: inherit;
-        font-size: 10px;
-        line-height: 1.4;
+        font-size: 9.5px;
+        font-weight: 500;
+        line-height: 15px;
         cursor: pointer;
         white-space: nowrap;
+        transition: background-color 0.14s ease, color 0.14s ease;
       }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-update-open {
-        color: #4ade80;
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-update-open {
+        background: rgba(52, 211, 153, 0.14);
+        color: #34d399;
       }
       .aq-update-open:hover:not(:disabled) {
-        text-decoration: underline;
+        background: rgba(16, 185, 129, 0.2);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-update-open:hover:not(:disabled) {
+        background: rgba(52, 211, 153, 0.22);
       }
       .aq-update-open:disabled {
         cursor: default;
-        opacity: 0.75;
+        opacity: 0.72;
       }
       .aq-panel-version-text,
       .aq-update-open.aq-panel-version-text {
         margin-left: auto;
-        color: var(--muted-foreground, #71717a);
+        padding: 1px 2px;
+        background: transparent !important;
+        color: #a1a1aa;
+        font-weight: 450;
         white-space: nowrap;
-        font-size: 10px;
+        font-size: 9.5px;
       }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-panel-version-text,
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-update-open.aq-panel-version-text {
-        color: #9a9aa4;
+      .aq-update-open.aq-panel-version-text:hover:not(:disabled) {
+        color: #52525b;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-panel-version-text,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-update-open.aq-panel-version-text {
+        color: #52525b;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-update-open.aq-panel-version-text:hover:not(:disabled) {
+        color: #a1a1aa;
       }
       .aq-update-error {
         flex-basis: 100%;
@@ -2533,20 +2963,7 @@
       el = document.createElement('div');
       el.id = id;
       el.className = 'aq-floating-tooltip';
-      if (id === 'aq-quota-tooltip') {
-        el.addEventListener('click', (ev) => {
-          const target = ev.target;
-          if (target?.closest?.('button, a, input, [data-aq-acct-add], [data-aq-acct-switch], [data-aq-acct-del], [data-aq-update-open], [data-aq-ka-toggle]')) {
-            return;
-          }
-          if (String(window.getSelection?.()?.toString() || '').trim()) {
-            return;
-          }
-          state.quotaTooltipPinned = true;
-          sendAccountAction({ type: 'list' });
-          void fetchQuota({ force: true, immediate: true, includeUserStatus: true });
-        });
-      } else if (id === 'aq-acct-quota-tooltip') {
+      if (id === 'aq-acct-quota-tooltip') {
         el.addEventListener('pointerenter', () => {
           if (state.acctQuotaTooltipHideTimer) {
             clearTimeout(state.acctQuotaTooltipHideTimer);
@@ -2819,10 +3236,27 @@
     }, 120);
   }
 
+  function resolveTurnUsageHost(turnEl) {
+    if (!turnEl) return null;
+    if (turnEl.matches?.('[data-turn-content]')) return turnEl;
+    const turnContent = turnEl.querySelector?.('[data-turn-content]');
+    if (turnContent) return turnContent;
+    const contentAnchor =
+      turnEl.querySelector?.('[data-testid="agent-response"]') ||
+      turnEl.querySelector?.('[data-testid="user-message"]') ||
+      turnEl.querySelector?.('[data-testid="agent-loading"]');
+    if (contentAnchor?.parentElement && contentAnchor.parentElement !== turnEl) {
+      return contentAnchor.parentElement;
+    }
+    const toolbar = turnEl.querySelector?.('[data-testid="cascade-system-message-toolbar"]');
+    const toolbarContainer =
+      toolbar?.parentElement && toolbar.parentElement !== turnEl ? toolbar.parentElement : toolbar;
+    return toolbarContainer?.parentElement || contentAnchor || turnEl;
+  }
+
   function mountTurnLine(turnEl, turnData) {
-    const toolbar = turnEl.querySelector('[data-testid="cascade-system-message-toolbar"]');
-    const toolbarContainer = toolbar?.parentElement && toolbar.parentElement !== turnEl ? toolbar.parentElement : toolbar;
-    const host = toolbarContainer?.parentElement || turnEl.querySelector('[data-testid="agent-response"]') || turnEl;
+    const host = resolveTurnUsageHost(turnEl);
+    if (!host) return null;
 
     // Deduplicate across the whole turn container so streaming->completed host transitions never leave a second line behind
     const existingLines = [...turnEl.querySelectorAll('[data-aq-turn-usage]')];
@@ -2851,7 +3285,9 @@
       line.setAttribute('data-aq-turn-usage', idxAttr);
     }
 
-    if (toolbarContainer && toolbarContainer.parentElement === host) {
+    const toolbar = host.querySelector('[data-testid="cascade-system-message-toolbar"]');
+    const toolbarContainer = toolbar?.parentElement && toolbar.parentElement !== host ? toolbar.parentElement : toolbar;
+    if (toolbarContainer && toolbarContainer.parentElement === host && toolbarContainer === host.lastElementChild) {
       if (line.parentElement !== host || line.nextElementSibling !== toolbarContainer) {
         host.insertBefore(line, toolbarContainer);
       }
@@ -2975,29 +3411,106 @@
     return { usedTokens: Number(usedTokens), maxTokens: Number(maxTokens) };
   }
 
+  function resolveActiveAccountEmail() {
+    const fromProfile = String(state.userProfile?.email || '').trim();
+    if (fromProfile) return fromProfile;
+    const activeAcct = Array.isArray(state.accounts) ? state.accounts.find((a) => a?.active && a?.email) : null;
+    if (activeAcct?.email) return String(activeAcct.email).trim();
+    const fromKa = String(state.keepAliveState?.accountId || '').trim();
+    if (fromKa && fromKa !== 'default') return fromKa;
+    return '';
+  }
+
+  function buildKeepAliveToggleTitle(group, kaPlan, poolCfg, kaEnabled, kaRunning) {
+    if (!kaPlan) return '';
+    if (!kaEnabled) return '点击开启：周期重置满额后静默发一次轻请求开启倒计时';
+    const pickedModel = pickKeepAliveModelForGroup(group, state.clientModelConfigs, poolCfg?.preferredModel || '');
+    const modelNote = pickedModel?.label ? ` · ${pickedModel.label}` : '';
+    const stateNote = kaRunning
+      ? '唤醒中…'
+      : poolCfg?.lastError
+        ? poolCfg.lastError
+        : !isQuotaBucketUnstarted(kaPlan.targetBucket, kaPlan.cadence, Date.now())
+          ? kaPlan.cadence === 'weekly'
+            ? '本周计时中'
+            : '计时中'
+          : '待触发';
+    return `已开启自动唤醒（${stateNote}${modelNote}），点击关闭`;
+  }
+
+  function syncQuotaTooltipKeepAliveInPlace() {
+    const tt = document.getElementById('aq-quota-tooltip');
+    if (!tt || tt.getAttribute('data-visible') !== '1') return;
+    const btns = tt.querySelectorAll('[data-aq-ka-toggle]');
+    if (!btns.length) return;
+    const groups = Array.isArray(state.quotaData?.groups) ? state.quotaData.groups : [];
+    const byPoolKey = new Map();
+    for (let i = 0; i < groups.length; i++) {
+      const kaPlan = classifyQuotaGroupKeepAlive(groups[i]);
+      if (kaPlan?.poolKey) byPoolKey.set(kaPlan.poolKey, { group: groups[i], plan: kaPlan });
+    }
+    let changed = false;
+    for (let i = 0; i < btns.length; i++) {
+      const btn = btns[i];
+      const poolKey = btn.getAttribute('data-aq-ka-toggle') || '';
+      if (!poolKey) continue;
+      const poolCfg = state.keepAliveState?.pools?.[poolKey] || null;
+      const kaEnabled = Boolean(poolCfg?.enabled);
+      const kaRunning = Boolean(state.keepAliveRunningPools.has(poolKey) || poolCfg?.inFlight);
+      if (btn.classList.contains('is-on') !== kaEnabled) {
+        btn.classList.toggle('is-on', kaEnabled);
+        changed = true;
+      }
+      if (btn.classList.contains('is-running') !== kaRunning) {
+        btn.classList.toggle('is-running', kaRunning);
+        changed = true;
+      }
+      const nextPressed = kaEnabled ? 'true' : 'false';
+      if (btn.getAttribute('aria-pressed') !== nextPressed) {
+        btn.setAttribute('aria-pressed', nextPressed);
+        changed = true;
+      }
+      const info = byPoolKey.get(poolKey);
+      if (info) {
+        const nextTitle = buildKeepAliveToggleTitle(info.group, info.plan, poolCfg, kaEnabled, kaRunning);
+        if (btn.getAttribute('title') !== nextTitle) {
+          btn.setAttribute('title', nextTitle);
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      tt.__aqLastHtml = '';
+    }
+  }
+
   function renderContextChipContent() {
     const ctxChip = document.getElementById('aq-context-chip');
     if (!ctxChip) return;
     const cid = extractCascadeId();
     if (!cid) {
-      ctxChip.style.display = 'none';
+      if (ctxChip.style.display !== 'none') ctxChip.style.display = 'none';
       return;
     }
-    ctxChip.style.display = 'inline-flex';
+    if (ctxChip.style.display !== 'inline-flex') ctxChip.style.display = 'inline-flex';
     const ctx = getActiveContext();
-    if (!ctx) {
-      ctxChip.innerHTML = '<span class="aq-lvl-muted">--</span>';
-      return;
+    const nextHtml = ctx
+      ? `<span class="${contextLevelClass(ctx.usedTokens, ctx.maxTokens)}">${formatContextK(ctx.usedTokens)}</span><span class="aq-lvl-muted">/${formatContextK(ctx.maxTokens)}</span>`
+      : '<span class="aq-lvl-muted">--</span>';
+    if (ctxChip.__aqLastHtml !== nextHtml) {
+      ctxChip.__aqLastHtml = nextHtml;
+      ctxChip.innerHTML = nextHtml;
     }
-    const ctxCls = contextLevelClass(ctx.usedTokens, ctx.maxTokens);
-    ctxChip.innerHTML = `<span class="${ctxCls}">${formatContextK(ctx.usedTokens)}</span><span class="aq-lvl-muted">/${formatContextK(ctx.maxTokens)}</span>`;
   }
 
   function renderQuotaChipContent() {
     renderContextChipContent();
     const chip = document.getElementById('aq-quota-chip');
     if (!chip) return;
-    chip.setAttribute('data-loading', state.quotaFetching ? '1' : '0');
+    const loadVal = state.quotaFetching ? '1' : '0';
+    if (chip.getAttribute('data-loading') !== loadVal) {
+      chip.setAttribute('data-loading', loadVal);
+    }
 
     const parts = findComposerParts();
     const modelLabel = detectSelectedModelLabel(parts?.leftGroup);
@@ -3014,31 +3527,35 @@
       : '';
 
     const groups = state.quotaData?.groups || [];
+    let nextHtml;
     if (groups.length === 0) {
-      chip.innerHTML =
+      nextHtml =
         (state.quotaError ? '<span class="aq-lvl-muted">--</span>' : '<span class="aq-lvl-muted">…</span>') +
         updateDotHtml;
-      return;
-    }
+    } else {
+      const activeGroup = matchQuotaGroup(groups, state.selectedModelLabel);
+      const { fiveHour, weekly } = extractQuotaBuckets(activeGroup);
 
-    const activeGroup = matchQuotaGroup(groups, state.selectedModelLabel);
-    const { fiveHour, weekly } = extractQuotaBuckets(activeGroup);
-
-    const quotaParts = [];
-    if (fiveHour) {
-      quotaParts.push(
-        `<span class="${quotaLevelClass(fiveHour.remainingFraction)}">${formatRemainingPercent(fiveHour.remainingFraction)}</span>`
-      );
+      const quotaParts = [];
+      if (fiveHour) {
+        quotaParts.push(
+          `<span class="${quotaLevelClass(fiveHour.remainingFraction)}">${formatRemainingPercent(fiveHour.remainingFraction)}</span>`
+        );
+      }
+      if (weekly) {
+        quotaParts.push(
+          `<span class="${quotaLevelClass(weekly.remainingFraction)}">${formatRemainingPercent(weekly.remainingFraction)}</span>`
+        );
+      }
+      if (quotaParts.length === 0) {
+        quotaParts.push('<span class="aq-lvl-muted">--</span>');
+      }
+      nextHtml = quotaParts.join('<span class="aq-chip-sep">/</span>') + updateDotHtml;
     }
-    if (weekly) {
-      quotaParts.push(
-        `<span class="${quotaLevelClass(weekly.remainingFraction)}">${formatRemainingPercent(weekly.remainingFraction)}</span>`
-      );
+    if (chip.__aqLastHtml !== nextHtml) {
+      chip.__aqLastHtml = nextHtml;
+      chip.innerHTML = nextHtml;
     }
-    if (quotaParts.length === 0) {
-      quotaParts.push('<span class="aq-lvl-muted">--</span>');
-    }
-    chip.innerHTML = quotaParts.join('<span class="aq-chip-sep">/</span>') + updateDotHtml;
   }
 
   function showQuotaTooltip(chipEl) {
@@ -3057,41 +3574,51 @@
     const ctx = getActiveContext();
     const ctxSectionHtml = ctx
       ? (() => {
-          const pct = Math.round((ctx.usedTokens / ctx.maxTokens) * 100);
+          const pct = Math.min(100, Math.max(0, Math.round((ctx.usedTokens / ctx.maxTokens) * 100)));
           const lvl = contextLevelClass(ctx.usedTokens, ctx.maxTokens);
           return `
-            <div class="aq-tt-row" style="margin-bottom:6px">
-              <span class="aq-tt-lbl">上下文</span>
-              <span class="aq-tt-val"><span class="${lvl}">${formatContextK(ctx.usedTokens)}</span> / ${formatContextK(ctx.maxTokens)} (${pct}%)</span>
+            <div class="aq-qp-ctx">
+              <span class="aq-qp-ctx-lbl">上下文窗口</span>
+              <span class="aq-qp-ctx-val"><span class="aq-qp-ctx-strong ${lvl}">${formatContextK(ctx.usedTokens)}</span> / ${formatContextK(ctx.maxTokens)} · ${pct}%</span>
             </div>
           `;
         })()
       : '';
 
-    const curEmail = state.userProfile?.email || '';
+    const curEmail = resolveActiveAccountEmail();
+    const curPlanName = state.userProfile?.planName || '';
     const accountsSupported = state.accountsSupported !== false;
     const unsupportedReason = state.accountsUnsupportedReason || '当前系统暂不支持账号快照与一键切换';
+    const closeSvg =
+      '<svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M3.2 3.2l5.6 5.6M8.8 3.2l-5.6 5.6"/></svg>';
+    const acctList = Array.isArray(state.accounts) ? state.accounts : [];
+    const canDragAcct = accountsSupported && acctList.length > 1 && !state.accountsBusy;
+    const nowMs = Date.now();
     const acctRows = accountsSupported
-      ? (Array.isArray(state.accounts) ? state.accounts : [])
+      ? acctList
           .map((acct) => {
             const isCur = Boolean(acct.active || (curEmail && acct.email?.toLowerCase() === curEmail.toLowerCase()));
-            const planLabel = (isCur && state.userProfile?.planName) || acct.planName;
+            const planLabel = (isCur && state.userProfile?.planName) || acct.planName || '';
             const gemQuotaSource = isCur && state.quotaData?.groups?.length ? state.quotaData : acct.quotaSnapshot;
-            const gemStatus = resolveGeminiQuotaAvailability(gemQuotaSource, { isCurrent: isCur });
+            const gemStatus = resolveGeminiQuotaAvailability(gemQuotaSource, { isCurrent: isCur, nowMs });
             const confirming = state.pendingSwitchConfirmId === acct.id;
             const switchBtn = isCur
               ? '<span class="aq-q-active-tag">当前</span>'
-              : `<button type="button" class="aq-q-btn ${confirming ? 'aq-q-btn-warn' : 'aq-q-btn-primary'}" data-aq-acct-switch="${escapeHtml(acct.id)}" ${state.accountsBusy ? 'disabled' : ''}>${confirming ? '确认重启' : '切换'}</button>`;
+              : `<button type="button" class="aq-q-btn${confirming ? ' aq-q-btn-warn' : ''}" data-aq-acct-switch="${escapeHtml(acct.id)}" title="${confirming ? '再次点击确认重启并切换账号' : '切换至此账号'}" ${state.accountsBusy ? 'disabled' : ''}>${confirming ? '确认重启' : '切换'}</button>`;
+            const subText = gemStatus.countdownText || gemStatus.label;
             return `
-              <div class="aq-q-acct-row" data-aq-acct-id="${escapeHtml(acct.id)}">
+              <div class="aq-q-acct-row${isCur ? ' is-current' : ''}${canDragAcct ? ' is-draggable' : ''}" data-aq-acct-id="${escapeHtml(acct.id)}">
                 <div class="aq-q-acct-info">
                   <span class="aq-q-acct-gem is-${escapeHtml(gemStatus.state)}" data-aq-acct-gem="${escapeHtml(gemStatus.state)}" title="${escapeHtml(gemStatus.label)}" aria-label="${escapeHtml(gemStatus.label)}"></span>
-                  <span class="aq-q-acct-email" title="${escapeHtml(acct.email)}">${escapeHtml(acct.email)}</span>
-                  ${planLabel ? `<span class="aq-q-acct-plan">${escapeHtml(planLabel)}</span>` : ''}
+                  <div class="aq-q-acct-meta">
+                    <span class="aq-q-acct-email" title="${escapeHtml(acct.email)}">${escapeHtml(acct.email)}</span>
+                    <span class="aq-q-acct-sub is-${escapeHtml(gemStatus.state)}" title="${escapeHtml(gemStatus.label)}">${escapeHtml(subText)}</span>
+                  </div>
                 </div>
-                <div class="aq-q-acct-actions">
+                <div class="aq-q-acct-right">
+                  ${planLabel ? `<span class="aq-q-acct-plan">${escapeHtml(planLabel)}</span>` : ''}
                   ${switchBtn}
-                  <button type="button" class="aq-q-btn" data-aq-acct-del="${escapeHtml(acct.id)}" title="删除快照" ${state.accountsBusy ? 'disabled' : ''}>×</button>
+                  <button type="button" class="aq-q-btn-del" data-aq-acct-del="${escapeHtml(acct.id)}" title="删除快照" aria-label="删除快照" ${state.accountsBusy ? 'disabled' : ''}>${closeSvg}</button>
                 </div>
               </div>
             `;
@@ -3116,9 +3643,7 @@
       <div class="aq-q-accounts">
         <div class="aq-q-acct-hdr">
           <span>账号切换</span>
-          <div class="aq-q-acct-actions">
-            <button type="button" class="aq-q-btn ${addConfirming ? 'aq-q-btn-warn' : 'aq-q-btn-primary'}" data-aq-acct-add="1" ${!accountsSupported || state.accountsBusy ? 'disabled' : ''}${disabledTipAttr}>${addConfirming ? '确认重启' : '+ 登录新号'}</button>
-          </div>
+          <button type="button" class="aq-qp-add-btn${addConfirming ? ' is-warn' : ''}" data-aq-acct-add="1" ${!accountsSupported || state.accountsBusy ? 'disabled' : ''}${disabledTipAttr}>${addConfirming ? '确认重启' : '+ 登录新号'}</button>
         </div>
         ${accountsBodyHtml}
         ${statusHtml}
@@ -3164,11 +3689,17 @@
       `
       : '';
 
+    const planBadgeHtml = curPlanName ? `<span class="aq-qp-badge">${escapeHtml(curPlanName)}</span>` : '';
+
+    let nextHtml;
     if (groups.length === 0) {
-      tt.innerHTML = `
-        <div class="aq-tt-hdr">
-          <span>上下文与配额</span>
-          <span class="aq-tt-sub">${state.quotaError ? escapeHtml(state.quotaError) : '加载中…'}</span>
+      nextHtml = `
+        <div class="aq-qp-hdr">
+          <span class="aq-qp-title-wrap">
+            <span class="aq-qp-title">模型配额</span>
+            ${planBadgeHtml}
+          </span>
+          <span class="aq-qp-status">${state.quotaError ? escapeHtml(state.quotaError) : '加载中…'}</span>
         </div>
         ${ctxSectionHtml}
         ${accountsHtml}
@@ -3176,20 +3707,25 @@
       `;
     } else {
       const blocks = groups.map((g) => {
-        const isMatched = activeGroup && g.displayName === activeGroup.displayName;
+        const isMatched = Boolean(activeGroup && g.displayName === activeGroup.displayName);
         const buckets = orderQuotaBuckets(g.buckets);
         const kaPlan = classifyQuotaGroupKeepAlive(g);
         const poolKey = kaPlan?.poolKey || '';
         const poolCfg = poolKey ? state.keepAliveState?.pools?.[poolKey] || null : null;
         const kaEnabled = Boolean(poolCfg?.enabled);
         const kaRunning = Boolean(poolKey && (state.keepAliveRunningPools.has(poolKey) || poolCfg?.inFlight));
-        const pickedModel = kaPlan
-          ? pickKeepAliveModelForGroup(g, state.clientModelConfigs, poolCfg?.preferredModel || '')
-          : null;
         const bucketHtml = buckets
           .map((b) => {
             const pct = formatRemainingPercent(b.remainingFraction);
             const lvl = quotaLevelClass(b.remainingFraction);
+            const toneCls =
+              lvl === 'aq-lvl-crit'
+                ? ' is-crit'
+                : lvl === 'aq-lvl-warn'
+                  ? ' is-warn'
+                  : lvl === 'aq-lvl-muted'
+                    ? ' is-muted'
+                    : '';
             const win = String(b.window || '').toLowerCase();
             const label =
               win === '5h'
@@ -3199,66 +3735,60 @@
                   : escapeHtml(b.displayName || b.bucketId || '配额');
             const reset = formatResetCountdown(b.resetTime, Date.now(), { includeDate: true });
             return `
-              <div class="aq-tt-row">
-                <span class="aq-tt-lbl">${label}</span>
-                <span class="aq-tt-val"><span class="${lvl}">${pct}</span>${reset ? `<span class="aq-q-reset"> · ${escapeHtml(reset)}</span>` : ''}</span>
+              <div class="aq-qp-bkt-row">
+                <span class="aq-qp-bkt-win">${label}</span>
+                <span class="aq-qp-bkt-val">
+                  <span class="aq-qp-bkt-pct${toneCls}">${pct}</span>
+                  ${reset ? `<span class="aq-qp-bkt-sep">·</span><span class="aq-qp-bkt-reset">${escapeHtml(reset)}</span>` : ''}
+                </span>
               </div>
             `;
           })
           .join('');
 
-        let kaTitle = '点击开启：周期重置满额后静默发一次轻请求开启倒计时';
-        if (kaEnabled && kaPlan) {
-          const modelNote = pickedModel?.label ? ` · ${pickedModel.label}` : '';
-          const stateNote = kaRunning
-            ? '唤醒中…'
-            : poolCfg?.lastError
-              ? poolCfg.lastError
-              : !isQuotaBucketUnstarted(kaPlan.targetBucket, kaPlan.cadence, Date.now())
-                ? kaPlan.cadence === 'weekly'
-                  ? '本周计时中'
-                  : '计时中'
-                : '待触发';
-          kaTitle = `已开启自动唤醒（${stateNote}${modelNote}），点击关闭`;
-        }
-
+        const kaTitle = buildKeepAliveToggleTitle(g, kaPlan, poolCfg, kaEnabled, kaRunning);
         const kaToggleHtml = kaPlan
-          ? `<button type="button" class="aq-q-ka-toggle ${kaEnabled ? 'is-on' : ''}" data-aq-ka-toggle="${escapeHtml(poolKey)}" aria-pressed="${kaEnabled ? 'true' : 'false'}" title="${escapeHtml(kaTitle)}">${escapeHtml(kaPlan.cadenceLabel)}</button>`
+          ? `<button type="button" class="aq-qp-ka-switch ${kaEnabled ? 'is-on' : ''}${kaRunning ? ' is-running' : ''}" data-aq-ka-toggle="${escapeHtml(poolKey)}" aria-pressed="${kaEnabled ? 'true' : 'false'}" title="${escapeHtml(kaTitle)}"><span class="aq-qp-ka-lbl">${escapeHtml(kaPlan.cadenceLabel)}</span><span class="aq-qp-ka-track" aria-hidden="true"><span class="aq-qp-ka-thumb"></span></span></button>`
           : '';
 
         return `
-          <div class="aq-q-group">
-            <div class="aq-q-group-hdr">
-              <span class="aq-q-group-hdr-left">
+          <div class="aq-qp-card${isMatched ? ' is-active' : ''}">
+            <div class="aq-qp-card-hdr">
+              <span class="aq-qp-card-title">
+                ${isMatched ? '<span class="aq-qp-active-dot" title="当前选中模型分组"></span>' : ''}
                 <span>${escapeHtml(g.displayName || '模型分组')}</span>
-                ${isMatched ? '<span class="aq-q-active-tag">当前</span>' : ''}
               </span>
-              <span class="aq-q-group-hdr-right">${kaToggleHtml}</span>
+              ${kaToggleHtml}
             </div>
-            <div class="aq-tt-grid">${bucketHtml || '<div class="aq-tt-sub">暂无配额</div>'}</div>
+            <div class="aq-qp-buckets">${bucketHtml || '<div class="aq-qp-status">暂无配额</div>'}</div>
           </div>
         `;
       });
 
       const headerStatusHtml = state.quotaError
-        ? `<span class="aq-tt-sub">${escapeHtml(state.quotaError)}</span>`
-        : state.quotaFetching
-          ? '<span class="aq-tt-sub">刷新中…</span>'
-          : '';
+        ? `<span class="aq-qp-status">${escapeHtml(state.quotaError)}</span>`
+        : '';
 
-      tt.innerHTML = `
-        <div class="aq-tt-hdr">
-          <span>上下文与配额</span>
+      nextHtml = `
+        <div class="aq-qp-hdr">
+          <span class="aq-qp-title-wrap">
+            <span class="aq-qp-title">模型配额</span>
+            ${planBadgeHtml}
+          </span>
           ${headerStatusHtml}
         </div>
         ${ctxSectionHtml}
-        ${blocks.join('')}
+        <div class="aq-qp-groups">${blocks.join('')}</div>
         ${accountsHtml}
         ${updateHtml}
       `;
     }
 
-    bindQuotaTooltipActions(tt);
+    if (tt.__aqLastHtml !== nextHtml) {
+      tt.__aqLastHtml = nextHtml;
+      tt.innerHTML = nextHtml;
+      bindQuotaTooltipActions(tt);
+    }
     positionTooltipAbove(tt, chipEl.getBoundingClientRect());
     tt.setAttribute('data-visible', '1');
   }
@@ -3340,7 +3870,7 @@
       window.__aqKeepAliveAction(
         JSON.stringify({
           ...(payload || {}),
-          accountEmail: state.userProfile?.email || '',
+          accountEmail: resolveActiveAccountEmail(),
         })
       );
     } catch {}
@@ -3375,7 +3905,7 @@
       const poolCfg = state.keepAliveState?.pools?.[plan.poolKey];
       if (!poolCfg?.enabled) continue;
       if (poolCfg.backoffUntil && nowMs < Number(poolCfg.backoffUntil)) continue;
-      if (poolCfg.lastTriggeredAt && nowMs - Number(poolCfg.lastTriggeredAt) < 180_000) continue;
+      if (poolCfg.lastTriggeredAt && nowMs - Number(poolCfg.lastTriggeredAt) < KEEP_ALIVE_COOLDOWN_MS) continue;
       if (plan.guardWeeklyBucket && Number(plan.guardWeeklyBucket.remainingFraction) < 0.02) continue;
 
       const resetTs = Date.parse(String(plan.targetBucket?.resetTime || ''));
@@ -3497,7 +4027,8 @@
         throw new Error(`发送失败 (${sendRes.status})`);
       }
 
-      const deadline = Date.now() + 12_000;
+      let settledStatus = '';
+      const deadline = Date.now() + 20_000;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 1200));
         try {
@@ -3509,7 +4040,15 @@
           if (checkRes.ok) {
             const checkJson = await checkRes.json().catch(() => null);
             const entry = checkJson?.trajectorySummaries?.[cascadeId];
-            if (entry && entry.status && entry.status !== 'CASCADE_RUN_STATUS_RUNNING' && entry.status !== 'CASCADE_RUN_STATUS_BUSY') {
+            const st = String(entry?.status || '');
+            if (
+              entry &&
+              st &&
+              st !== 'CASCADE_RUN_STATUS_RUNNING' &&
+              st !== 'CASCADE_RUN_STATUS_BUSY' &&
+              !entry.notFullyIdle
+            ) {
+              settledStatus = st;
               break;
             }
           }
@@ -3522,6 +4061,12 @@
           body: JSON.stringify({ cascadeId }),
         });
       } catch {}
+      if (!settledStatus) {
+        throw new Error('唤醒响应超时');
+      }
+      if (/ERROR|FAIL|ABORT|CANCEL/i.test(settledStatus)) {
+        throw new Error(`唤醒执行异常 (${settledStatus})`);
+      }
       ok = true;
     } catch (err) {
       errMsg = String(err?.message || '唤醒失败');
@@ -3556,7 +4101,9 @@
       scheduleKeepAliveDeadlineTimer();
       return;
     }
-    if (!state.userProfile?.email) return;
+    const acctId = resolveActiveAccountEmail().toLowerCase();
+    if (!acctId) return;
+    if (String(state.keepAliveState?.accountId || '').toLowerCase() !== acctId) return;
     if (state.clientModelConfigs.length === 0) return;
 
     const nowMs = Date.now();
@@ -3679,12 +4226,12 @@
 
     if (groups.length === 0) {
       subTt.innerHTML = `
-        <div class="aq-tt-hdr">
+        <div class="aq-qp-hdr">
           <span class="aq-acct-tt-hdr-left">
             <span class="aq-acct-tt-email" title="${escapeHtml(acct.email)}">${escapeHtml(acct.email)}</span>
-            ${planLabel ? `<span class="aq-q-acct-plan">${escapeHtml(planLabel)}</span>` : ''}
+            ${planLabel ? `<span class="aq-qp-badge">${escapeHtml(planLabel)}</span>` : ''}
           </span>
-          <span class="aq-tt-sub">${escapeHtml(subLabel)}</span>
+          <span class="aq-qp-status">${escapeHtml(subLabel)}</span>
         </div>
         <div class="aq-acct-tt-empty">${
           isCur ? '正在加载当前账号配额…' : '尚未记录该账号的额度快照，切换登录一次后将自动记录。'
@@ -3706,31 +4253,45 @@
                   : escapeHtml(b.displayName || b.bucketId || '配额');
             const resetTs = Date.parse(b.resetTime || '');
             const isExpired = !isCur && Number.isFinite(resetTs) && resetTs <= nowMs;
-            let valHtml;
             if (isExpired) {
               const origNote = Number(b.remainingFraction) < 0.995 ? `原 ${pct}` : '';
-              valHtml = `<span class="aq-lvl-ok">已重置</span>${
-                origNote ? `<span class="aq-q-reset"> · ${escapeHtml(origNote)}</span>` : ''
-              }`;
-            } else {
-              const reset = formatResetCountdown(b.resetTime, Date.now(), { includeDate: true });
-              valHtml = `<span class="${lvl}">${pct}</span>${reset ? `<span class="aq-q-reset"> · ${escapeHtml(reset)}</span>` : ''}`;
+              return `
+                <div class="aq-qp-bkt-row">
+                  <span class="aq-qp-bkt-win">${label}</span>
+                  <span class="aq-qp-bkt-val">
+                    <span class="aq-qp-bkt-pct is-reset">已重置</span>
+                    ${origNote ? `<span class="aq-qp-bkt-sep">·</span><span class="aq-qp-bkt-reset">${escapeHtml(origNote)}</span>` : ''}
+                  </span>
+                </div>
+              `;
             }
+            const toneCls =
+              lvl === 'aq-lvl-crit'
+                ? ' is-crit'
+                : lvl === 'aq-lvl-warn'
+                  ? ' is-warn'
+                  : lvl === 'aq-lvl-muted'
+                    ? ' is-muted'
+                    : '';
+            const reset = formatResetCountdown(b.resetTime, Date.now(), { includeDate: true });
             return `
-              <div class="aq-tt-row">
-                <span class="aq-tt-lbl">${label}</span>
-                <span class="aq-tt-val">${valHtml}</span>
+              <div class="aq-qp-bkt-row">
+                <span class="aq-qp-bkt-win">${label}</span>
+                <span class="aq-qp-bkt-val">
+                  <span class="aq-qp-bkt-pct${toneCls}">${pct}</span>
+                  ${reset ? `<span class="aq-qp-bkt-sep">·</span><span class="aq-qp-bkt-reset">${escapeHtml(reset)}</span>` : ''}
+                </span>
               </div>
             `;
           })
           .join('');
 
         return `
-          <div class="aq-q-group">
-            <div class="aq-q-group-hdr">
-              <span>${escapeHtml(g.displayName || '模型分组')}</span>
+          <div class="aq-qp-card">
+            <div class="aq-qp-card-hdr">
+              <span class="aq-qp-card-title"><span>${escapeHtml(g.displayName || '模型分组')}</span></span>
             </div>
-            <div class="aq-tt-grid">${bucketHtml || '<div class="aq-tt-sub">暂无配额</div>'}</div>
+            <div class="aq-qp-buckets">${bucketHtml || '<div class="aq-qp-status">暂无配额</div>'}</div>
           </div>
         `;
       });
@@ -3740,14 +4301,14 @@
         : '<div class="aq-acct-tt-foot">基于本地记录与重置时间推算 · 若在其他设备消耗过请切换后刷新</div>';
 
       subTt.innerHTML = `
-        <div class="aq-tt-hdr">
+        <div class="aq-qp-hdr">
           <span class="aq-acct-tt-hdr-left">
             <span class="aq-acct-tt-email" title="${escapeHtml(acct.email)}">${escapeHtml(acct.email)}</span>
-            ${planLabel ? `<span class="aq-q-acct-plan">${escapeHtml(planLabel)}</span>` : ''}
+            ${planLabel ? `<span class="aq-qp-badge">${escapeHtml(planLabel)}</span>` : ''}
           </span>
-          <span class="aq-tt-sub">${escapeHtml(subLabel)}</span>
+          <span class="aq-qp-status">${escapeHtml(subLabel)}</span>
         </div>
-        ${blocks.join('')}
+        <div class="aq-qp-groups">${blocks.join('')}</div>
         ${footHtml}
       `;
     }
@@ -3756,7 +4317,88 @@
     subTt.setAttribute('data-visible', '1');
   }
 
+  function cleanupAccountDrag() {
+    const d = state.acctDrag;
+    if (!d) return;
+    state.acctDrag = null;
+    if (d.started) {
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    }
+    const tt = document.getElementById('aq-quota-tooltip');
+    if (tt) {
+      tt.querySelectorAll('.aq-q-acct-row').forEach((el) => {
+        el.classList.remove('is-dragging', 'aq-acct-drag-before', 'aq-acct-drag-after');
+      });
+    }
+  }
+
+  function updateAccountDragTarget(clientY) {
+    const d = state.acctDrag;
+    if (!d || !d.started) return;
+    const tt = document.getElementById('aq-quota-tooltip');
+    if (!tt) return;
+    const rows = [...tt.querySelectorAll('.aq-q-acct-row[data-aq-acct-id]')];
+    for (let i = 0; i < rows.length; i++) {
+      rows[i].classList.remove('aq-acct-drag-before', 'aq-acct-drag-after');
+    }
+    let bestRow = null;
+    let bestMode = '';
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const rect = r.getBoundingClientRect();
+      if (rect.height <= 0) continue;
+      const midY = rect.top + rect.height / 2;
+      if (clientY <= midY) {
+        bestRow = r;
+        bestMode = 'before';
+        break;
+      }
+      bestRow = r;
+      bestMode = 'after';
+    }
+    if (!bestRow) {
+      d.targetId = '';
+      d.dropMode = '';
+      return;
+    }
+    const targetId = bestRow.getAttribute('data-aq-acct-id') || '';
+    if (!targetId || targetId === d.sourceId) {
+      d.targetId = '';
+      d.dropMode = '';
+      return;
+    }
+    d.targetId = targetId;
+    d.dropMode = bestMode;
+    bestRow.classList.add(bestMode === 'before' ? 'aq-acct-drag-before' : 'aq-acct-drag-after');
+  }
+
+  function commitAccountDrag() {
+    const d = state.acctDrag;
+    if (!d) return;
+    const { started, sourceId, targetId, dropMode } = d;
+    cleanupAccountDrag();
+    if (!started || !sourceId || !targetId || sourceId === targetId) return;
+    const list = Array.isArray(state.accounts) ? state.accounts.slice() : [];
+    const fromIdx = list.findIndex((a) => a.id === sourceId);
+    if (fromIdx < 0) return;
+    const [moved] = list.splice(fromIdx, 1);
+    const toIdx = list.findIndex((a) => a.id === targetId);
+    if (toIdx < 0) return;
+    const insertIdx = dropMode === 'after' ? toIdx + 1 : toIdx;
+    list.splice(insertIdx, 0, moved);
+    const orderedIds = list.map((a) => a.id);
+    const prevIds = (Array.isArray(state.accounts) ? state.accounts : []).map((a) => a.id);
+    if (orderedIds.length === prevIds.length && orderedIds.every((id, idx) => id === prevIds[idx])) {
+      return;
+    }
+    state.accounts = list;
+    refreshQuotaTooltipIfVisible();
+    sendAccountAction({ type: 'reorder', orderedIds });
+  }
+
   function refreshQuotaTooltipIfVisible() {
+    if (state.acctDrag?.started) return;
     const tt = document.getElementById('aq-quota-tooltip');
     const anchor = state.quotaTooltipAnchor?.isConnected
       ? state.quotaTooltipAnchor
@@ -3775,6 +4417,26 @@
     }
   }
 
+  function syncAccountConfirmButtonsInPlace(tt) {
+    if (!tt) return;
+    tt.__aqLastHtml = '';
+    const addBtn = tt.querySelector('[data-aq-acct-add]');
+    if (addBtn) {
+      const addConfirm = state.pendingSwitchConfirmId === '__add__';
+      addBtn.classList.toggle('is-warn', addConfirm);
+      addBtn.textContent = addConfirm ? '确认重启' : '+ 登录新号';
+    }
+    const switchBtns = tt.querySelectorAll('[data-aq-acct-switch]');
+    for (let i = 0; i < switchBtns.length; i++) {
+      const btn = switchBtns[i];
+      const id = btn.getAttribute('data-aq-acct-switch') || '';
+      const confirming = Boolean(id && state.pendingSwitchConfirmId === id);
+      btn.classList.toggle('aq-q-btn-warn', confirming);
+      btn.textContent = confirming ? '确认重启' : '切换';
+      btn.setAttribute('title', confirming ? '再次点击确认重启并切换账号' : '切换至此账号');
+    }
+  }
+
   function bindQuotaTooltipActions(tt) {
     const addBtn = tt.querySelector('[data-aq-acct-add]');
     if (addBtn) {
@@ -3790,10 +4452,10 @@
             state.pendingSwitchTimer = null;
             if (state.pendingSwitchConfirmId === '__add__') {
               state.pendingSwitchConfirmId = '';
-              refreshQuotaTooltipIfVisible();
+              syncAccountConfirmButtonsInPlace(document.getElementById('aq-quota-tooltip'));
             }
           }, 3000);
-          refreshQuotaTooltipIfVisible();
+          syncAccountConfirmButtonsInPlace(tt);
           return;
         }
         state.pendingSwitchConfirmId = '';
@@ -3823,10 +4485,10 @@
             state.pendingSwitchTimer = null;
             if (state.pendingSwitchConfirmId === id) {
               state.pendingSwitchConfirmId = '';
-              refreshQuotaTooltipIfVisible();
+              syncAccountConfirmButtonsInPlace(document.getElementById('aq-quota-tooltip'));
             }
           }, 3000);
-          refreshQuotaTooltipIfVisible();
+          syncAccountConfirmButtonsInPlace(tt);
           return;
         }
         state.pendingSwitchConfirmId = '';
@@ -3846,7 +4508,21 @@
       const row = acctRows[i];
       const acctId = row.getAttribute('data-aq-acct-id') || '';
       if (!acctId) continue;
+      row.addEventListener('pointerdown', (ev) => {
+        if (ev.button !== 0 || state.accountsBusy || !row.classList.contains('is-draggable')) return;
+        if (ev.target?.closest?.('button, a, input')) return;
+        state.acctDrag = {
+          sourceId: acctId,
+          rowEl: row,
+          startX: ev.clientX,
+          startY: ev.clientY,
+          started: false,
+          targetId: '',
+          dropMode: '',
+        };
+      });
       row.addEventListener('pointerenter', () => {
+        if (state.acctDrag?.started) return;
         if (state.acctQuotaTooltipHideTimer) {
           clearTimeout(state.acctQuotaTooltipHideTimer);
           state.acctQuotaTooltipHideTimer = null;
@@ -3859,7 +4535,7 @@
         if (state.acctQuotaTooltipShowTimer) clearTimeout(state.acctQuotaTooltipShowTimer);
         state.acctQuotaTooltipShowTimer = setTimeout(() => {
           state.acctQuotaTooltipShowTimer = null;
-          if (!row.isConnected) return;
+          if (!row.isConnected || state.acctDrag?.started) return;
           showAccountQuotaTooltip(acctId, row);
         }, 100);
       });
@@ -3888,6 +4564,10 @@
         const prev = Boolean(state.keepAliveState?.pools?.[poolKey]?.enabled);
         const nextEnabled = !prev;
         if (!state.keepAliveState.pools) state.keepAliveState.pools = {};
+        const activeEmail = resolveActiveAccountEmail();
+        if (activeEmail) {
+          state.keepAliveState.accountId = activeEmail.toLowerCase();
+        }
         state.keepAliveState.pools[poolKey] = {
           ...(state.keepAliveState.pools[poolKey] || {}),
           enabled: nextEnabled,
@@ -3895,9 +4575,9 @@
           backoffUntil: nextEnabled ? 0 : state.keepAliveState.pools[poolKey]?.backoffUntil || 0,
         };
         sendKeepAliveAction({ type: 'toggle', poolKey, enabled: nextEnabled });
-        refreshQuotaTooltipIfVisible();
+        syncQuotaTooltipKeepAliveInPlace();
         if (nextEnabled) {
-          void fetchQuota({ force: true, immediate: true, includeUserStatus: true });
+          void maybeRunKeepAlives();
         } else {
           scheduleKeepAliveDeadlineTimer();
         }
@@ -3930,6 +4610,7 @@
   }
 
   function closeQuotaTooltip() {
+    cleanupAccountDrag();
     if (state.quotaTooltipHideTimer) {
       clearTimeout(state.quotaTooltipHideTimer);
       state.quotaTooltipHideTimer = null;
@@ -4110,7 +4791,6 @@
 
     state.quotaFetching = true;
     renderQuotaChipContent();
-    refreshQuotaTooltipIfVisible();
     try {
       const csrf = window.__APP_CONFIG__?.csrfToken || '';
       const headers = {
@@ -4152,7 +4832,10 @@
             name: String(us?.name || '').trim(),
             planName,
           };
-          if (profileChanged) {
+          if (
+            profileChanged ||
+            String(state.keepAliveState?.accountId || '').toLowerCase() !== email.toLowerCase()
+          ) {
             sendKeepAliveAction({ type: 'get' });
           }
           const saveSig = `${email.toLowerCase()}|${planName}`;
@@ -6643,6 +7326,7 @@
       if (prev) {
         prev.item = it;
         prev.missingSince = 0;
+        prev.retainedWhileActive = false;
       } else {
         brandNew.push({ key, item: it });
       }
@@ -6654,6 +7338,7 @@
         state.smartStableMap.set(key, {
           item,
           missingSince: 0,
+          retainedWhileActive: false,
           seq: state.smartNextSeq++,
         });
       }
@@ -6662,8 +7347,45 @@
     let nextWakeInMs = 0;
     for (const [key, entry] of state.smartStableMap.entries()) {
       if (freshByCid.has(key)) continue;
-      // If user explicitly opened an unread item, let it leave immediately without grace wait
-      if (entry.item?.status === 'unread' && activeCid && key === activeCid) {
+      const meta = state.trajMetaById[key] || null;
+      if (meta?.archived) {
+        state.smartStableMap.delete(key);
+        continue;
+      }
+      const isCurrentPage = Boolean(activeCid && key === activeCid);
+      if (isCurrentPage) {
+        // Keep the active page in "进行中" while the user is still viewing it;
+        // clear unread immediately on open, or clear running/waiting after brief grace to prevent flicker.
+        if (entry.retainedWhileActive || entry.item?.status === 'unread') {
+          entry.retainedWhileActive = true;
+          entry.missingSince = 0;
+          const nextTitle = meta?.title || entry.item?.title || '';
+          const nextProject = meta?.project ?? entry.item?.project ?? '';
+          if (entry.item?.status || entry.item?.title !== nextTitle || entry.item?.project !== nextProject) {
+            entry.item = { ...entry.item, title: nextTitle, project: nextProject, status: '' };
+          }
+          continue;
+        }
+        if (!entry.missingSince) {
+          entry.missingSince = now;
+        }
+        const elapsed = now - entry.missingSince;
+        if (elapsed >= SMART_EXIT_GRACE_MS) {
+          entry.retainedWhileActive = true;
+          entry.missingSince = 0;
+          const nextTitle = meta?.title || entry.item?.title || '';
+          const nextProject = meta?.project ?? entry.item?.project ?? '';
+          entry.item = { ...entry.item, title: nextTitle, project: nextProject, status: '' };
+        } else {
+          const remain = SMART_EXIT_GRACE_MS - elapsed + 40;
+          if (!nextWakeInMs || remain < nextWakeInMs) {
+            nextWakeInMs = remain;
+          }
+        }
+        continue;
+      }
+
+      if (entry.retainedWhileActive) {
         state.smartStableMap.delete(key);
         continue;
       }
@@ -8080,12 +8802,20 @@
 
   window.__aqRenderKeepAlive = function (payload) {
     try {
+      const incomingAcct = String(payload?.accountId || '').trim();
+      const knownEmail = resolveActiveAccountEmail().toLowerCase();
+      if (incomingAcct === 'default' && knownEmail) {
+        return;
+      }
       state.keepAliveState =
         payload && typeof payload === 'object'
-          ? { accountId: String(payload.accountId || ''), pools: payload.pools || {} }
+          ? { accountId: incomingAcct, pools: payload.pools || {} }
           : { accountId: '', pools: {} };
       scheduleKeepAliveDeadlineTimer();
-      refreshQuotaTooltipIfVisible();
+      syncQuotaTooltipKeepAliveInPlace();
+      if (state.keepAliveRunningPools.size === 0) {
+        void maybeRunKeepAlives();
+      }
     } catch {}
   };
 
@@ -8578,6 +9308,27 @@
       ev.preventDefault();
       return;
     }
+    const ad = state.acctDrag;
+    if (ad) {
+      if (ev.buttons === 0) {
+        cleanupAccountDrag();
+        return;
+      }
+      if (!ad.started) {
+        if (Math.max(Math.abs(ev.clientX - ad.startX), Math.abs(ev.clientY - ad.startY)) < 4) {
+          return;
+        }
+        ad.started = true;
+        state.quotaTooltipPinned = true;
+        hideAccountQuotaTooltip();
+        ad.rowEl?.classList?.add('is-dragging');
+        document.body.style.userSelect = 'none';
+        document.body.style.cursor = 'grabbing';
+      }
+      updateAccountDragTarget(ev.clientY);
+      ev.preventDefault();
+      return;
+    }
     const d = state.convDrag;
     if (!d) return;
     if (ev.buttons === 0) {
@@ -8605,6 +9356,18 @@
     if (r) {
       cleanupGroupResizeDrag({ commit: r.moved });
       ev.preventDefault();
+      return;
+    }
+    const ad = state.acctDrag;
+    if (ad) {
+      if (ad.started) {
+        updateAccountDragTarget(ev.clientY);
+        commitAccountDrag();
+        ev.preventDefault();
+        ev.stopPropagation();
+      } else {
+        cleanupAccountDrag();
+      }
       return;
     }
     const d = state.convDrag;
@@ -8694,12 +9457,14 @@
     }
   };
   const onWinPointerCancelCapture = () => {
+    if (state.acctDrag) cleanupAccountDrag();
     if (state.convWidthDrag) cleanupConversationWidthDrag();
     if (state.groupResizeDrag) cleanupGroupResizeDrag();
     if (state.convDrag) cleanupConversationPointerDrag();
   };
   const onWinBlur = () => {
     closeGroupCtxMenu();
+    if (state.acctDrag) cleanupAccountDrag();
     if (state.convWidthDrag) cleanupConversationWidthDrag();
     if (state.groupResizeDrag) cleanupGroupResizeDrag();
     if (state.convDrag) cleanupConversationPointerDrag();
@@ -8727,7 +9492,8 @@
       !ev.metaKey
     ) {
       const editor = ev.target?.closest?.('#antigravity\\.agentSidePanelInputBox [data-lexical-editor="true"]');
-      if (editor && editor.getAttribute('aria-expanded') !== 'true') {
+      const hasOpenComposerPopup = Boolean(document.querySelector('[data-mention-menu], [role="listbox"], [role="menu"]'));
+      if (editor && editor.getAttribute('aria-expanded') !== 'true' && !hasOpenComposerPopup) {
         const composerBox = document.getElementById('antigravity.agentSidePanelInputBox');
         const sendBtn = composerBox?.querySelector?.('[data-testid="send-button"]');
         if (sendBtn && !sendBtn.disabled && sendBtn.getAttribute('aria-disabled') !== 'true') {
@@ -8737,6 +9503,12 @@
     }
     if (ev.key === 'Escape') {
       closeGroupCtxMenu();
+      if (state.acctDrag) {
+        cleanupAccountDrag();
+        ev.preventDefault();
+        ev.stopPropagation();
+        return;
+      }
       if (state.convWidthDrag) {
         cleanupConversationWidthDrag({ commit: false });
         ev.preventDefault();
@@ -8776,6 +9548,9 @@
     if (!document.hidden) {
       if (hasExpiredQuotaBucket(now) || now - state.quotaForceFetchedAt >= 120_000) {
         void fetchQuota({ force: true });
+      }
+      if (!state.acctDrag && !state.pendingSwitchConfirmId) {
+        refreshQuotaTooltipIfVisible();
       }
       void refreshTrajectoryMetadata(false);
     } else if (hasExpiredEnabledKeepAlive(now)) {
@@ -8837,6 +9612,9 @@
     document.removeEventListener('pointerdown', onDocPointerDown, true);
     document.removeEventListener('click', onDocClickCapture, true);
     document.removeEventListener('keydown', onDocKeyDown, true);
+    try {
+      cleanupAccountDrag();
+    } catch {}
     try {
       cleanupConversationWidthDrag();
     } catch {}

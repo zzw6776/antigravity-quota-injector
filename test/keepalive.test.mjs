@@ -193,10 +193,18 @@ test('createKeepAliveManager persists settings, enforces multi-window lease lock
     assert.equal(c1.allowed, true);
     assert.ok(c1.runId);
 
-    // Concurrent second window cannot double-claim while lease is held
+    // Concurrent second window cannot double-claim while lease is held, nor clear it without matching runId
     const c2 = mgr.claimTrigger({ accountEmail: email, poolKey: 'gemini 4 argon' });
     assert.equal(c2.allowed, false);
     assert.equal(c2.reason, 'in_flight');
+    mgr.completeTrigger({
+      accountEmail: email,
+      poolKey: 'gemini 4 argon',
+      runId: '',
+      ok: false,
+      error: 'unclaimed error',
+    });
+    assert.equal(mgr.claimTrigger({ accountEmail: email, poolKey: 'gemini 4 argon' }).reason, 'in_flight');
 
     // Error triggers 15m backoff
     mgr.completeTrigger({

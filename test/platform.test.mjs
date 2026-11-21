@@ -11,6 +11,7 @@ import {
   encodePowerShellCommand,
   findRunningAntigravityPids,
   hasAntigravityRemoteDebuggingFlag,
+  inspectAntigravityRemoteDebugging,
   installWindowsAppEntry,
   isNodeVersionSupported,
   launchAntigravityExecutable,
@@ -286,9 +287,23 @@ test('findRunningAntigravityPids and hasAntigravityRemoteDebuggingFlag inspect d
     }),
     false
   );
+  assert.equal(
+    inspectAntigravityRemoteDebugging({
+      platform: 'win32',
+      spawnSyncFn: () => ({ status: 1, stdout: '' }),
+    }),
+    'unknown'
+  );
+  assert.equal(
+    inspectAntigravityRemoteDebugging({
+      platform: 'win32',
+      spawnSyncFn: () => ({ status: 0, stdout: '\r\n' }),
+    }),
+    'unknown'
+  );
 });
 
-test('quitAndWaitAntigravityProcesses quits gracefully and falls back cleanly on darwin and win32', async () => {
+test('quitAndWaitAntigravityProcesses quits gracefully and avoids force-kill on win32 timeout', async () => {
   const winCalls = [];
   let winAlive = true;
   const winExited = await quitAndWaitAntigravityProcesses({
@@ -310,6 +325,25 @@ test('quitAndWaitAntigravityProcesses quits gracefully and falls back cleanly on
   assert.equal(
     winCalls.some(([cmd, args]) => cmd === 'taskkill' && args.includes('/IM') && !args.includes('/F')),
     true
+  );
+
+  const stuckWinCalls = [];
+  const stuckExited = await quitAndWaitAntigravityProcesses({
+    platform: 'win32',
+    timeoutMs: 20,
+    sleepFn: async () => {},
+    execFileSyncFn: (cmd, args) => {
+      stuckWinCalls.push([cmd, args]);
+      if (cmd === 'tasklist') {
+        return '"Antigravity.exe","4321","Console","1","100 K"\r\n';
+      }
+      return '';
+    },
+  });
+  assert.equal(stuckExited, false);
+  assert.equal(
+    stuckWinCalls.some(([cmd, args]) => cmd === 'taskkill' && args.includes('/F')),
+    false
   );
 
   const macCalls = [];

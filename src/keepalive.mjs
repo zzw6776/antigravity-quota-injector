@@ -4,7 +4,8 @@ import path from 'node:path';
 
 const IN_FLIGHT_LEASE_MS = 60_000;
 const ERROR_BACKOFF_MS = 15 * 60_000;
-const DEFAULT_COOLDOWN_MS = 180_000;
+export const KEEP_ALIVE_COOLDOWN_MS = 300_000;
+const DEFAULT_COOLDOWN_MS = KEEP_ALIVE_COOLDOWN_MS;
 
 function normalizeAccountKey(email) {
   const clean = String(email || '').trim().toLowerCase();
@@ -207,7 +208,7 @@ export function createKeepAliveManager({
     if (!target) return getState(accountEmail);
     const leaseKey = `${target.acctKey}|${target.pKey}`;
     const existingLease = inFlight.get(leaseKey);
-    if (!runId || !existingLease || existingLease.runId === runId) {
+    if (existingLease && runId && existingLease.runId === runId) {
       inFlight.delete(leaseKey);
     }
     if (modelLabel) {

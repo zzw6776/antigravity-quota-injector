@@ -593,6 +593,11 @@ function resolveEmailFromAppStorage(appStorageAuth) {
   }
 }
 
+export function readLastLoginEmail(appSupportDir) {
+  if (!appSupportDir) return '';
+  return resolveEmailFromAppStorage(readAppStorageAuth(appSupportDir));
+}
+
 export function snapshotCurrentAccount({
   accountsFile,
   appSupportDir,
@@ -664,6 +669,44 @@ export function deleteAccount(accountsFile, accountId) {
   if (next.length === store.accounts.length) return false;
   writeAccountsStore(accountsFile, { ...store, accounts: next });
   return true;
+}
+
+export function reorderAccounts(accountsFile, orderedIds) {
+  if (!Array.isArray(orderedIds) || orderedIds.length === 0) return { changed: false };
+  const store = readAccountsStore(accountsFile);
+  if (store.accounts.length <= 1) return { changed: false };
+
+  const byId = new Map();
+  for (const item of store.accounts) {
+    const key = String(item?.id || normalizeAccountId(item?.email)).toLowerCase();
+    if (key && !byId.has(key)) {
+      byId.set(key, item);
+    }
+  }
+
+  const next = [];
+  const seen = new Set();
+  for (const rawId of orderedIds) {
+    const key = String(rawId || '').trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    const found = byId.get(key);
+    if (found) {
+      seen.add(key);
+      next.push(found);
+    }
+  }
+  for (const item of store.accounts) {
+    const key = String(item?.id || normalizeAccountId(item?.email)).toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      next.push(item);
+    }
+  }
+
+  const changed = next.some((item, idx) => item !== store.accounts[idx]);
+  if (!changed) return { changed: false };
+  writeAccountsStore(accountsFile, { ...store, accounts: next });
+  return { changed: true };
 }
 
 export function applyAccountSnapshot({

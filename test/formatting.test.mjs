@@ -325,6 +325,7 @@ test('resolveGeminiQuotaAvailability identifies available, depleted, inferred-re
   assert.equal(okRes.state, 'available');
   assert.match(okRes.label, /5h 83%/);
   assert.match(okRes.label, /周 63%/);
+  assert.match(okRes.countdownText, /Gemini 83% · 3小时后重置/);
 
   // Depleted 5h before resetTime
   const depleted5h = resolveGeminiQuotaAvailability(
@@ -342,6 +343,8 @@ test('resolveGeminiQuotaAvailability identifies available, depleted, inferred-re
     { isCurrent: false, nowMs }
   );
   assert.equal(depleted5h.state, 'depleted');
+  assert.equal(depleted5h.nextAvailableAt, Date.parse('2026-11-20T08:00:00Z'));
+  assert.match(depleted5h.countdownText, /2小时后可用/);
 
   // Expired 5h resetTime on cached non-active account flips back to available
   const recovered5h = resolveGeminiQuotaAvailability(
@@ -361,6 +364,7 @@ test('resolveGeminiQuotaAvailability identifies available, depleted, inferred-re
   assert.equal(recovered5h.state, 'available');
   assert.match(recovered5h.label, /预计可用/);
   assert.match(recovered5h.label, /5h 已重置/);
+  assert.equal(recovered5h.countdownText, 'Gemini 已重置 · 周 50%');
 
   // Weekly still 0% before reset even if 5h reset expired -> still depleted
   const depletedWeekly = resolveGeminiQuotaAvailability(
@@ -378,6 +382,8 @@ test('resolveGeminiQuotaAvailability identifies available, depleted, inferred-re
     { isCurrent: false, nowMs }
   );
   assert.equal(depletedWeekly.state, 'depleted');
+  assert.equal(depletedWeekly.nextAvailableAt, Date.parse('2026-11-25T02:00:00Z'));
+  assert.match(depletedWeekly.countdownText, /4天20小时后可用/);
 
   // Residual 1% (< 1.5%, displays as 1%) is treated as depleted rather than available green dot
   const residual1Pct = resolveGeminiQuotaAvailability(

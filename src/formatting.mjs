@@ -366,12 +366,19 @@ export function resolveUserPlanLabel(userStatus) {
 
 /**
  * Determine whether an account's primary Gemini model quota is currently available
- * (considering resetTime expiration for cached snapshots of non-active accounts).
+ * (considering resetTime expiration for cached snapshots of non-active accounts)
+ * and compute a concise countdown text for next availability or quota reset.
  */
 export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs = Date.now() } = {}) {
   const groups = Array.isArray(quota?.groups) ? quota.groups : [];
   if (groups.length === 0) {
-    return { state: 'unknown', label: '暂无 Gemini 额度记录' };
+    return {
+      state: 'unknown',
+      label: '暂无 Gemini 额度记录',
+      nextAvailableAt: null,
+      nextResetAt: null,
+      countdownText: '暂无 Gemini 额度记录',
+    };
   }
 
   const pickValidBuckets = (group) =>
@@ -395,43 +402,135 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
     groups.find((g) => /gemini/i.test(String(g?.displayName || '')) && pickValidBuckets(g).length > 0);
 
   if (!primary) {
-    return { state: 'unknown', label: '暂无 Gemini 额度记录' };
+    return {
+      state: 'unknown',
+      label: '暂无 Gemini 额度记录',
+      nextAvailableAt: null,
+      nextResetAt: null,
+      countdownText: '暂无 Gemini 额度记录',
+    };
   }
 
   const buckets = pickValidBuckets(primary);
   if (buckets.length === 0) {
-    return { state: 'unknown', label: '暂无 Gemini 额度记录' };
+    return {
+      state: 'unknown',
+      label: '暂无 Gemini 额度记录',
+      nextAvailableAt: null,
+      nextResetAt: null,
+      countdownText: '暂无 Gemini 额度记录',
+    };
   }
 
   let allAvailable = true;
   let anyInferredReset = false;
+  let latestDepletedResetTs = 0;
+  let latestDepletedResetIso = '';
+  let fiveHourInfo = null;
+  let weeklyInfo = null;
   const parts = [];
   for (const b of buckets) {
     const win = String(b.window || '').toLowerCase();
     const winLabel = win === '5h' ? '5h' : win === 'weekly' ? '周' : String(b.displayName || b.bucketId || '配额');
-    const resetTs = Date.parse(String(b.resetTime || ''));
-    const expired = !isCurrent && Number.isFinite(resetTs) && resetTs <= nowMs;
+    const resetIso = String(b.resetTime || '').trim();
+    const resetTs = Date.parse(resetIso);
+    const hasReset = Number.isFinite(resetTs);
+    const expired = !isCurrent && hasReset && resetTs <= nowMs;
     const frac = Number(b.remainingFraction);
+    const info = { win, winLabel, resetIso, resetTs: hasReset ? resetTs : null, expired, frac };
+    if (win === '5h' && !fiveHourInfo) fiveHourInfo = info;
+    if (win === 'weekly' && !weeklyInfo) weeklyInfo = info;
+
     if (expired) {
       anyInferredReset = true;
       parts.push(`${winLabel} 已重置`);
     } else {
       // Exhausted Antigravity quotas often leave <= 1% residual fraction (< 0.015 after % rounding).
-      if (frac < 0.015) allAvailable = false;
+      if (frac < 0.015) {
+        allAvailable = false;
+        if (hasReset && resetTs > latestDepletedResetTs) {
+          latestDepletedResetTs = resetTs;
+          latestDepletedResetIso = resetIso;
+        }
+      }
       parts.push(`${winLabel} ${formatRemainingPercent(frac)}`);
     }
   }
 
+  const formatCountdownWithClock = (iso, ts) => {
+    if (!iso || !Number.isFinite(ts)) return '';
+    const diffMs = ts - nowMs;
+    if (diffMs <= 0) return '即将可用';
+    const raw = formatResetCountdown(iso, nowMs, { includeDate: false });
+    const m = raw.match(/^(.+?)\s+(\([^)]+\))$/);
+    return m ? `${m[1]}后可用 ${m[2]}` : `${raw}后可用`;
+  };
+
+  const formatResetShort = (iso, ts) => {
+    if (!iso || !Number.isFinite(ts)) return '';
+    const diffMs = ts - nowMs;
+    if (diffMs <= 0) return '即将重置';
+    const raw = formatResetCountdown(iso, nowMs, { includeDate: false });
+    const m = raw.match(/^(.+?)\s+\([^)]+\)$/);
+    return `${m ? m[1] : raw}后重置`;
+  };
+
   const detail = parts.join(' / ');
   if (allAvailable) {
+    const primaryInfo = fiveHourInfo || weeklyInfo || null;
+    const nextResetAt = primaryInfo && !primaryInfo.expired ? primaryInfo.resetTs : null;
+    let countdownText = 'Gemini 可用';
+    if (fiveHourInfo) {
+      if (fiveHourInfo.expired) {
+        const weeklyTail =
+          weeklyInfo && !weeklyInfo.expired ? ` · 周 ${formatRemainingPercent(weeklyInfo.frac)}` : '';
+        countdownText = `Gemini 已重置${weeklyTail}`;
+      } else {
+        const pct = formatRemainingPercent(fiveHourInfo.frac);
+        const resetTxt =
+          fiveHourInfo.frac < 0.995 && fiveHourInfo.resetTs && fiveHourInfo.resetTs > nowMs
+            ? formatResetShort(fiveHourInfo.resetIso, fiveHourInfo.resetTs)
+            : '';
+        if (resetTxt) {
+          countdownText = `Gemini ${pct} · ${resetTxt}`;
+        } else if (weeklyInfo && !weeklyInfo.expired && weeklyInfo.frac < 0.995) {
+          countdownText = `Gemini ${pct} · 周 ${formatRemainingPercent(weeklyInfo.frac)}`;
+        } else {
+          countdownText = `Gemini ${pct} · 可用`;
+        }
+      }
+    } else if (weeklyInfo) {
+      if (weeklyInfo.expired) {
+        countdownText = 'Gemini 已重置';
+      } else {
+        const pct = formatRemainingPercent(weeklyInfo.frac);
+        const resetTxt =
+          weeklyInfo.frac < 0.995 && weeklyInfo.resetTs && weeklyInfo.resetTs > nowMs
+            ? formatResetShort(weeklyInfo.resetIso, weeklyInfo.resetTs)
+            : '';
+        countdownText = resetTxt ? `Gemini 周 ${pct} · ${resetTxt}` : `Gemini 周 ${pct} · 可用`;
+      }
+    }
+
     return {
       state: 'available',
       label: anyInferredReset ? `Gemini 预计可用（${detail}）` : `Gemini 可用（${detail}）`,
+      nextAvailableAt: null,
+      nextResetAt,
+      countdownText,
     };
   }
+
+  const nextAvailableAt = latestDepletedResetTs > 0 ? latestDepletedResetTs : null;
+  const countdownText = latestDepletedResetIso
+    ? formatCountdownWithClock(latestDepletedResetIso, latestDepletedResetTs)
+    : 'Gemini 已用完';
   return {
     state: 'depleted',
     label: `Gemini 已用完（${detail}）`,
+    nextAvailableAt,
+    nextResetAt: nextAvailableAt,
+    countdownText,
   };
 }
 
@@ -606,12 +705,14 @@ export function isQuotaBucketUnstarted(bucket, cadence = '5h', nowMs = Date.now(
   return true;
 }
 
+export const KEEP_ALIVE_COOLDOWN_MS = 300_000;
+
 export function evaluateQuotaPoolKeepAlive({
   group,
   enabled = false,
   poolState = null,
   nowMs = Date.now(),
-  cooldownMs = 180_000,
+  cooldownMs = KEEP_ALIVE_COOLDOWN_MS,
 } = {}) {
   const plan = classifyQuotaGroupKeepAlive(group);
   if (!plan) return { eligible: false, reason: 'no_bucket', plan: null };

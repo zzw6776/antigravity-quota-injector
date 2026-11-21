@@ -15,6 +15,7 @@ import {
   parseKeychainSecretMetadata,
   prepareNewAccountWithRestart,
   readKeychainSecret,
+  reorderAccounts,
   sanitizeQuotaSnapshot,
   snapshotCurrentAccount,
   updateAccountQuotaSnapshot,
@@ -444,6 +445,47 @@ test('account quotaSnapshot persists cleanly via snapshotCurrentAccount and upda
   assert.equal(listed[0].active, false);
   assert.equal(listed[0].quotaSnapshot?.groups[0].buckets[0].remainingFraction, 0.45);
   assert.equal('keychainSecret' in listed[0], false);
+
+  fs.rmSync(fx.root, { recursive: true, force: true });
+});
+
+test('reorderAccounts persists custom account order and preserves unmentioned accounts', () => {
+  const fx = makeTempFixture();
+  for (const email of ['alice@example.com', 'bob@example.com', 'carol@example.com']) {
+    snapshotCurrentAccount({
+      accountsFile: fx.accountsFile,
+      appSupportDir: fx.appSupportDir,
+      profile: { email, name: email.split('@')[0], planName: 'Pro' },
+      readSecretFn: () => `secret-${email}`,
+    });
+  }
+
+  assert.deepEqual(
+    listAccounts(fx.accountsFile).map((a) => a.id),
+    ['alice@example.com', 'bob@example.com', 'carol@example.com']
+  );
+
+  assert.deepEqual(
+    reorderAccounts(fx.accountsFile, ['carol@example.com', 'alice@example.com', 'bob@example.com']),
+    { changed: true }
+  );
+  assert.deepEqual(
+    listAccounts(fx.accountsFile).map((a) => a.id),
+    ['carol@example.com', 'alice@example.com', 'bob@example.com']
+  );
+
+  // Same order is a no-op
+  assert.deepEqual(
+    reorderAccounts(fx.accountsFile, ['carol@example.com', 'alice@example.com', 'bob@example.com']),
+    { changed: false }
+  );
+
+  // Partial list moves mentioned accounts first and appends unmentioned ones in original relative order
+  assert.deepEqual(reorderAccounts(fx.accountsFile, ['bob@example.com']), { changed: true });
+  assert.deepEqual(
+    listAccounts(fx.accountsFile).map((a) => a.id),
+    ['bob@example.com', 'carol@example.com', 'alice@example.com']
+  );
 
   fs.rmSync(fx.root, { recursive: true, force: true });
 });
