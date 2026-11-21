@@ -222,6 +222,256 @@ export function isAntigravityProcessRunning({
   }
 }
 
+export function findRunningAntigravityPids({
+  channel = 'stable',
+  platform = process.platform,
+  extraExeNames = [],
+  execFileSyncFn = execFileSync,
+} = {}) {
+  try {
+    if (platform === 'win32') {
+      const exeNames = [
+        ...new Set([
+          ...getAntigravityExeNames(channel),
+          ...extraExeNames.filter((n) => typeof n === 'string' && /\.exe$/i.test(n.trim())).map((n) => n.trim()),
+        ]),
+      ];
+      const pids = new Set();
+      for (const exeName of exeNames) {
+        try {
+          const out = execFileSyncFn(
+            'tasklist',
+            ['/FI', `IMAGENAME eq ${exeName}`, '/FO', 'CSV', '/NH'],
+            {
+              timeout: 2500,
+              encoding: 'utf8',
+              stdio: ['ignore', 'pipe', 'pipe'],
+              windowsHide: true,
+            }
+          );
+          for (const pid of parseWindowsTasklistCsv(out, [exeName])) {
+            pids.add(pid);
+          }
+        } catch {}
+      }
+      return [...pids];
+    }
+
+    if (platform === 'darwin') {
+      const appName = channel === 'insiders' ? 'Antigravity - Insiders' : 'Antigravity';
+      const macMarker = `/${appName}.app/Contents/MacOS/`;
+      const binMarker = `/${appName}.app/Contents/Resources/bin/`;
+      const out = execFileSyncFn('ps', ['-axo', 'pid=,comm='], {
+        timeout: 1500,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const pids = new Set();
+      for (const rawLine of String(out || '').split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        const m = line.match(/^(\d+)\s+(.+)$/);
+        if (!m) continue;
+        const pid = Number.parseInt(m[1], 10);
+        const comm = m[2];
+        if (Number.isInteger(pid) && pid > 0 && (comm.includes(macMarker) || comm.includes(binMarker))) {
+          pids.add(pid);
+        }
+      }
+      return [...pids];
+    }
+
+    const expected = channel === 'insiders' ? ['antigravity-insiders', 'antigravity'] : ['antigravity'];
+    const out = execFileSyncFn('ps', ['-eo', 'pid=,comm='], {
+      timeout: 1500,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const pids = new Set();
+    for (const rawLine of String(out || '').split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      const m = line.match(/^(\d+)\s+(.+)$/);
+      if (!m) continue;
+      const pid = Number.parseInt(m[1], 10);
+      if (Number.isInteger(pid) && pid > 0 && expected.includes(path.posix.basename(m[2].trim()))) {
+        pids.add(pid);
+      }
+    }
+    return [...pids];
+  } catch {
+    return [];
+  }
+}
+
+export function hasAntigravityRemoteDebuggingFlag({
+  channel = 'stable',
+  platform = process.platform,
+  extraExeNames = [],
+  execFileSyncFn = execFileSync,
+  spawnSyncFn = spawnSync,
+} = {}) {
+  try {
+    if (platform === 'darwin') {
+      const appName = channel === 'insiders' ? 'Antigravity - Insiders' : 'Antigravity';
+      const marker = `/${appName}.app/Contents/MacOS/`;
+      const out = execFileSyncFn('ps', ['-ww', '-axo', 'args='], {
+        timeout: 1500,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return String(out || '')
+        .split(/\r?\n/)
+        .some((line) => line.includes(marker) && /--remote-debugging-port=\d+/i.test(line));
+    }
+
+    if (platform === 'win32') {
+      const exeNames = [
+        ...new Set([
+          ...getAntigravityExeNames(channel),
+          ...extraExeNames.filter((n) => typeof n === 'string' && /\.exe$/i.test(n.trim())).map((n) => n.trim()),
+        ]),
+      ];
+      const filterClause = exeNames
+        .map((n) => `Name='${escapePowerShellSingleQuoted(n)}'`)
+        .join(' OR ');
+      const psScript = `Get-CimInstance Win32_Process -Filter "${filterClause}" | ForEach-Object { $_.CommandLine }`;
+      const res = spawnSyncFn(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-WindowStyle',
+          'Hidden',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-EncodedCommand',
+          encodePowerShellCommand(psScript),
+        ],
+        {
+          timeout: 4000,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+        }
+      );
+      if (res?.status !== 0) return false;
+      return String(res.stdout || '')
+        .split(/\r?\n/)
+        .some((line) => /--remote-debugging-port=\d+/i.test(line));
+    }
+
+    const expected = channel === 'insiders' ? ['antigravity-insiders', 'antigravity'] : ['antigravity'];
+    const out = execFileSyncFn('ps', ['-ww', '-eo', 'args='], {
+      timeout: 1500,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return String(out || '')
+      .split(/\r?\n/)
+      .some((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return false;
+        const bin = path.posix.basename(trimmed.split(/\s+/)[0] || '');
+        return expected.includes(bin) && /--remote-debugging-port=\d+/i.test(trimmed);
+      });
+  } catch {
+    return false;
+  }
+}
+
+export async function quitAndWaitAntigravityProcesses({
+  channel = 'stable',
+  platform = process.platform,
+  extraExeNames = [],
+  timeoutMs = 8000,
+  execFileSyncFn = execFileSync,
+  killFn = (pid, sig) => process.kill(pid, sig),
+  sleepFn = (ms) => new Promise((r) => setTimeout(r, ms)),
+} = {}) {
+  const getPids = () =>
+    findRunningAntigravityPids({ channel, platform, extraExeNames, execFileSyncFn });
+  if (getPids().length === 0) {
+    return true;
+  }
+
+  const appName = channel === 'insiders' ? 'Antigravity - Insiders' : 'Antigravity';
+  if (platform === 'darwin') {
+    try {
+      execFileSyncFn('osascript', ['-e', `tell application "${appName}" to quit`], {
+        timeout: 2500,
+        stdio: 'ignore',
+      });
+    } catch {}
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (getPids().length === 0) return true;
+      await sleepFn(200);
+    }
+    for (const pid of getPids()) {
+      try {
+        killFn(pid, 'SIGTERM');
+      } catch {}
+    }
+    const termDeadline = Date.now() + 2500;
+    while (Date.now() < termDeadline) {
+      if (getPids().length === 0) return true;
+      await sleepFn(150);
+    }
+    return getPids().length === 0;
+  }
+
+  if (platform === 'win32') {
+    const exeNames = [
+      ...new Set([
+        ...getAntigravityExeNames(channel),
+        ...extraExeNames.filter((n) => typeof n === 'string' && /\.exe$/i.test(n.trim())).map((n) => n.trim()),
+      ]),
+    ];
+    for (const exeName of exeNames) {
+      try {
+        execFileSyncFn('taskkill', ['/IM', exeName, '/T'], {
+          timeout: 3000,
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+      } catch {}
+    }
+    const softDeadline = Date.now() + Math.min(timeoutMs, 5000);
+    while (Date.now() < softDeadline) {
+      if (getPids().length === 0) return true;
+      await sleepFn(200);
+    }
+    for (const exeName of exeNames) {
+      try {
+        execFileSyncFn('taskkill', ['/IM', exeName, '/T', '/F'], {
+          timeout: 3000,
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+      } catch {}
+    }
+    const hardDeadline = Date.now() + 2500;
+    while (Date.now() < hardDeadline) {
+      if (getPids().length === 0) return true;
+      await sleepFn(150);
+    }
+    return getPids().length === 0;
+  }
+
+  for (const pid of getPids()) {
+    try {
+      killFn(pid, 'SIGTERM');
+    } catch {}
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (getPids().length === 0) return true;
+    await sleepFn(200);
+  }
+  return getPids().length === 0;
+}
+
 export function launchAntigravityExecutable({
   channel = 'stable',
   platform = process.platform,

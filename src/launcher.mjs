@@ -18,9 +18,12 @@ import {
 import { installFileLogger, getDefaultLogDir } from './file-logger.mjs';
 import { endDevConsoleOnFormalTakeover } from './macos-dev-console.mjs';
 import {
+  hasAntigravityRemoteDebuggingFlag,
   isAntigravityProcessRunning,
   isPidAlive,
   launchAntigravityExecutable,
+  quitAndWaitAntigravityProcesses,
+  resolveAntigravityExecutable,
   showWindowsNotice,
 } from './platform.mjs';
 import {
@@ -86,34 +89,145 @@ function computeDevRuntimeIdentity() {
   }
 }
 
-async function ensureAntigravityRunning(paths, userCfg, { allowMissingError = false } = {}) {
-  const extraExeNames = userCfg.antigravityExe
+export async function ensureAntigravityRunning(
+  paths,
+  userCfg = {},
+  {
+    allowMissingError = false,
+    allowRestart = true,
+    setRestartInFlight = null,
+    isProcessRunningFn = isAntigravityProcessRunning,
+    readDebugPortFn = readDebugPort,
+    fetchCdpTargetsFn = fetchCdpTargets,
+    hasRemoteDebuggingFlagFn = hasAntigravityRemoteDebuggingFlag,
+    resolveExecutableFn = resolveAntigravityExecutable,
+    quitAntigravityFn = quitAndWaitAntigravityProcesses,
+    launchExecutableFn = launchAntigravityExecutable,
+    existsSyncFn = fs.existsSync,
+    unlinkSyncFn = fs.unlinkSync,
+    sleepFn = (ms) => new Promise((r) => setTimeout(r, ms)),
+    log = console.log,
+    warn = console.warn,
+  } = {}
+) {
+  const extraExeNames = userCfg?.antigravityExe
     ? [path.win32.basename(userCfg.antigravityExe)]
     : [];
-  let running = isAntigravityProcessRunning({ channel: 'stable', extraExeNames });
-  if (!running) {
-    const port = readDebugPort(paths.portFile);
-    if (port) {
-      const targets = await fetchCdpTargets(port);
-      running = targets.some(
-        (t) =>
-          t.type === 'page' && /^https?:\/\/(?:127\.0\.0\.1|localhost)/i.test(String(t.url || ''))
-      );
-    }
-  }
-  if (running) {
-    const activePort = readDebugPort(paths.portFile);
-    if (!activePort) {
-      console.warn(
-        '[launcher] 检测到 Antigravity 已在运行但未开启远程调试端口（Antigravity 2.33+ 需带 --remote-debugging-port=0 启动），当前无法注入；请完全退出 Antigravity 后通过本注入器启动'
-      );
-    } else {
-      console.log('[launcher] Antigravity 已在运行，直接附着注入');
-    }
-    return { ok: true, launched: false };
+  let running = isProcessRunningFn({ channel: 'stable', extraExeNames });
+  let activePort = readDebugPortFn(paths.portFile);
+  let initialTargets = activePort ? await fetchCdpTargetsFn(activePort) : [];
+  if (!running && Array.isArray(initialTargets) && initialTargets.length > 0) {
+    running = initialTargets.some(
+      (t) =>
+        t.type === 'page' && /^https?:\/\/(?:127\.0\.0\.1|localhost)/i.test(String(t.url || ''))
+    );
   }
 
-  const res = launchAntigravityExecutable({
+  if (running) {
+    const hasLiveCdp =
+      Array.isArray(initialTargets) &&
+      initialTargets.some((t) => Boolean(t?.webSocketDebuggerUrl || t?.type === 'page'));
+    const injectable =
+      hasLiveCdp || hasRemoteDebuggingFlagFn({ channel: 'stable', extraExeNames });
+    if (injectable) {
+      log('[launcher] Antigravity 已在运行，直接附着注入');
+      return { ok: true, launched: false, restarted: false, injectable: true };
+    }
+
+    if (!allowRestart) {
+      warn(
+        '[launcher] 检测到 Antigravity 已在运行但未开启远程调试端口（Antigravity 2.33+ 需带 --remote-debugging-port=0 启动），当前无法注入；请完全退出 Antigravity 后通过本注入器启动'
+      );
+      return { ok: true, launched: false, restarted: false, injectable: false };
+    }
+
+    const resolved = resolveExecutableFn({ channel: 'stable', stateDir: paths.stateDir });
+    if (!resolved?.exePath) {
+      warn('[launcher] 检测到 Antigravity 已在运行但无法注入，且未找到可重启的执行路径，跳过自动重启');
+      return {
+        ok: true,
+        launched: false,
+        restarted: false,
+        injectable: false,
+        reason: 'missing_executable',
+      };
+    }
+
+    log('[launcher] 检测到 Antigravity 已在运行但无法注入（未开启远程调试端口），正在自动重启 Antigravity...');
+    setRestartInFlight?.(true);
+    try {
+      const exited = await quitAntigravityFn({
+        channel: 'stable',
+        extraExeNames,
+        timeoutMs: 8000,
+      });
+      if (!exited) {
+        warn('[launcher] 等待 Antigravity 退出超时，已取消自动重启（请手动退出 Antigravity 后重试）');
+        return {
+          ok: true,
+          launched: false,
+          restarted: false,
+          injectable: false,
+          reason: 'quit_timeout',
+        };
+      }
+
+      if (activePort && existsSyncFn(paths.portFile)) {
+        try {
+          unlinkSyncFn(paths.portFile);
+        } catch {}
+      }
+
+      await sleepFn(300);
+
+      let res = launchExecutableFn({
+        channel: 'stable',
+        stateDir: paths.stateDir,
+      });
+      if (!res.launched) {
+        if (allowMissingError) {
+          return { ok: false, reason: res.reason };
+        }
+        warn(`[launcher] ${res.reason}`);
+        return { ok: false, reason: res.reason };
+      }
+
+      const waitLaunched = async (timeoutMs) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          if (isProcessRunningFn({ channel: 'stable', extraExeNames })) return true;
+          await sleepFn(200);
+        }
+        return isProcessRunningFn({ channel: 'stable', extraExeNames });
+      };
+
+      const firstOk = await waitLaunched(4000);
+      if (!firstOk) {
+        await sleepFn(600);
+        res = launchExecutableFn({
+          channel: 'stable',
+          stateDir: paths.stateDir,
+        });
+        if (!res.launched) {
+          return { ok: false, reason: res.reason };
+        }
+        await waitLaunched(6000);
+      }
+
+      log(`[launcher] 已自动重启 Antigravity (${res.source}): ${res.exePath}`);
+      return {
+        ok: true,
+        launched: true,
+        restarted: true,
+        injectable: true,
+        exePath: res.exePath,
+      };
+    } finally {
+      setRestartInFlight?.(false);
+    }
+  }
+
+  const res = launchExecutableFn({
     channel: 'stable',
     stateDir: paths.stateDir,
   });
@@ -121,11 +235,11 @@ async function ensureAntigravityRunning(paths, userCfg, { allowMissingError = fa
     if (allowMissingError) {
       return { ok: false, reason: res.reason };
     }
-    console.warn(`[launcher] ${res.reason}`);
+    warn(`[launcher] ${res.reason}`);
     return { ok: false, reason: res.reason };
   }
-  console.log(`[launcher] 已拉起 Antigravity (${res.source}): ${res.exePath}`);
-  return { ok: true, launched: true, exePath: res.exePath };
+  log(`[launcher] 已拉起 Antigravity (${res.source}): ${res.exePath}`);
+  return { ok: true, launched: true, restarted: false, injectable: true, exePath: res.exePath };
 }
 
 async function runUpdatePreparation(version) {
@@ -219,7 +333,9 @@ export async function runLauncher({
           console.log(
             `[launcher] ${req?.mode ?? 'unknown'} v${req?.version ?? 'unknown'} 请求复用当前实例`
           );
-          await ensureAntigravityRunning(paths, readUserConfig(paths.stateDir));
+          await ensureAntigravityRunning(paths, readUserConfig(paths.stateDir), {
+            setRestartInFlight: (flag) => daemonControls?.setRestartInFlight?.(flag),
+          });
           await daemonControls?.tickNow?.();
         },
       });
@@ -234,7 +350,10 @@ export async function runLauncher({
       return 0;
     }
 
-    const ensured = await ensureAntigravityRunning(paths, userCfg, { allowMissingError: true });
+    const ensured = await ensureAntigravityRunning(paths, userCfg, {
+      allowMissingError: true,
+      allowRestart: !once,
+    });
     if (!ensured.ok) {
       console.error(`[launcher] ${ensured.reason}`);
       if (!once) {

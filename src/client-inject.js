@@ -45,6 +45,9 @@
   const QUOTA_FORCE_COOLDOWN_MS = 10_000;
   const QUOTA_RUNNING_INTERVAL_MS = 30_000;
   const TRAJ_STATUS_POLL_MS = 10_000;
+  const OPTIMISTIC_SEND_GRACE_MS = 8_000;
+  const COMPOSER_BUSY_SELECTOR =
+    '[data-testid="input-cancel-button"], [data-testid="send-button-pending"]';
 
   const state = {
     cascadeId: '',
@@ -142,6 +145,11 @@
     smartStableMap: new Map(),
     smartNextSeq: 1,
     smartGraceTimer: null,
+    optimisticRunningById: new Map(),
+    optimisticExpiryTimer: null,
+    pendingNewChatSendAt: 0,
+    postSendRefreshTimers: [],
+    wasComposerBusy: false,
     localViewedAtById: Object.create(null),
     sidebarTab: (() => {
       try {
@@ -926,10 +934,11 @@
       body:not(.dark):not(.theme-dark) .bg-sidebar [data-testid="conversation-list-sidebar"] .bg-sidebar {
         background-color: transparent !important;
       }
-      body:not(.dark):not(.theme-dark) .bg-sidebar [data-testid="conversation-list-sidebar"] [data-sidebar-section-drop-id="pinned"][style*="sticky"],
-      body:not(.dark):not(.theme-dark) .bg-sidebar [data-testid="conversation-list-sidebar"] [data-sidebar-section-drop-id="main-section-header"][style*="sticky"] {
+      body:not(.dark):not(.theme-dark) .bg-sidebar [data-testid="conversation-list-sidebar"].aq-proj-scrolled [data-sidebar-section-drop-id="pinned"][style*="sticky"],
+      body:not(.dark):not(.theme-dark) .bg-sidebar [data-testid="conversation-list-sidebar"].aq-proj-scrolled [data-sidebar-section-drop-id="main-section-header"][style*="sticky"] {
         background-color: var(--background, #ffffff) !important;
-        clip-path: inset(1px 1px 0 1px);
+        border-radius: 10px 10px 0 0 !important;
+        clip-path: inset(1px 1px 0 1px round 9px 9px 0 0);
       }
       .aq-grp-active-sec,
       .aq-grp-top-wrap,
@@ -944,7 +953,7 @@
         margin-bottom: 8px;
       }
       .aq-grp-active-sec.is-empty {
-        display: none;
+        padding: 4px;
       }
       .aq-grp-active-dot {
         width: 6px;
@@ -953,6 +962,11 @@
         flex-shrink: 0;
         background: #3b82f6;
         box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.16);
+        transition: background-color 160ms ease, box-shadow 160ms ease;
+      }
+      .aq-grp-active-sec.is-empty .aq-grp-active-dot {
+        background: rgba(113, 113, 122, 0.42);
+        box-shadow: none;
       }
       .aq-grp-active-sec .aq-smart-list {
         max-height: clamp(72px, 24vh, 210px);
@@ -1068,16 +1082,21 @@
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .bg-sidebar [data-testid="conversation-list-sidebar"] .bg-sidebar {
         background-color: transparent !important;
       }
-      body:is(.dark, .theme-dark) .bg-sidebar [data-testid="conversation-list-sidebar"] [data-sidebar-section-drop-id="pinned"][style*="sticky"],
-      body:is(.dark, .theme-dark) .bg-sidebar [data-testid="conversation-list-sidebar"] [data-sidebar-section-drop-id="main-section-header"][style*="sticky"],
-      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .bg-sidebar [data-testid="conversation-list-sidebar"] [data-sidebar-section-drop-id="pinned"][style*="sticky"],
-      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .bg-sidebar [data-testid="conversation-list-sidebar"] [data-sidebar-section-drop-id="main-section-header"][style*="sticky"] {
+      body:is(.dark, .theme-dark) .bg-sidebar [data-testid="conversation-list-sidebar"].aq-proj-scrolled [data-sidebar-section-drop-id="pinned"][style*="sticky"],
+      body:is(.dark, .theme-dark) .bg-sidebar [data-testid="conversation-list-sidebar"].aq-proj-scrolled [data-sidebar-section-drop-id="main-section-header"][style*="sticky"],
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .bg-sidebar [data-testid="conversation-list-sidebar"].aq-proj-scrolled [data-sidebar-section-drop-id="pinned"][style*="sticky"],
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .bg-sidebar [data-testid="conversation-list-sidebar"].aq-proj-scrolled [data-sidebar-section-drop-id="main-section-header"][style*="sticky"] {
         background-color: #19191f !important;
-        clip-path: inset(1px 1px 0 1px);
+        border-radius: 10px 10px 0 0 !important;
+        clip-path: inset(1px 1px 0 1px round 9px 9px 0 0);
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-active-dot {
         background: #60a5fa;
         box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.2);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-active-sec.is-empty .aq-grp-active-dot {
+        background: rgba(161, 161, 170, 0.42);
+        box-shadow: none;
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-root-add-btn:hover {
         background: rgba(255, 255, 255, 0.055);
@@ -1362,6 +1381,19 @@
         color: var(--muted-foreground, #71717a);
         flex-shrink: 0;
         margin-right: 2px;
+      }
+      .aq-grp-fold-hint {
+        font-size: 11px;
+        font-weight: 400;
+        color: var(--muted-foreground, #71717a);
+        flex-shrink: 0;
+      }
+      .aq-grp-fold-hint.is-highlight {
+        color: #2563eb;
+        font-weight: 500;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-fold-hint.is-highlight {
+        color: #60a5fa;
       }
       .aq-grp-actions {
         display: none;
@@ -3090,8 +3122,10 @@
             const isExpired = !isCur && Number.isFinite(resetTs) && resetTs <= nowMs;
             let valHtml;
             if (isExpired) {
-              const origNote = Number(b.remainingFraction) < 0.995 ? `原 ${pct}` : '预计满额';
-              valHtml = `<span class="aq-lvl-ok">已重置</span><span class="aq-q-reset"> · ${escapeHtml(origNote)}</span>`;
+              const origNote = Number(b.remainingFraction) < 0.995 ? `原 ${pct}` : '';
+              valHtml = `<span class="aq-lvl-ok">已重置</span>${
+                origNote ? `<span class="aq-q-reset"> · ${escapeHtml(origNote)}</span>` : ''
+              }`;
             } else {
               const reset = formatResetCountdown(b.resetTime, Date.now(), { includeDate: true });
               valHtml = `<span class="${lvl}">${pct}</span>${reset ? `<span class="aq-q-reset"> · ${escapeHtml(reset)}</span>` : ''}`;
@@ -3750,6 +3784,8 @@
 
   const SVG_FOLDER =
     '<svg viewBox="0 -960 960 960" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M172.31-180Q142-180 121-201t-21-51.31V-707.69Q100-738 121-759t51.31-21H391.92l80 80H787.69Q818-700 839-679t21 51.31v375.38Q860-222 839-201t-51.31 21H172.31Zm0-60H787.69q5.39 0 8.85-3.46t3.46-8.85V-627.69q0-5.39-3.46-8.85T787.69-640H447.38l-80-80H172.31q-5.39 0-8.85 3.46T160-707.69v455.38q0 5.39 3.46 8.85t8.85 3.46Z"/></svg>';
+  const SVG_FOLDER_OPEN =
+    '<svg viewBox="0 -960 960 960" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M172.31-180Q142-180 121-201t-21-51.31V-707.69Q100-738 121-759t51.31-21H391.92l80 80H787.69Q818-700 839-679t21 51.31v50h-60v-50q0-5.39-3.46-8.85T787.69-640H447.38l-80-80H172.31q-5.39 0-8.85 3.46T160-707.69v353.84l58.46-184.61q7.69-24.16 28.15-39.85T292.31-594H860q34.62 0 56.15 27.69t11.77 61.54L843.31-235.38q-7.69 24.15-28.15 39.77Q794.69-180 769.23-180H172.31Zm18.46-60H769.23q6.15 0 11.15-3.85t7-10.38L872.31-518q2.3-6.54-1.73-11.27T860-534H292.31q-6.16 0-11.16 3.85t-7 10.38L190.77-240Z"/></svg>';
   const SVG_FOLDER_PLUS =
     '<svg viewBox="0 -960 960 960" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M560-330h60v-80h80v-60h-80v-80h-60v80h-80v60h80v80ZM172.31-180Q142-180 121-201t-21-51.31V-707.69Q100-738 121-759t51.31-21H391.92l80 80H787.69Q818-700 839-679t21 51.31v375.38Q860-222 839-201t-51.31 21H172.31Zm0-60H787.69q5.39 0 8.85-3.46t3.46-8.85V-627.69q0-5.39-3.46-8.85T787.69-640H447.38l-80-80H172.31q-5.39 0-8.85 3.46T160-707.69v455.38q0 5.39 3.46 8.85t8.85 3.46Z"/></svg>';
   const SVG_PLUS =
@@ -4228,6 +4264,98 @@
     }
   }
 
+  function isActiveComposerBusy() {
+    const box = document.getElementById('antigravity.agentSidePanelInputBox');
+    return Boolean(box && box.querySelector(COMPOSER_BUSY_SELECTOR));
+  }
+
+  function clearPostSendRefreshTimers() {
+    for (let i = 0; i < state.postSendRefreshTimers.length; i++) {
+      clearTimeout(state.postSendRefreshTimers[i]);
+    }
+    state.postSendRefreshTimers.length = 0;
+  }
+
+  function schedulePostSendTrajectoryRefreshes(delays) {
+    clearPostSendRefreshTimers();
+    for (let i = 0; i < delays.length; i++) {
+      const delay = delays[i];
+      const timer = setTimeout(() => {
+        const idx = state.postSendRefreshTimers.indexOf(timer);
+        if (idx !== -1) state.postSendRefreshTimers.splice(idx, 1);
+        if (!document.hidden) {
+          void refreshTrajectoryMetadata(false, 400);
+        }
+      }, delay);
+      state.postSendRefreshTimers.push(timer);
+    }
+  }
+
+  function scheduleOptimisticExpiry() {
+    if (state.optimisticExpiryTimer) {
+      clearTimeout(state.optimisticExpiryTimer);
+      state.optimisticExpiryTimer = null;
+    }
+    const now = Date.now();
+    let minRemain = 0;
+    for (const [key, opt] of state.optimisticRunningById.entries()) {
+      if (opt.sawBackendRunning) continue;
+      if (now >= opt.until) {
+        if (!isActiveComposerBusy() || extractCascadeId().toLowerCase() !== key) {
+          state.optimisticRunningById.delete(key);
+        }
+        continue;
+      }
+      const remain = opt.until - now + 30;
+      if (!minRemain || remain < minRemain) {
+        minRemain = remain;
+      }
+    }
+    if (minRemain > 0) {
+      state.optimisticExpiryTimer = setTimeout(() => {
+        state.optimisticExpiryTimer = null;
+        scheduleOptimisticExpiry();
+        renderSidebarGroupsPanel();
+      }, minRemain);
+    }
+  }
+
+  function markConversationSendStarted(cid) {
+    const now = Date.now();
+    const rawCid = String(cid || '').trim();
+    const cidLower = rawCid.toLowerCase();
+    if (!cidLower) {
+      state.pendingNewChatSendAt = now;
+      schedulePostSendTrajectoryRefreshes([600, 2000]);
+      return;
+    }
+    state.pendingNewChatSendAt = 0;
+    state.optimisticRunningById.set(cidLower, {
+      cascadeId: rawCid,
+      startedAt: now,
+      until: now + OPTIMISTIC_SEND_GRACE_MS,
+      sawBackendRunning: false,
+    });
+    const meta = state.trajMetaById[cidLower];
+    if (meta) {
+      meta.lastOperatedMs = Math.max(meta.lastOperatedMs || 0, now);
+    }
+    scheduleOptimisticExpiry();
+    schedulePostSendTrajectoryRefreshes([600, 2000]);
+    renderSidebarGroupsPanel();
+  }
+
+  function markConversationSendCanceled(cid) {
+    const cidLower = String(cid || '').trim().toLowerCase();
+    if (cidLower) {
+      state.optimisticRunningById.delete(cidLower);
+    }
+    state.pendingNewChatSendAt = 0;
+    scheduleOptimisticExpiry();
+    schedulePostSendTrajectoryRefreshes([300, 1200]);
+    renderSidebarGroupsPanel();
+  }
+
   function collectAllConversationStates(activeCid) {
     const domStatus = Object.create(null);
     const domInfo = Object.create(null);
@@ -4259,6 +4387,16 @@
       }
     }
 
+    const now = Date.now();
+    const composerBusy = Boolean(activeCid && isActiveComposerBusy());
+    if (composerBusy !== state.wasComposerBusy) {
+      const ended = state.wasComposerBusy && !composerBusy;
+      state.wasComposerBusy = composerBusy;
+      if (ended && !document.hidden) {
+        schedulePostSendTrajectoryRefreshes([250]);
+      }
+    }
+
     const statusById = Object.create(null);
     const allPrimaryCids = new Set();
     for (const cid of Object.keys(domStatus)) {
@@ -4276,6 +4414,21 @@
         if (cid) {
           allPrimaryCids.add(cid);
         }
+      }
+    }
+    for (const [cid, opt] of state.optimisticRunningById.entries()) {
+      if (!opt.sawBackendRunning && now >= opt.until && !(composerBusy && cid === activeCid)) {
+        state.optimisticRunningById.delete(cid);
+        continue;
+      }
+      const meta = state.trajMetaById[cid];
+      if (meta && (meta.archived || !meta.isPrimary)) continue;
+      allPrimaryCids.add(cid);
+    }
+    if (composerBusy && activeCid) {
+      const activeMeta = state.trajMetaById[activeCid];
+      if (!activeMeta || (!activeMeta.archived && activeMeta.isPrimary)) {
+        allPrimaryCids.add(activeCid);
       }
     }
 
@@ -4301,31 +4454,40 @@
       if (status === 'unread' && activeCid && cid === activeCid && !meta?.markedAsUnread) {
         status = '';
       }
+
+      const opt = state.optimisticRunningById.get(cid) || null;
+      const hasOptimistic = Boolean(opt && !opt.sawBackendRunning && now < opt.until);
+      const hasLiveComposer = Boolean(composerBusy && cid === activeCid);
+      if ((hasLiveComposer || hasOptimistic) && status !== 'waiting') {
+        status = 'running';
+      }
       if (status) {
         statusById[cid] = status;
       }
 
       // Only list primary / sidebar-visible conversations inside smart & recent groups
-      if (!(cid in domStatus) && !(meta?.isPrimary && !meta?.archived)) continue;
+      const canShowUnindexed = Boolean((hasLiveComposer || hasOptimistic) && (!meta || meta.isPrimary) && !meta?.archived);
+      if (!(cid in domStatus) && !(meta?.isPrimary && !meta?.archived) && !canShowUnindexed) continue;
 
       const dInfo = domInfo[cid];
       const title =
         (dInfo?.title && dInfo.title !== '未命名对话' ? dInfo.title : '') ||
         meta?.title ||
         dInfo?.title ||
-        '未命名对话';
+        (canShowUnindexed ? '新对话' : '未命名对话');
       const project = dInfo?.project || meta?.project || '';
       const lastOperatedMs = Math.max(
         meta?.lastOperatedMs || 0,
         meta?.lastModifiedMs || 0,
-        meta?.lastUserInputMs || 0
+        meta?.lastUserInputMs || 0,
+        opt?.startedAt || 0
       );
       const resolvedItem = {
-        cascadeId: dInfo?.cascadeId || meta?.cascadeId || cid,
+        cascadeId: dInfo?.cascadeId || meta?.cascadeId || opt?.cascadeId || cid,
         title,
         project,
         status,
-        lastModifiedMs: meta?.lastModifiedMs || 0,
+        lastModifiedMs: Math.max(meta?.lastModifiedMs || 0, opt?.startedAt || 0),
         lastOperatedMs,
         domIndex: cid in domOrder ? domOrder[cid] : 99999,
       };
@@ -4454,6 +4616,20 @@
         }
       }
       state.trajMetaById = nextById;
+      const nowMeta = Date.now();
+      for (const [key, opt] of state.optimisticRunningById.entries()) {
+        const meta = nextById[key];
+        if (meta) {
+          if (meta.running || meta.waiting || meta.subagentRunning || meta.subagentWaiting) {
+            opt.sawBackendRunning = true;
+          } else if (opt.sawBackendRunning || nowMeta >= opt.until) {
+            state.optimisticRunningById.delete(key);
+          }
+        } else if (nowMeta >= opt.until) {
+          state.optimisticRunningById.delete(key);
+        }
+      }
+      scheduleOptimisticExpiry();
       syncGroupedConversationMetadata();
       renderSidebarGroupsPanel();
     } catch {}
@@ -5643,7 +5819,7 @@
   function patchSidebarGroupsDynamicState(panel, activeCid, convStatuses, stableActiveItems, recentItems = []) {
     // 1. Update smart group header, collapse state, count, empty placeholder, and keyed list
     const activeBlockEl = panel.querySelector('[data-aq-smart-block="active"]');
-    const chevEl = panel.querySelector('[data-aq-smart-chev]');
+    const smartFoldHintEl = panel.querySelector('[data-aq-smart-fold-hint]');
     const countEl = panel.querySelector('[data-aq-smart-count]');
     const childrenEl = panel.querySelector('[data-aq-smart-children]');
     const listEl = panel.querySelector('[data-aq-smart-list]');
@@ -5652,14 +5828,18 @@
     const smartExpanded = !state.smartActiveCollapsed;
     const count = stableActiveItems.length;
     if (activeBlockEl) activeBlockEl.classList.toggle('is-empty', count === 0);
-    if (chevEl) chevEl.classList.toggle('is-open', smartExpanded);
+    if (smartFoldHintEl) {
+      const hintText = !smartExpanded ? '已收起' : '';
+      if (smartFoldHintEl.textContent !== hintText) smartFoldHintEl.textContent = hintText;
+      smartFoldHintEl.classList.toggle('is-highlight', !smartExpanded && count > 0);
+    }
     if (countEl) {
       const countText = String(count);
       if (countEl.textContent !== countText) countEl.textContent = countText;
       countEl.classList.toggle('is-highlight', count > 0);
     }
-    if (childrenEl) childrenEl.classList.toggle('is-collapsed', !smartExpanded);
-    if (emptyEl) emptyEl.classList.toggle('is-hidden', count > 0);
+    if (childrenEl) childrenEl.classList.toggle('is-collapsed', !smartExpanded || count === 0);
+    if (emptyEl) emptyEl.classList.toggle('is-hidden', true);
 
     if (listEl) {
       const animateNew = listEl.dataset.aqHydrated === '1';
@@ -5744,11 +5924,14 @@
     }
 
     // 2b. Patch recent 10 conversations section at the bottom of Groups tab in-place
-    const recentChevEl = panel.querySelector('[data-aq-recent-chev]');
+    const recentFoldHintEl = panel.querySelector('[data-aq-recent-fold-hint]');
     const recentChildrenEl = panel.querySelector('[data-aq-recent-children]');
     const recentListEl = panel.querySelector('[data-aq-recent-list]');
     const recentExpanded = !state.recentCollapsed;
-    if (recentChevEl) recentChevEl.classList.toggle('is-open', recentExpanded);
+    if (recentFoldHintEl) {
+      const rHint = !recentExpanded ? '已收起' : '';
+      if (recentFoldHintEl.textContent !== rHint) recentFoldHintEl.textContent = rHint;
+    }
     if (recentChildrenEl) recentChildrenEl.classList.toggle('is-collapsed', !recentExpanded);
     if (recentListEl && Array.isArray(recentItems)) {
       const existingRecentByCid = new Map();
@@ -5887,20 +6070,15 @@
     const smartExpanded = !state.smartActiveCollapsed;
     const smartGroupsHtml = `
       <div class="aq-grp-active-sec ${stableActiveItems.length === 0 ? 'is-empty' : ''}" data-aq-smart-block="active">
-        <div class="aq-grp-hdr is-smart" data-aq-smart-hdr="active" title="进行中：正在运行、待确认或未读会话">
+        <div class="aq-grp-hdr is-smart" data-aq-smart-hdr="active" title="进行中：正在运行、待确认或未读会话（点击可收起/展开）">
           <span class="aq-grp-active-dot" aria-hidden="true"></span>
           <span class="aq-grp-name">进行中</span>
-          <span class="aq-grp-chev ${smartExpanded ? 'is-open' : ''}" data-aq-smart-chev="1">${SVG_CHEVRON}</span>
+          <span class="aq-grp-fold-hint" data-aq-smart-fold-hint="1"></span>
         </div>
-        <div class="aq-smart-children ${smartExpanded ? '' : 'is-collapsed'}" data-aq-smart-children="1">
+        <div class="aq-smart-children ${smartExpanded && stableActiveItems.length > 0 ? '' : 'is-collapsed'}" data-aq-smart-children="1">
           <div class="aq-smart-children-inner">
             <div class="aq-grp-children">
               <div class="aq-smart-list" data-aq-smart-list="1"></div>
-              <div class="aq-smart-empty-wrap" data-aq-smart-empty="1">
-                <div class="aq-smart-empty-inner">
-                  <div class="aq-grp-item-empty">暂无进行中会话</div>
-                </div>
-              </div>
             </div>
           </div>
         </div>
@@ -5926,7 +6104,6 @@
     const renderGroupBlock = (g, depth) => {
       const items = Array.isArray(g.items) ? g.items : [];
       const childGroups = tree.childrenByParent.get(g.id) || [];
-      const totalCount = tree.totalCountById.get(g.id) ?? items.length;
       const isRenaming = state.groupRenamingId === g.id;
       const isDeleteConfirm = state.groupDeleteConfirmId === g.id;
       const isCreatingChildHere = Boolean(state.groupCreating && state.groupCreateParentId === g.id);
@@ -5952,8 +6129,7 @@
         `
         : `
           <div class="aq-grp-hdr ${isDeleteConfirm ? 'has-confirm' : ''}" data-aq-grp-hdr="${escapeHtml(g.id)}" title="${escapeHtml(g.name)}">
-            <span class="aq-grp-chev ${isExpanded ? 'is-open' : ''}">${SVG_CHEVRON}</span>
-            <span class="aq-grp-folder-ico">${SVG_FOLDER}</span>
+            <span class="aq-grp-folder-ico ${isExpanded ? 'is-open' : ''}">${isExpanded ? SVG_FOLDER_OPEN : SVG_FOLDER}</span>
             <span class="aq-grp-name">${escapeHtml(g.name)}</span>
             <span class="aq-grp-actions">
               ${newChildBtnHtml}
@@ -6013,9 +6189,9 @@
       '<div class="aq-grp-resizer" data-aq-grp-resizer="1" title="上下拖动设置分组最大高度，双击恢复默认"><span class="aq-grp-resizer-badge" data-aq-grp-resizer-badge="1"></span></div>';
     const recentSectionHtml = `
       <div class="aq-grp-recent-sec" data-aq-recent-sec="1">
-        <div class="aq-grp-hdr is-smart" data-aq-recent-hdr="1" title="最近会话（最多 10 条）">
-          <span class="aq-grp-chev ${recentExpanded ? 'is-open' : ''}" data-aq-recent-chev="1">${SVG_CHEVRON}</span>
+        <div class="aq-grp-hdr is-smart" data-aq-recent-hdr="1" title="最近会话（最多 10 条，点击可收起/展开）">
           <span class="aq-grp-name">最近会话</span>
+          <span class="aq-grp-fold-hint" data-aq-recent-fold-hint="1"></span>
         </div>
         <div class="aq-smart-children ${recentExpanded ? '' : 'is-collapsed'}" data-aq-recent-children="1">
           <div class="aq-smart-children-inner">
@@ -6538,13 +6714,17 @@
     if (!convList || !inner) return;
 
     if (state.projScrollEl !== convList) {
-      if (state.projScrollEl && state.onProjScroll) {
-        state.projScrollEl.removeEventListener('scroll', state.onProjScroll);
+      if (state.projScrollEl) {
+        state.projScrollEl.classList.remove('aq-proj-scrolled');
+        if (state.onProjScroll) {
+          state.projScrollEl.removeEventListener('scroll', state.onProjScroll);
+        }
       }
       state.onProjScroll = () => syncProjectSplitCards(document.querySelector('.bg-sidebar'));
       convList.addEventListener('scroll', state.onProjScroll, { passive: true });
       state.projScrollEl = convList;
     }
+    convList.classList.toggle('aq-proj-scrolled', convList.scrollTop > 1);
 
     let pinnedCard = inner.querySelector('[data-aq-proj-card="pinned"]');
     if (pinnedCard && pinnedCard.dataset.aqOwner !== INSTANCE_TOKEN) {
@@ -6731,6 +6911,13 @@
           try {
             window.__aqRequestTurns(cid);
           } catch {}
+        }
+        if (
+          state.pendingNewChatSendAt > 0 &&
+          now - state.pendingNewChatSendAt < 4_000 &&
+          (!meta || isActiveComposerBusy())
+        ) {
+          markConversationSendStarted(cid);
         }
       }
     }
@@ -7273,7 +7460,37 @@
     if (state.groupResizeDrag) cleanupGroupResizeDrag();
     if (state.convDrag) cleanupConversationPointerDrag();
   };
+  const onDocClickCapture = (ev) => {
+    const composerBox = ev.target?.closest?.('#antigravity\\.agentSidePanelInputBox');
+    if (!composerBox) return;
+    const sendBtn = ev.target?.closest?.('[data-testid="send-button"]');
+    if (sendBtn && !sendBtn.disabled && sendBtn.getAttribute('aria-disabled') !== 'true') {
+      markConversationSendStarted(extractCascadeId());
+      return;
+    }
+    if (ev.target?.closest?.('[data-testid="input-cancel-button"]')) {
+      markConversationSendCanceled(extractCascadeId());
+    }
+  };
   const onDocKeyDown = (ev) => {
+    if (
+      ev.key === 'Enter' &&
+      !ev.isComposing &&
+      ev.keyCode !== 229 &&
+      !ev.shiftKey &&
+      !ev.altKey &&
+      !ev.ctrlKey &&
+      !ev.metaKey
+    ) {
+      const editor = ev.target?.closest?.('#antigravity\\.agentSidePanelInputBox [data-lexical-editor="true"]');
+      if (editor && editor.getAttribute('aria-expanded') !== 'true') {
+        const composerBox = document.getElementById('antigravity.agentSidePanelInputBox');
+        const sendBtn = composerBox?.querySelector?.('[data-testid="send-button"]');
+        if (sendBtn && !sendBtn.disabled && sendBtn.getAttribute('aria-disabled') !== 'true') {
+          markConversationSendStarted(extractCascadeId());
+        }
+      }
+    }
     if (ev.key === 'Escape') {
       closeGroupCtxMenu();
       if (state.convDrag?.started) {
@@ -7296,6 +7513,7 @@
   document.addEventListener('visibilitychange', onVisChange);
   document.addEventListener('contextmenu', onDocContextMenuCapture, true);
   document.addEventListener('pointerdown', onDocPointerDown, true);
+  document.addEventListener('click', onDocClickCapture, true);
   document.addEventListener('keydown', onDocKeyDown, true);
 
   state.routeTimer = setInterval(checkRoute, 2000);
@@ -7336,11 +7554,15 @@
     document.removeEventListener('visibilitychange', onVisChange);
     document.removeEventListener('contextmenu', onDocContextMenuCapture, true);
     document.removeEventListener('pointerdown', onDocPointerDown, true);
+    document.removeEventListener('click', onDocClickCapture, true);
     document.removeEventListener('keydown', onDocKeyDown, true);
     cleanupGroupResizeDrag();
     cleanupConversationPointerDrag();
     closeGroupMenu();
     closeGroupCtxMenu();
+    clearPostSendRefreshTimers();
+    if (state.optimisticExpiryTimer) clearTimeout(state.optimisticExpiryTimer);
+    state.optimisticRunningById.clear();
     if (state.renderRaf) cancelAnimationFrame(state.renderRaf);
     if (state.routeTimer) clearInterval(state.routeTimer);
     if (state.trajStatusTimer) clearInterval(state.trajStatusTimer);
@@ -7372,8 +7594,11 @@
     document.getElementById('aq-group-menu')?.remove();
     document.getElementById('aq-grp-ctx-menu')?.remove();
     document.getElementById('aq-conv-drag-ghost')?.remove();
-    if (state.projScrollEl && state.onProjScroll) {
-      state.projScrollEl.removeEventListener('scroll', state.onProjScroll);
+    if (state.projScrollEl) {
+      state.projScrollEl.classList.remove('aq-proj-scrolled');
+      if (state.onProjScroll) {
+        state.projScrollEl.removeEventListener('scroll', state.onProjScroll);
+      }
       state.projScrollEl = null;
       state.onProjScroll = null;
     }

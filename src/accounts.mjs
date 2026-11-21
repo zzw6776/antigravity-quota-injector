@@ -4,7 +4,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { launchAntigravityExecutable } from './platform.mjs';
+import {
+  findRunningAntigravityPids,
+  launchAntigravityExecutable,
+  quitAndWaitAntigravityProcesses,
+} from './platform.mjs';
 
 const KEYCHAIN_SERVICE = 'gemini';
 const KEYCHAIN_ACCOUNT = 'antigravity';
@@ -520,55 +524,8 @@ export function applyAccountSnapshot({
   return target;
 }
 
-function findRunningAntigravityPids(appName = 'Antigravity') {
-  try {
-    const out = execFileSync('pgrep', ['-f', `${appName}.app/Contents/(MacOS|Resources/bin)/`], {
-      timeout: 1500,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    return out
-      .split(/\s+/)
-      .map((s) => Number.parseInt(s, 10))
-      .filter((n) => Number.isFinite(n) && n > 0);
-  } catch {
-    return [];
-  }
-}
-
 export async function quitAndWaitAntigravity({ channel = 'stable', timeoutMs = 8000 } = {}) {
-  const appName = channel === 'insiders' ? 'Antigravity - Insiders' : 'Antigravity';
-  if (process.platform === 'darwin') {
-    try {
-      execFileSync('osascript', ['-e', `tell application "${appName}" to quit`], {
-        timeout: 2500,
-        stdio: 'ignore',
-      });
-    } catch {}
-  }
-
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (findRunningAntigravityPids(appName).length === 0) {
-      return true;
-    }
-    await new Promise((r) => setTimeout(r, 200));
-  }
-
-  // Fallback graceful SIGTERM if osascript quit hung on a dialog
-  for (const pid of findRunningAntigravityPids(appName)) {
-    try {
-      process.kill(pid, 'SIGTERM');
-    } catch {}
-  }
-  const termDeadline = Date.now() + 2500;
-  while (Date.now() < termDeadline) {
-    if (findRunningAntigravityPids(appName).length === 0) {
-      return true;
-    }
-    await new Promise((r) => setTimeout(r, 150));
-  }
-  return findRunningAntigravityPids(appName).length === 0;
+  return quitAndWaitAntigravityProcesses({ channel, timeoutMs });
 }
 
 export function launchAntigravityApp({ channel = 'stable', stateDir = '' } = {}) {
@@ -580,10 +537,9 @@ export function launchAntigravityApp({ channel = 'stable', stateDir = '' } = {})
 }
 
 export async function waitForAntigravityLaunch({ channel = 'stable', timeoutMs = 8000 } = {}) {
-  const appName = channel === 'insiders' ? 'Antigravity - Insiders' : 'Antigravity';
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (findRunningAntigravityPids(appName).length > 0) {
+    if (findRunningAntigravityPids({ channel }).length > 0) {
       return true;
     }
     await new Promise((r) => setTimeout(r, 200));

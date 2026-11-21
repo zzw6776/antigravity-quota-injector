@@ -416,7 +416,8 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
       anyInferredReset = true;
       parts.push(`${winLabel} 已重置`);
     } else {
-      if (frac < 0.005) allAvailable = false;
+      // Exhausted Antigravity quotas often leave <= 1% residual fraction (< 0.015 after % rounding).
+      if (frac < 0.015) allAvailable = false;
       parts.push(`${winLabel} ${formatRemainingPercent(frac)}`);
     }
   }
