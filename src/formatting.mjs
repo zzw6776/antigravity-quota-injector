@@ -434,3 +434,203 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
     label: `Gemini 已用完（${detail}）`,
   };
 }
+
+export function resolveQuotaPoolKey(group) {
+  const name = String(group?.displayName || '').trim().toLowerCase();
+  if (name) return name;
+  const buckets = orderQuotaBuckets(group?.buckets);
+  if (buckets.length > 0) {
+    return `pool:${buckets.map((b) => String(b.bucketId || '').trim().toLowerCase()).filter(Boolean).sort().join('+')}`;
+  }
+  return '';
+}
+
+export function classifyQuotaGroupKeepAlive(group) {
+  const poolKey = resolveQuotaPoolKey(group);
+  if (!poolKey) return null;
+  const buckets = orderQuotaBuckets(group?.buckets);
+  if (buckets.length === 0) return null;
+
+  const { fiveHour, weekly } = extractQuotaBuckets({ buckets });
+  if (fiveHour) {
+    return {
+      poolKey,
+      cadence: '5h',
+      cadenceLabel: '唤醒',
+      targetBucket: fiveHour,
+      guardWeeklyBucket: weekly || null,
+    };
+  }
+  if (weekly) {
+    return {
+      poolKey,
+      cadence: 'weekly',
+      cadenceLabel: '唤醒',
+      targetBucket: weekly,
+      guardWeeklyBucket: null,
+    };
+  }
+  return {
+    poolKey,
+    cadence: 'bucket',
+    cadenceLabel: '唤醒',
+    targetBucket: buckets[0],
+    guardWeeklyBucket: null,
+  };
+}
+
+function parseGroupModelPrefixes(group) {
+  const desc = String(group?.description || '');
+  const m = desc.match(/Models within this group:\s*([^\n]+)/i);
+  if (m && m[1]) {
+    return m[1]
+      .replace(/\.\s*$/, '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  const name = String(group?.displayName || '').trim();
+  return name ? [name] : [];
+}
+
+function scoreKeepAliveModelCost(label, quotaInfo) {
+  let score = 0;
+  const text = String(label || '');
+  const hasQuota =
+    quotaInfo &&
+    (Number.isFinite(Number(quotaInfo.remainingFraction)) || Boolean(quotaInfo.resetTime));
+  if (!hasQuota) score += 200;
+  if (/\bOrchestrator\b/i.test(text)) score += 100;
+
+  if (/\b(flash|lite|mini)\b/i.test(text)) score -= 30;
+  else if (/\bgpt-oss\b/i.test(text)) score -= 20;
+  else if (/\bsonnet\b/i.test(text)) score -= 10;
+  else if (/\bneon\b/i.test(text)) score += 5;
+  else if (/\bopus\b/i.test(text)) score += 25;
+
+  if (/\blow\b/i.test(text)) score += 0;
+  else if (/\bmedium\b/i.test(text)) score += 1;
+  else if (/\bhigh\b/i.test(text)) score += 2;
+  else if (/\bxhigh\b/i.test(text)) score += 3;
+  else score += 4;
+  return score;
+}
+
+export function listModelsForQuotaGroup(group, clientModelConfigs) {
+  const configs = Array.isArray(clientModelConfigs) ? clientModelConfigs : [];
+  if (configs.length === 0) return [];
+  const plan = classifyQuotaGroupKeepAlive(group);
+  const prefixes = parseGroupModelPrefixes(group).map((p) => p.toLowerCase());
+  const groupName = String(group?.displayName || '').trim().toLowerCase();
+  const isArgonPool = /\bargon\b/.test(groupName);
+  const targetResetTs = Date.parse(String(plan?.targetBucket?.resetTime || ''));
+
+  const byId = new Map();
+  const addMatch = (cfg) => {
+    const modelId = String(cfg?.modelOrAlias?.model || cfg?.model || '').trim();
+    const label = String(cfg?.label || '').trim();
+    if (!modelId || !label || byId.has(modelId)) return;
+    byId.set(modelId, {
+      modelId,
+      label,
+      remainingFraction: Number.isFinite(Number(cfg?.quotaInfo?.remainingFraction))
+        ? Number(cfg.quotaInfo.remainingFraction)
+        : null,
+      resetTime: String(cfg?.quotaInfo?.resetTime || '').trim(),
+      score: scoreKeepAliveModelCost(label, cfg?.quotaInfo),
+    });
+  };
+
+  for (const cfg of configs) {
+    const label = String(cfg?.label || '').trim();
+    const low = label.toLowerCase();
+    if (!low) continue;
+    const prefixHit = prefixes.some((p) => low === p || low.startsWith(`${p} (`) || low.startsWith(`${p} `));
+    const argonHit = isArgonPool && /\bargon\b/i.test(label);
+    if (prefixHit || argonHit) {
+      addMatch(cfg);
+    }
+  }
+
+  // Fallback by matching quota bucket resetTime + family when description doesn't enumerate model names
+  if (byId.size === 0 && Number.isFinite(targetResetTs)) {
+    const isGeminiPool = /gemini/.test(groupName) && !isArgonPool;
+    const isThirdPartyPool = /claude|gpt/.test(groupName);
+    for (const cfg of configs) {
+      const label = String(cfg?.label || '').trim();
+      const mResetTs = Date.parse(String(cfg?.quotaInfo?.resetTime || ''));
+      if (!Number.isFinite(mResetTs) || Math.abs(mResetTs - targetResetTs) > 5000) continue;
+      if (isArgonPool && !/\bargon\b/i.test(label)) continue;
+      if (isGeminiPool && (/claude|gpt/i.test(label) || /\bargon\b/i.test(label))) continue;
+      if (isThirdPartyPool && !/claude|gpt/i.test(label)) continue;
+      addMatch(cfg);
+    }
+  }
+
+  return [...byId.values()].sort((a, b) => a.score - b.score || a.label.localeCompare(b.label));
+}
+
+export function pickKeepAliveModelForGroup(group, clientModelConfigs, preferredModelId = '') {
+  const models = listModelsForQuotaGroup(group, clientModelConfigs);
+  if (models.length === 0) return null;
+  const pref = String(preferredModelId || '').trim();
+  if (pref) {
+    const matched = models.find((m) => m.modelId === pref);
+    if (matched) return matched;
+  }
+  return models[0];
+}
+
+export function isQuotaBucketUnstarted(bucket, cadence = '5h', nowMs = Date.now()) {
+  if (!bucket || typeof bucket !== 'object') return false;
+  const frac = Number(bucket.remainingFraction);
+  if (!Number.isFinite(frac) || frac < 0.999999) return false;
+  if (/used\s+some|consumed/i.test(String(bucket.description || ''))) {
+    return false;
+  }
+  const resetTs = Date.parse(String(bucket.resetTime || ''));
+  const windowMs =
+    cadence === '5h'
+      ? 5 * 3600_000
+      : cadence === 'weekly'
+        ? 7 * 24 * 3600_000
+        : 0;
+  if (windowMs > 0 && Number.isFinite(resetTs)) {
+    const remainMs = resetTs - nowMs;
+    // Unstarted buckets float near the full window length (now + 5h or now + 7d).
+    // Once consumed, resetTime locks and counts down below windowMs - 3min.
+    if (remainMs > 0 && remainMs < windowMs - 180_000) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function evaluateQuotaPoolKeepAlive({
+  group,
+  enabled = false,
+  poolState = null,
+  nowMs = Date.now(),
+  cooldownMs = 180_000,
+} = {}) {
+  const plan = classifyQuotaGroupKeepAlive(group);
+  if (!plan) return { eligible: false, reason: 'no_bucket', plan: null };
+  if (!enabled) return { eligible: false, reason: 'disabled', plan };
+  if (poolState?.inFlight) return { eligible: false, reason: 'in_flight', plan };
+  if (poolState?.backoffUntil && nowMs < Number(poolState.backoffUntil)) {
+    return { eligible: false, reason: 'backoff', plan };
+  }
+  if (poolState?.lastTriggeredAt && nowMs - Number(poolState.lastTriggeredAt) < cooldownMs) {
+    return { eligible: false, reason: 'cooldown', plan };
+  }
+  if (
+    plan.guardWeeklyBucket &&
+    Number(plan.guardWeeklyBucket.remainingFraction) < 0.02
+  ) {
+    return { eligible: false, reason: 'weekly_depleted', plan };
+  }
+  if (!isQuotaBucketUnstarted(plan.targetBucket, plan.cadence, nowMs)) {
+    return { eligible: false, reason: 'already_active', plan };
+  }
+  return { eligible: true, reason: 'unstarted', plan };
+}

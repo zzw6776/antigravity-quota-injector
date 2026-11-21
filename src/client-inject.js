@@ -150,6 +150,12 @@
     pendingNewChatSendAt: 0,
     postSendRefreshTimers: [],
     wasComposerBusy: false,
+    clientModelConfigs: [],
+    keepAliveState: { accountId: '', pools: {} },
+    keepAliveClaims: new Map(),
+    keepAliveDeadlineTimer: null,
+    keepAliveRunningPools: new Set(),
+    hiddenKeepAliveCids: new Set(),
     localViewedAtById: Object.create(null),
     sidebarTab: (() => {
       try {
@@ -578,6 +584,46 @@
         font-weight: 600;
         font-size: 11px;
         margin-bottom: 4px;
+      }
+      .aq-q-group-hdr-left,
+      .aq-q-group-hdr-right {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        min-width: 0;
+      }
+      .aq-q-ka-toggle {
+        appearance: none;
+        border: 1px solid rgba(127, 127, 127, 0.25);
+        background: transparent;
+        color: var(--muted-foreground, #71717a);
+        border-radius: 9999px;
+        padding: 1px 7px;
+        font: inherit;
+        font-size: 9.5px;
+        font-weight: 500;
+        line-height: 14px;
+        cursor: pointer;
+        flex-shrink: 0;
+        transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+      }
+      .aq-q-ka-toggle:hover {
+        border-color: rgba(22, 163, 74, 0.38);
+        color: #15803d;
+      }
+      .aq-q-ka-toggle.is-on {
+        border-color: rgba(22, 163, 74, 0.42);
+        background: rgba(22, 163, 74, 0.14);
+        color: #15803d;
+      }
+      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-ka-toggle:hover {
+        border-color: rgba(74, 222, 128, 0.35);
+        color: #4ade80;
+      }
+      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-ka-toggle.is-on {
+        border-color: rgba(74, 222, 128, 0.42);
+        background: rgba(74, 222, 128, 0.16);
+        color: #4ade80;
       }
       .aq-q-active-tag {
         font-size: 10px;
@@ -2227,7 +2273,7 @@
       if (id === 'aq-quota-tooltip') {
         el.addEventListener('click', (ev) => {
           const target = ev.target;
-          if (target?.closest?.('button, a, input, [data-aq-acct-add], [data-aq-acct-switch], [data-aq-acct-del], [data-aq-update-open]')) {
+          if (target?.closest?.('button, a, input, [data-aq-acct-add], [data-aq-acct-switch], [data-aq-acct-del], [data-aq-update-open], [data-aq-ka-toggle]')) {
             return;
           }
           if (String(window.getSelection?.()?.toString() || '').trim()) {
@@ -2869,6 +2915,14 @@
       const blocks = groups.map((g) => {
         const isMatched = activeGroup && g.displayName === activeGroup.displayName;
         const buckets = orderQuotaBuckets(g.buckets);
+        const kaPlan = classifyQuotaGroupKeepAlive(g);
+        const poolKey = kaPlan?.poolKey || '';
+        const poolCfg = poolKey ? state.keepAliveState?.pools?.[poolKey] || null : null;
+        const kaEnabled = Boolean(poolCfg?.enabled);
+        const kaRunning = Boolean(poolKey && (state.keepAliveRunningPools.has(poolKey) || poolCfg?.inFlight));
+        const pickedModel = kaPlan
+          ? pickKeepAliveModelForGroup(g, state.clientModelConfigs, poolCfg?.preferredModel || '')
+          : null;
         const bucketHtml = buckets
           .map((b) => {
             const pct = formatRemainingPercent(b.remainingFraction);
@@ -2890,11 +2944,33 @@
           })
           .join('');
 
+        let kaTitle = '点击开启：周期重置满额后静默发一次轻请求开启倒计时';
+        if (kaEnabled && kaPlan) {
+          const modelNote = pickedModel?.label ? ` · ${pickedModel.label}` : '';
+          const stateNote = kaRunning
+            ? '唤醒中…'
+            : poolCfg?.lastError
+              ? poolCfg.lastError
+              : !isQuotaBucketUnstarted(kaPlan.targetBucket, kaPlan.cadence, Date.now())
+                ? kaPlan.cadence === 'weekly'
+                  ? '本周计时中'
+                  : '计时中'
+                : '待触发';
+          kaTitle = `已开启自动唤醒（${stateNote}${modelNote}），点击关闭`;
+        }
+
+        const kaToggleHtml = kaPlan
+          ? `<button type="button" class="aq-q-ka-toggle ${kaEnabled ? 'is-on' : ''}" data-aq-ka-toggle="${escapeHtml(poolKey)}" aria-pressed="${kaEnabled ? 'true' : 'false'}" title="${escapeHtml(kaTitle)}">${escapeHtml(kaPlan.cadenceLabel)}</button>`
+          : '';
+
         return `
           <div class="aq-q-group">
             <div class="aq-q-group-hdr">
-              <span>${escapeHtml(g.displayName || '模型分组')}</span>
-              ${isMatched ? '<span class="aq-q-active-tag">当前</span>' : ''}
+              <span class="aq-q-group-hdr-left">
+                <span>${escapeHtml(g.displayName || '模型分组')}</span>
+                ${isMatched ? '<span class="aq-q-active-tag">当前</span>' : ''}
+              </span>
+              <span class="aq-q-group-hdr-right">${kaToggleHtml}</span>
             </div>
             <div class="aq-tt-grid">${bucketHtml || '<div class="aq-tt-sub">暂无配额</div>'}</div>
           </div>
@@ -2993,6 +3069,253 @@
     try {
       window.__aqUpdateAction(JSON.stringify(payload || {}));
     } catch {}
+  }
+
+  function sendKeepAliveAction(payload) {
+    if (typeof window.__aqKeepAliveAction !== 'function') return;
+    try {
+      window.__aqKeepAliveAction(
+        JSON.stringify({
+          ...(payload || {}),
+          accountEmail: state.userProfile?.email || '',
+        })
+      );
+    } catch {}
+  }
+
+  function claimKeepAliveFromDaemon({ poolKey, manual = false }) {
+    if (typeof window.__aqKeepAliveAction !== 'function') {
+      return Promise.resolve({ allowed: false, reason: 'unavailable' });
+    }
+    const requestId = `ka-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        state.keepAliveClaims.delete(requestId);
+        resolve({ allowed: false, reason: 'timeout' });
+      }, 5000);
+      state.keepAliveClaims.set(requestId, (res) => {
+        clearTimeout(timer);
+        resolve(res || { allowed: false, reason: 'empty' });
+      });
+      sendKeepAliveAction({ type: 'claim', requestId, poolKey, manual });
+    });
+  }
+
+  function collectEnabledKeepAliveResetTimes(nowMs = Date.now()) {
+    const groups = state.quotaData?.groups;
+    if (!Array.isArray(groups) || groups.length === 0) return [];
+    const results = [];
+    for (let i = 0; i < groups.length; i++) {
+      const g = groups[i];
+      const plan = classifyQuotaGroupKeepAlive(g);
+      if (!plan) continue;
+      const poolCfg = state.keepAliveState?.pools?.[plan.poolKey];
+      if (!poolCfg?.enabled) continue;
+      if (poolCfg.backoffUntil && nowMs < Number(poolCfg.backoffUntil)) continue;
+      if (poolCfg.lastTriggeredAt && nowMs - Number(poolCfg.lastTriggeredAt) < 180_000) continue;
+      if (plan.guardWeeklyBucket && Number(plan.guardWeeklyBucket.remainingFraction) < 0.02) continue;
+
+      const resetTs = Date.parse(String(plan.targetBucket?.resetTime || ''));
+      if (Number.isFinite(resetTs)) {
+        results.push(resetTs);
+      }
+    }
+    return results;
+  }
+
+  function hasExpiredEnabledKeepAlive(nowMs = Date.now()) {
+    const resetTimes = collectEnabledKeepAliveResetTimes(nowMs);
+    for (let i = 0; i < resetTimes.length; i++) {
+      if (nowMs >= resetTimes[i] + 3000) return true;
+    }
+    return false;
+  }
+
+  function scheduleKeepAliveDeadlineTimer() {
+    if (state.keepAliveDeadlineTimer) {
+      clearTimeout(state.keepAliveDeadlineTimer);
+      state.keepAliveDeadlineTimer = null;
+    }
+    const nowMs = Date.now();
+    const resetTimes = collectEnabledKeepAliveResetTimes(nowMs);
+    let earliestResetTs = 0;
+    for (let i = 0; i < resetTimes.length; i++) {
+      const resetTs = resetTimes[i];
+      if (resetTs > nowMs && (!earliestResetTs || resetTs < earliestResetTs)) {
+        earliestResetTs = resetTs;
+      }
+    }
+
+    if (earliestResetTs > nowMs) {
+      // Exact reset deadline timer (+3s safety margin) so we fire promptly without relying on polling intervals.
+      const delayMs = Math.max(1000, Math.min(earliestResetTs - nowMs + 3000, 2_147_483_647));
+      state.keepAliveDeadlineTimer = setTimeout(() => {
+        state.keepAliveDeadlineTimer = null;
+        void fetchQuota({ force: true, immediate: true, includeUserStatus: true });
+      }, delayMs);
+    }
+  }
+
+  async function runKeepAliveForGroup(group, { manual = false } = {}) {
+    const plan = classifyQuotaGroupKeepAlive(group);
+    if (!plan) return;
+    const poolKey = plan.poolKey;
+    if (state.keepAliveRunningPools.has(poolKey)) return;
+
+    const poolCfg = state.keepAliveState?.pools?.[poolKey] || {};
+    if (!manual && !poolCfg.enabled) return;
+
+    let model = pickKeepAliveModelForGroup(group, state.clientModelConfigs, poolCfg.preferredModel || '');
+    if (!model) {
+      sendKeepAliveAction({
+        type: 'complete',
+        poolKey,
+        ok: false,
+        error: '未匹配到该分组的模型',
+      });
+      return;
+    }
+
+    const claim = await claimKeepAliveFromDaemon({ poolKey, manual });
+    if (!claim?.allowed) return;
+
+    const runId = String(claim.runId || '');
+    const cascadeId =
+      typeof crypto?.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now().toString(16)}-0000-4000-8000-${Math.random().toString(16).slice(2).padEnd(12, '0').slice(0, 12)}`;
+    const cidLower = cascadeId.toLowerCase();
+    state.keepAliveRunningPools.add(poolKey);
+    state.hiddenKeepAliveCids.add(cidLower);
+    refreshQuotaTooltipIfVisible();
+
+    const csrf = window.__APP_CONFIG__?.csrfToken || '';
+    const headers = {
+      'Content-Type': 'application/json',
+      ...(csrf ? { 'x-codeium-csrf-token': csrf } : {}),
+    };
+
+    let ok = false;
+    let errMsg = '';
+    try {
+      const startRes = await fetch('/exa.language_server_pb.LanguageServerService/StartCascade', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          cascadeId,
+          source: 'CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT',
+        }),
+      });
+      if (!startRes.ok) {
+        throw new Error(`创建会话失败 (${startRes.status})`);
+      }
+
+      const sendRes = await fetch('/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          cascadeId,
+          items: [{ text: 'hi' }],
+          cascadeConfig: {
+            plannerConfig: {
+              planModel: model.modelId,
+              toolConfig: {
+                forceDisableToolCalling: true,
+                autoInteractionBehavior: 'AUTO_INTERACTION_BEHAVIOR_DENY_ALL',
+              },
+            },
+            executorConfig: {
+              useCoreDirect: true,
+            },
+          },
+        }),
+      });
+      if (!sendRes.ok) {
+        throw new Error(`发送失败 (${sendRes.status})`);
+      }
+
+      const deadline = Date.now() + 12_000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 1200));
+        try {
+          const checkRes = await fetch('/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories', {
+            method: 'POST',
+            headers,
+            body: '{}',
+          });
+          if (checkRes.ok) {
+            const checkJson = await checkRes.json().catch(() => null);
+            const entry = checkJson?.trajectorySummaries?.[cascadeId];
+            if (entry && entry.status && entry.status !== 'CASCADE_RUN_STATUS_RUNNING' && entry.status !== 'CASCADE_RUN_STATUS_BUSY') {
+              break;
+            }
+          }
+        } catch {}
+      }
+      try {
+        await fetch('/exa.language_server_pb.LanguageServerService/CancelCascadeInvocation', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ cascadeId }),
+        });
+      } catch {}
+      ok = true;
+    } catch (err) {
+      errMsg = String(err?.message || '唤醒失败');
+    } finally {
+      try {
+        await fetch('/exa.language_server_pb.LanguageServerService/DeleteCascadeTrajectory', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ cascadeId }),
+        });
+      } catch {}
+      state.keepAliveRunningPools.delete(poolKey);
+      sendKeepAliveAction({
+        type: 'complete',
+        poolKey,
+        runId,
+        ok,
+        modelLabel: model.label,
+        error: errMsg,
+      });
+      setTimeout(() => {
+        state.hiddenKeepAliveCids.delete(cidLower);
+      }, 30_000);
+      await fetchQuota({ force: true, immediate: true, includeUserStatus: true });
+      refreshQuotaTooltipIfVisible();
+    }
+  }
+
+  async function maybeRunKeepAlives() {
+    const groups = state.quotaData?.groups;
+    if (!Array.isArray(groups) || groups.length === 0) {
+      scheduleKeepAliveDeadlineTimer();
+      return;
+    }
+    if (!state.userProfile?.email) return;
+    if (state.clientModelConfigs.length === 0) return;
+
+    const nowMs = Date.now();
+    for (let i = 0; i < groups.length; i++) {
+      const g = groups[i];
+      const plan = classifyQuotaGroupKeepAlive(g);
+      if (!plan) continue;
+      const poolCfg = state.keepAliveState?.pools?.[plan.poolKey];
+      const evalRes = evaluateQuotaPoolKeepAlive({
+        group: g,
+        enabled: Boolean(poolCfg?.enabled),
+        poolState: {
+          ...poolCfg,
+          inFlight: Boolean(poolCfg?.inFlight || state.keepAliveRunningPools.has(plan.poolKey)),
+        },
+        nowMs,
+      });
+      if (evalRes.eligible) {
+        await runKeepAliveForGroup(g, { manual: false });
+      }
+    }
+    scheduleKeepAliveDeadlineTimer();
   }
 
   function formatSnapshotTimeLabel(isoStr) {
@@ -3291,6 +3614,32 @@
         sendAccountAction({ type: 'delete', id });
       });
     }
+    const kaToggleBtns = tt.querySelectorAll('[data-aq-ka-toggle]');
+    for (let i = 0; i < kaToggleBtns.length; i++) {
+      kaToggleBtns[i].addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const poolKey = kaToggleBtns[i].getAttribute('data-aq-ka-toggle') || '';
+        if (!poolKey) return;
+        state.quotaTooltipPinned = true;
+        const prev = Boolean(state.keepAliveState?.pools?.[poolKey]?.enabled);
+        const nextEnabled = !prev;
+        if (!state.keepAliveState.pools) state.keepAliveState.pools = {};
+        state.keepAliveState.pools[poolKey] = {
+          ...(state.keepAliveState.pools[poolKey] || {}),
+          enabled: nextEnabled,
+          lastError: nextEnabled ? '' : state.keepAliveState.pools[poolKey]?.lastError || '',
+          backoffUntil: nextEnabled ? 0 : state.keepAliveState.pools[poolKey]?.backoffUntil || 0,
+        };
+        sendKeepAliveAction({ type: 'toggle', poolKey, enabled: nextEnabled });
+        refreshQuotaTooltipIfVisible();
+        if (nextEnabled) {
+          void fetchQuota({ force: true, immediate: true, includeUserStatus: true });
+        } else {
+          scheduleKeepAliveDeadlineTimer();
+        }
+      });
+    }
     const openUpdateBtn = tt.querySelector('[data-aq-update-open]');
     if (openUpdateBtn) {
       openUpdateBtn.addEventListener('click', (ev) => {
@@ -3506,7 +3855,10 @@
         ...(csrf ? { 'x-codeium-csrf-token': csrf } : {}),
       };
       const needUserStatus =
-        !state.userProfile || includeUserStatus || now - state.userStatusFetchedAt >= 300_000;
+        !state.userProfile ||
+        state.clientModelConfigs.length === 0 ||
+        includeUserStatus ||
+        now - state.userStatusFetchedAt >= 300_000;
       const quotaPromise = fetch('/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary', {
         method: 'POST',
         headers,
@@ -3524,15 +3876,22 @@
       if (userRes && userRes.ok) {
         const uJson = await userRes.json().catch(() => null);
         const us = uJson?.userStatus || uJson?.response?.userStatus || uJson;
+        if (Array.isArray(us?.cascadeModelConfigData?.clientModelConfigs)) {
+          state.clientModelConfigs = us.cascadeModelConfigData.clientModelConfigs;
+        }
         const email = String(us?.email || '').trim();
         if (email) {
           state.userStatusFetchedAt = Date.now();
           const planName = resolveUserPlanLabel(us);
+          const profileChanged = !state.userProfile || state.userProfile.email?.toLowerCase() !== email.toLowerCase();
           state.userProfile = {
             email,
             name: String(us?.name || '').trim(),
             planName,
           };
+          if (profileChanged) {
+            sendKeepAliveAction({ type: 'get' });
+          }
           const saveSig = `${email.toLowerCase()}|${planName}`;
           if (state.accountsMetaLoaded && state.accountsSupported && state.autoSavedSignature !== saveSig) {
             state.autoSavedSignature = saveSig;
@@ -3552,6 +3911,7 @@
         if (force) state.quotaForceFetchedAt = doneAt;
         state.quotaError = '';
         syncCurrentAccountQuotaSnapshot();
+        void maybeRunKeepAlives();
       }
     } catch (err) {
       state.quotaError = String(err?.message || '获取失败');
@@ -4435,6 +4795,7 @@
     const activeItems = [];
     const recentCandidates = [];
     for (const cid of allPrimaryCids) {
+      if (state.hiddenKeepAliveCids.has(cid)) continue;
       const meta = state.trajMetaById[cid] || null;
       if (meta?.archived && !(cid in domStatus)) continue;
 
@@ -4537,6 +4898,7 @@
       for (const [cid, entry] of Object.entries(map)) {
         if (!/^[0-9a-f-]{36}$/i.test(cid) || !entry || typeof entry !== 'object') continue;
         const key = cid.toLowerCase();
+        if (state.hiddenKeepAliveCids.has(key)) continue;
         const title = String(entry.annotations?.title || entry.summary || '')
           .replace(/\s+/g, ' ')
           .trim();
@@ -5947,6 +6309,7 @@
         const it = recentItems[i];
         const cid = String(it.cascadeId || '');
         const key = cid.toLowerCase();
+        if (state.hiddenKeepAliveCids.has(key)) continue;
         if (!key) continue;
         desiredRecentKeys.add(key);
         const isActive = Boolean(activeCid && key === activeCid);
@@ -7028,6 +7391,28 @@
     } catch {}
   };
 
+  window.__aqRenderKeepAlive = function (payload) {
+    try {
+      state.keepAliveState =
+        payload && typeof payload === 'object'
+          ? { accountId: String(payload.accountId || ''), pools: payload.pools || {} }
+          : { accountId: '', pools: {} };
+      scheduleKeepAliveDeadlineTimer();
+      refreshQuotaTooltipIfVisible();
+    } catch {}
+  };
+
+  window.__aqResolveKeepAliveClaim = function (payload) {
+    try {
+      const reqId = String(payload?.requestId || '');
+      const resolver = state.keepAliveClaims.get(reqId);
+      if (resolver) {
+        state.keepAliveClaims.delete(reqId);
+        resolver(payload);
+      }
+    } catch {}
+  };
+
   window.__aqRenderGroups = function (payload) {
     try {
       state.groupsLoaded = true;
@@ -7523,12 +7908,14 @@
     }
   }, TRAJ_STATUS_POLL_MS);
   state.quotaTimer = setInterval(() => {
+    const now = Date.now();
     if (!document.hidden) {
-      const now = Date.now();
       if (hasExpiredQuotaBucket(now) || now - state.quotaForceFetchedAt >= 120_000) {
         void fetchQuota({ force: true });
       }
       void refreshTrajectoryMetadata(false);
+    } else if (hasExpiredEnabledKeepAlive(now)) {
+      void fetchQuota({ force: true, immediate: true, includeUserStatus: true });
     }
   }, 60_000);
 
@@ -7562,7 +7949,11 @@
     closeGroupCtxMenu();
     clearPostSendRefreshTimers();
     if (state.optimisticExpiryTimer) clearTimeout(state.optimisticExpiryTimer);
+    if (state.keepAliveDeadlineTimer) clearTimeout(state.keepAliveDeadlineTimer);
     state.optimisticRunningById.clear();
+    state.keepAliveClaims.clear();
+    state.keepAliveRunningPools.clear();
+    state.hiddenKeepAliveCids.clear();
     if (state.renderRaf) cancelAnimationFrame(state.renderRaf);
     if (state.routeTimer) clearInterval(state.routeTimer);
     if (state.trajStatusTimer) clearInterval(state.trajStatusTimer);
@@ -7617,6 +8008,8 @@
     delete window.__aqGetWatchedCascadeId;
     delete window.__aqRenderAccounts;
     delete window.__aqRenderUpdate;
+    delete window.__aqRenderKeepAlive;
+    delete window.__aqResolveKeepAliveClaim;
     delete window.__aqRenderGroups;
     delete window.__aqHydrated;
     delete window.__aq_version;

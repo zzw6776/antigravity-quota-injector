@@ -32,6 +32,7 @@ import {
   isAntigravityProcessRunning,
   stopDaemonPid,
 } from './platform.mjs';
+import { createKeepAliveManager } from './keepalive.mjs';
 import {
   getDbSignature,
   parseConversationTurns,
@@ -316,6 +317,7 @@ export async function runDaemon({
   const followController = followApp
     ? createFollowAppController({ startupGraceMs, exitConfirmTicks })
     : null;
+  const keepAliveManager = createKeepAliveManager({ stateDir: paths.stateDir });
   const attached = new Map(); // targetId -> session state
   const turnsCache = new Map(); // dbPath -> { sig, payload }
   let stopping = false;
@@ -437,6 +439,91 @@ export async function runDaemon({
     const store = extra.store || readConversationGroupsStore(paths.groupsFile);
     for (const s of attached.values()) {
       await pushGroupsToSession(s, { ...extra, store });
+    }
+  };
+
+  const pushKeepAliveToSession = async (session, accountEmail = '') => {
+    if (!session?.client?.isOpen() || !session.hostConfirmed) return;
+    const email = accountEmail || session.activeEmail || '';
+    const payload = keepAliveManager.getState(email);
+    try {
+      await session.client.send('Runtime.evaluate', {
+        expression: `window.__aqRenderKeepAlive && window.__aqRenderKeepAlive(${JSON.stringify(payload)})`,
+        returnByValue: false,
+      });
+    } catch {}
+  };
+
+  const pushKeepAliveToAllSessions = async (accountEmail = '') => {
+    for (const s of attached.values()) {
+      await pushKeepAliveToSession(s, accountEmail);
+    }
+  };
+
+  const handleKeepAliveAction = async (session, rawPayload) => {
+    let msg;
+    try {
+      msg = JSON.parse(String(rawPayload || '{}'));
+    } catch {
+      return;
+    }
+    const type = String(msg?.type || '');
+    const accountEmail = String(msg?.accountEmail || session?.activeEmail || '').trim();
+    if (accountEmail && session) {
+      session.activeEmail = accountEmail;
+    }
+    if (type === 'get') {
+      await pushKeepAliveToSession(session, accountEmail);
+      return;
+    }
+    if (type === 'toggle') {
+      keepAliveManager.setPoolEnabled({
+        accountEmail,
+        poolKey: msg?.poolKey,
+        enabled: Boolean(msg?.enabled),
+      });
+      await pushKeepAliveToAllSessions(accountEmail);
+      return;
+    }
+    if (type === 'set-model') {
+      keepAliveManager.setPoolModel({
+        accountEmail,
+        poolKey: msg?.poolKey,
+        modelId: msg?.modelId,
+      });
+      await pushKeepAliveToAllSessions(accountEmail);
+      return;
+    }
+    if (type === 'claim') {
+      const requestId = String(msg?.requestId || '');
+      const res = keepAliveManager.claimTrigger({
+        accountEmail,
+        poolKey: msg?.poolKey,
+        manual: Boolean(msg?.manual),
+      });
+      if (res.allowed) {
+        await pushKeepAliveToAllSessions(accountEmail);
+      }
+      if (session?.client?.isOpen() && session.hostConfirmed) {
+        try {
+          await session.client.send('Runtime.evaluate', {
+            expression: `window.__aqResolveKeepAliveClaim && window.__aqResolveKeepAliveClaim(${JSON.stringify({ requestId, ...res })})`,
+            returnByValue: false,
+          });
+        } catch {}
+      }
+      return;
+    }
+    if (type === 'complete') {
+      keepAliveManager.completeTrigger({
+        accountEmail,
+        poolKey: msg?.poolKey,
+        runId: msg?.runId,
+        ok: Boolean(msg?.ok),
+        modelLabel: msg?.modelLabel,
+        error: msg?.error,
+      });
+      await pushKeepAliveToAllSessions(accountEmail);
     }
   };
 
@@ -759,6 +846,7 @@ export async function runDaemon({
     await client.send('Runtime.addBinding', { name: '__aqAccountAction' });
     await client.send('Runtime.addBinding', { name: '__aqUpdateAction' });
     await client.send('Runtime.addBinding', { name: '__aqGroupAction' });
+    await client.send('Runtime.addBinding', { name: '__aqKeepAliveAction' });
 
     client.onBinding((params) => {
       if (params?.name === '__aqRequestTurns') {
@@ -774,6 +862,8 @@ export async function runDaemon({
         void handleUpdateAction(params.payload);
       } else if (params?.name === '__aqGroupAction') {
         void handleGroupAction(session, params.payload);
+      } else if (params?.name === '__aqKeepAliveAction') {
+        void handleKeepAliveAction(session, params.payload);
       }
     });
 
@@ -788,6 +878,7 @@ export async function runDaemon({
     await syncTurnsForSession(session, true);
     await pushAccountsToSession(session);
     await pushGroupsToSession(session);
+    await pushKeepAliveToSession(session);
     await pushUpdateToSession(session);
     await session.client.send('Runtime.evaluate', {
       expression: 'window.__aqHydrated = true;',
