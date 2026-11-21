@@ -23,6 +23,23 @@ export function formatDurationMs(value) {
   })}s`;
 }
 
+/**
+ * Format end-to-end turn elapsed duration cleanly (seconds under 1m, min/sec above 1m).
+ */
+export function formatElapsedDuration(value) {
+  const ms = Number(value);
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  if (ms < 60_000) return formatDurationMs(ms);
+  const totalSec = Math.round(ms / 1_000);
+  const hours = Math.floor(totalSec / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const secs = totalSec % 60;
+  if (hours > 0) {
+    return `${hours}小时${mins > 0 ? `${mins}分` : ''}${secs > 0 ? `${secs}秒` : ''}`;
+  }
+  return `${mins}分${secs > 0 ? `${secs}秒` : ''}`;
+}
+
 export function formatRate(value) {
   const num = Number(value);
   if (!Number.isFinite(num) || num <= 0) return null;
@@ -118,13 +135,16 @@ export function formatTurnSummary(turn) {
   const cacheHit = formatCacheHitRate(turn.cachedInputTokens, turn.inputTokens);
   const firstToken = formatDurationMs(turn.firstTokenLatencyMs);
   const speed = formatRate(turn.outputSpeed);
+  const elapsedMs =
+    Number(turn.wallDurationMs) > 0 ? Number(turn.wallDurationMs) : Number(turn.totalDurationMs);
+  const elapsed = formatElapsedDuration(elapsedMs);
   const cost = turn.cost;
   const priceText = cost?.available ? `价格 ${formatCny(cost.totalCny)}` : '价格暂不可算';
 
   return [
-    `本轮 Token ${formatTokenCount(turn.totalTokens)}`,
+    ...(elapsed ? [`本轮耗时 ${elapsed}`] : []),
+    `Token ${formatTokenCount(turn.totalTokens)}`,
     `缓存命中率 ${cacheHit}`,
-    `累计 ${formatTokenCount(turn.cumulativeTotalTokens)}`,
     ...(firstToken ? [`首字 ${firstToken}`] : []),
     ...(speed ? [`速率 ${speed}`] : []),
     priceText,
@@ -457,60 +477,36 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
     }
   }
 
-  const formatCountdownWithClock = (iso, ts) => {
+  const formatCountdownOnly = (iso, ts) => {
     if (!iso || !Number.isFinite(ts)) return '';
     const diffMs = ts - nowMs;
-    if (diffMs <= 0) return '即将可用';
-    const raw = formatResetCountdown(iso, nowMs, { includeDate: false });
-    const m = raw.match(/^(.+?)\s+(\([^)]+\))$/);
-    return m ? `${m[1]}后可用 ${m[2]}` : `${raw}后可用`;
-  };
-
-  const formatResetShort = (iso, ts) => {
-    if (!iso || !Number.isFinite(ts)) return '';
-    const diffMs = ts - nowMs;
-    if (diffMs <= 0) return '即将重置';
+    if (diffMs <= 0) return '<1分钟';
     const raw = formatResetCountdown(iso, nowMs, { includeDate: false });
     const m = raw.match(/^(.+?)\s+\([^)]+\)$/);
-    return `${m ? m[1] : raw}后重置`;
+    return m ? m[1] : raw;
   };
+
+  const formatBucketPct = (info) =>
+    info ? formatRemainingPercent(info.expired ? 1 : info.frac) : '';
+  const quotaParts = [
+    formatBucketPct(fiveHourInfo),
+    formatBucketPct(weeklyInfo),
+    ...(fiveHourInfo || weeklyInfo ? [] : parts),
+  ].filter(Boolean);
 
   const detail = parts.join(' / ');
   if (allAvailable) {
+    const countdownTarget =
+      [fiveHourInfo, weeklyInfo].find(
+        (info) => info && !info.expired && info.frac < 0.995 && info.resetTs && info.resetTs > nowMs
+      ) || null;
     const primaryInfo = fiveHourInfo || weeklyInfo || null;
-    const nextResetAt = primaryInfo && !primaryInfo.expired ? primaryInfo.resetTs : null;
-    let countdownText = 'Gemini 可用';
-    if (fiveHourInfo) {
-      if (fiveHourInfo.expired) {
-        const weeklyTail =
-          weeklyInfo && !weeklyInfo.expired ? ` · 周 ${formatRemainingPercent(weeklyInfo.frac)}` : '';
-        countdownText = `Gemini 已重置${weeklyTail}`;
-      } else {
-        const pct = formatRemainingPercent(fiveHourInfo.frac);
-        const resetTxt =
-          fiveHourInfo.frac < 0.995 && fiveHourInfo.resetTs && fiveHourInfo.resetTs > nowMs
-            ? formatResetShort(fiveHourInfo.resetIso, fiveHourInfo.resetTs)
-            : '';
-        if (resetTxt) {
-          countdownText = `Gemini ${pct} · ${resetTxt}`;
-        } else if (weeklyInfo && !weeklyInfo.expired && weeklyInfo.frac < 0.995) {
-          countdownText = `Gemini ${pct} · 周 ${formatRemainingPercent(weeklyInfo.frac)}`;
-        } else {
-          countdownText = `Gemini ${pct} · 可用`;
-        }
-      }
-    } else if (weeklyInfo) {
-      if (weeklyInfo.expired) {
-        countdownText = 'Gemini 已重置';
-      } else {
-        const pct = formatRemainingPercent(weeklyInfo.frac);
-        const resetTxt =
-          weeklyInfo.frac < 0.995 && weeklyInfo.resetTs && weeklyInfo.resetTs > nowMs
-            ? formatResetShort(weeklyInfo.resetIso, weeklyInfo.resetTs)
-            : '';
-        countdownText = resetTxt ? `Gemini 周 ${pct} · ${resetTxt}` : `Gemini 周 ${pct} · 可用`;
-      }
-    }
+    const nextResetAt =
+      countdownTarget?.resetTs || (primaryInfo && !primaryInfo.expired ? primaryInfo.resetTs : null);
+    const timeText = countdownTarget
+      ? formatCountdownOnly(countdownTarget.resetIso, countdownTarget.resetTs)
+      : '';
+    const countdownText = [...quotaParts, timeText].filter(Boolean).join(' · ') || '100%';
 
     return {
       state: 'available',
@@ -522,9 +518,10 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
   }
 
   const nextAvailableAt = latestDepletedResetTs > 0 ? latestDepletedResetTs : null;
-  const countdownText = latestDepletedResetIso
-    ? formatCountdownWithClock(latestDepletedResetIso, latestDepletedResetTs)
-    : 'Gemini 已用完';
+  const depletedTimeText = latestDepletedResetIso
+    ? formatCountdownOnly(latestDepletedResetIso, latestDepletedResetTs)
+    : '';
+  const countdownText = [...quotaParts, depletedTimeText].filter(Boolean).join(' · ') || '0%';
   return {
     state: 'depleted',
     label: `Gemini 已用完（${detail}）`,

@@ -191,7 +191,18 @@ test('parseConversationTurns extracts tool call names, durations, and visible re
   const plannerPayload = (text) =>
     fieldBytes(20, fieldBytes(1, Buffer.from(text, 'utf8')));
 
-  db.prepare('INSERT INTO steps (idx, step_type, status) VALUES (?, ?, ?)').run(0, 14, 3);
+  const stepTsMeta = (startSec, endSec = startSec) =>
+    Buffer.concat([
+      fieldBytes(1, tsBlob(startSec, 0)),
+      fieldBytes(8, tsBlob(endSec, 0)),
+    ]);
+
+  db.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (?, ?, ?, ?)').run(
+    0,
+    14,
+    3,
+    stepTsMeta(1795000100)
+  );
   db.prepare('INSERT INTO steps (idx, step_type, status) VALUES (?, ?, ?)').run(1, 15, 3);
   db.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (?, ?, ?, ?)').run(
     2,
@@ -205,10 +216,11 @@ test('parseConversationTurns extracts tool call names, durations, and visible re
     3,
     toolMeta('read_file', 100, 101)
   );
-  db.prepare('INSERT INTO steps (idx, step_type, status, step_payload) VALUES (?, ?, ?, ?)').run(
+  db.prepare('INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)').run(
     4,
     15,
     3,
+    stepTsMeta(1795000150, 1795000174),
     plannerPayload('完成回复')
   );
 
@@ -253,6 +265,7 @@ test('parseConversationTurns extracts tool call names, durations, and visible re
   assert.equal(details[0].hasVisibleText, false);
   assert.equal(details[1].hasVisibleText, true);
   assert.equal(details[1].followsToolResult, true);
+  assert.equal(res.turns[0].wallDurationMs, 74_000);
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });

@@ -10,6 +10,7 @@ import {
   formatCny,
   formatContextCompact,
   formatContextK,
+  formatElapsedDuration,
   formatPricingSourceNote,
   formatResetCountdown,
   formatTurnSummary,
@@ -56,16 +57,30 @@ test('formatTurnSummary formats codex-style line with CNY price and fallback sta
     cumulativeTotalTokens: 139749000,
     firstTokenLatencyMs: 4400,
     outputSpeed: 61.7,
+    wallDurationMs: 74200,
     completed: true,
     cost: { available: true, totalCny: 0.8524 },
   });
-  assert.match(pricedSummary, /本轮 Token 0\.943M/);
-  assert.match(pricedSummary, /缓存命中率 99\.5%/);
-  assert.match(pricedSummary, /累计 139\.749M/);
+  assert.match(pricedSummary, /^本轮耗时 1分14秒 · Token 0\.943M · 缓存命中率 99\.5%/);
+  assert.doesNotMatch(pricedSummary, /累计/);
   assert.match(pricedSummary, /首字 4\.4s/);
   assert.match(pricedSummary, /速率 61\.7 tok\/s/);
   assert.match(pricedSummary, /价格 ¥0\.8524/);
   assert.doesNotMatch(pricedSummary, /延时/);
+
+  const fallbackDurSummary = formatTurnSummary({
+    totalTokens: 10000,
+    inputTokens: 9000,
+    cachedInputTokens: 0,
+    cumulativeTotalTokens: 10000,
+    totalDurationMs: 26800,
+    completed: true,
+    cost: { available: false },
+  });
+  assert.match(fallbackDurSummary, /^本轮耗时 26\.8s · Token /);
+  assert.equal(formatElapsedDuration(5400), '5.4s');
+  assert.equal(formatElapsedDuration(120_000), '2分');
+  assert.equal(formatElapsedDuration(3_725_000), '1小时2分5秒');
 
   const unpricedSummary = formatTurnSummary({
     totalTokens: 10000,
@@ -325,7 +340,7 @@ test('resolveGeminiQuotaAvailability identifies available, depleted, inferred-re
   assert.equal(okRes.state, 'available');
   assert.match(okRes.label, /5h 83%/);
   assert.match(okRes.label, /周 63%/);
-  assert.match(okRes.countdownText, /Gemini 83% · 3小时后重置/);
+  assert.equal(okRes.countdownText, '83% · 63% · 3小时');
 
   // Depleted 5h before resetTime
   const depleted5h = resolveGeminiQuotaAvailability(
@@ -344,9 +359,9 @@ test('resolveGeminiQuotaAvailability identifies available, depleted, inferred-re
   );
   assert.equal(depleted5h.state, 'depleted');
   assert.equal(depleted5h.nextAvailableAt, Date.parse('2026-11-20T08:00:00Z'));
-  assert.match(depleted5h.countdownText, /2小时后可用/);
+  assert.equal(depleted5h.countdownText, '0% · 50% · 2小时');
 
-  // Expired 5h resetTime on cached non-active account flips back to available
+  // Expired 5h resetTime on cached non-active account flips back to available (100%) and falls back to weekly reset countdown
   const recovered5h = resolveGeminiQuotaAvailability(
     {
       groups: [
@@ -364,7 +379,24 @@ test('resolveGeminiQuotaAvailability identifies available, depleted, inferred-re
   assert.equal(recovered5h.state, 'available');
   assert.match(recovered5h.label, /预计可用/);
   assert.match(recovered5h.label, /5h 已重置/);
-  assert.equal(recovered5h.countdownText, 'Gemini 已重置 · 周 50%');
+  assert.equal(recovered5h.countdownText, '100% · 50% · 4天20小时');
+
+  // Weekly-only snapshot keeps consistent compact percentage · countdown format
+  const weeklyOnly = resolveGeminiQuotaAvailability(
+    {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          buckets: [
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.99, resetTime: '2026-11-26T16:00:00Z' },
+          ],
+        },
+      ],
+    },
+    { isCurrent: false, nowMs }
+  );
+  assert.equal(weeklyOnly.state, 'available');
+  assert.equal(weeklyOnly.countdownText, '99% · 6天10小时');
 
   // Weekly still 0% before reset even if 5h reset expired -> still depleted
   const depletedWeekly = resolveGeminiQuotaAvailability(
@@ -383,7 +415,7 @@ test('resolveGeminiQuotaAvailability identifies available, depleted, inferred-re
   );
   assert.equal(depletedWeekly.state, 'depleted');
   assert.equal(depletedWeekly.nextAvailableAt, Date.parse('2026-11-25T02:00:00Z'));
-  assert.match(depletedWeekly.countdownText, /4天20小时后可用/);
+  assert.equal(depletedWeekly.countdownText, '100% · 0% · 4天20小时');
 
   // Residual 1% (< 1.5%, displays as 1%) is treated as depleted rather than available green dot
   const residual1Pct = resolveGeminiQuotaAvailability(

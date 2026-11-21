@@ -99,6 +99,15 @@ function readTimestampSec(buf) {
   return Number.isFinite(val) && val > 0 ? val : 0;
 }
 
+function extractStepMaxTimestampSec(metaMap) {
+  let maxTs = 0;
+  for (const field of [8, 32, 7, 6, 1]) {
+    const ts = readTimestampSec(metaMap.get(field));
+    if (ts > maxTs) maxTs = ts;
+  }
+  return maxTs;
+}
+
 function extractStepCallDetails(stepIds, stepByIdx) {
   let hasVisibleText = false;
   const toolCalls = [];
@@ -231,7 +240,7 @@ export function parseConversationTurns(dbPath, cascadeId = '') {
       'idx',
       'step_type',
       'status',
-      ...(stepCols.has('metadata') ? ['CASE WHEN step_type = 132 THEN metadata ELSE NULL END AS metadata'] : []),
+      ...(stepCols.has('metadata') ? ['metadata'] : []),
       ...(stepCols.has('step_payload')
         ? ['CASE WHEN step_type = 15 THEN step_payload ELSE NULL END AS step_payload']
         : []),
@@ -284,10 +293,29 @@ export function parseConversationTurns(dbPath, cascadeId = '') {
       streamDurationMs: 0,
       streamTokens: 0,
       totalDurationMs: 0,
+      wallDurationMs: null,
       firstTokenLatencyMs: null,
       outputSpeed: null,
       completed: turnIndex < userStepIndices.length - 1 ? true : !lastTurnRunning,
     }));
+
+    const turnWallBounds = userStepIndices.map(() => ({ startTsSec: 0, endTsSec: 0 }));
+    for (let i = 0; i < allSteps.length; i++) {
+      const s = allSteps[i];
+      if (!(s.metadata instanceof Uint8Array)) continue;
+      const idx = Number(s.idx);
+      const turnIdx = findTurnIndex(userStepIndices, idx);
+      if (turnIdx < 0 || turnIdx >= turnWallBounds.length) continue;
+      const m = parseProto(s.metadata);
+      const bounds = turnWallBounds[turnIdx];
+      if (Number(s.step_type) === 14 && bounds.startTsSec === 0) {
+        bounds.startTsSec = readTimestampSec(m.get(1)) || readTimestampSec(m.get(6)) || 0;
+      }
+      const stepMaxTs = extractStepMaxTimestampSec(m);
+      if (stepMaxTs > bounds.endTsSec) {
+        bounds.endTsSec = stepMaxTs;
+      }
+    }
 
     const genRows = db.prepare('SELECT idx, data FROM gen_metadata ORDER BY idx ASC').all();
     for (let i = 0; i < genRows.length; i++) {
@@ -406,6 +434,10 @@ export function parseConversationTurns(dbPath, cascadeId = '') {
       }
       if (turn.streamDurationMs > 0 && turn.streamTokens > 0) {
         turn.outputSpeed = turn.streamTokens / (turn.streamDurationMs / 1000);
+      }
+      const bounds = turnWallBounds[i];
+      if (bounds.startTsSec > 0 && bounds.endTsSec >= bounds.startTsSec) {
+        turn.wallDurationMs = Math.round((bounds.endTsSec - bounds.startTsSec) * 1000);
       }
     }
 

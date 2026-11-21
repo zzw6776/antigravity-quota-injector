@@ -745,6 +745,9 @@
         padding-top: 7px;
         font-weight: 650;
       }
+      .aq-tt-cum + .aq-tt-cum {
+        padding-top: 3px;
+      }
       .aq-tt-meta {
         display: grid;
         gap: 2px;
@@ -3207,6 +3210,10 @@
         ${renderTierRowHtml('输出', (t) => t.outputTokens, 'output')}
         ${callsSummaryHtml}
         ${thinkingHtml}
+      </div>
+      <div class="aq-tt-cum">
+        <span>累计 Token</span>
+        <span class="aq-tt-val">${escapeHtml(formatTokenCount(turn.cumulativeTotalTokens))}</span>
       </div>
       <div class="aq-tt-cum">
         <span>累计费用</span>
