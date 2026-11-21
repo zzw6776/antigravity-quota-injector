@@ -70,6 +70,7 @@ function computeDevRuntimeIdentity() {
       path.join(srcDir, 'macos-dev-console.mjs'),
       path.join(srcDir, 'accounts.mjs'),
       path.join(srcDir, 'conversation-groups.mjs'),
+      path.join(srcDir, 'keepalive.mjs'),
       path.join(srcDir, 'proto-metrics.mjs'),
       path.join(srcDir, 'token-pricing.mjs'),
       path.join(srcDir, 'app-update', 'manager.mjs'),
