@@ -214,17 +214,26 @@ test('launchAntigravityExecutable passes --remote-debugging-port=0 on win32 & da
   let macCall = null;
   const macOk = launchAntigravityExecutable({
     platform: 'darwin',
+    env: {
+      PATH: '/usr/bin',
+      AQ_DETACHED_CHILD: '1',
+      AQ_LAUNCH_STATUS_FILE: '/tmp/status.json',
+      ANTIGRAVITY_QUOTA_DEV_EXTERNAL_START: '1',
+    },
     existsSyncFn: (p) => p === '/Applications/Antigravity.app',
-    spawnFn: (cmd, args) => {
-      macCall = { cmd, args };
+    spawnFn: (cmd, args, opts) => {
+      macCall = { cmd, args, opts };
       return { unref() {} };
     },
   });
   assert.equal(macOk.launched, true);
-  assert.deepEqual(macCall, {
-    cmd: 'open',
-    args: ['-a', '/Applications/Antigravity.app', '--args', '--remote-debugging-port=0'],
-  });
+  assert.equal(macCall.cmd, 'open');
+  assert.deepEqual(macCall.args, ['-a', '/Applications/Antigravity.app', '--args', '--remote-debugging-port=0']);
+  assert.equal(macCall.opts.detached, true);
+  assert.equal(macCall.opts.env.PATH, '/usr/bin');
+  assert.equal(macCall.opts.env.AQ_DETACHED_CHILD, undefined);
+  assert.equal(macCall.opts.env.AQ_LAUNCH_STATUS_FILE, undefined);
+  assert.equal(macCall.opts.env.ANTIGRAVITY_QUOTA_DEV_EXTERNAL_START, undefined);
 });
 
 test('matchesQuotaInjectorCommand matches both spaced and hyphenated injector processes without false positives', () => {

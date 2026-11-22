@@ -274,37 +274,45 @@ export function quotaLevelClass(fraction) {
   return 'aq-lvl-ok';
 }
 
-export function formatResetCountdown(resetTimeIso, nowMs = Date.now(), { includeDate = false } = {}) {
-  if (!resetTimeIso) return '';
+export function formatResetCountdownParts(
+  resetTimeIso,
+  nowMs = Date.now(),
+  { includeDate = false } = {}
+) {
+  if (!resetTimeIso) return { countdown: '', targetStr: '', text: '' };
   const ts = Date.parse(resetTimeIso);
-  if (!Number.isFinite(ts)) return '';
+  if (!Number.isFinite(ts)) return { countdown: '', targetStr: '', text: '' };
   const diffMs = ts - nowMs;
-  if (diffMs <= 0) return '即将重置';
+  if (diffMs <= 0) {
+    return { countdown: '即将重置', targetStr: '', text: '即将重置' };
+  }
+  const pad2 = (n) => String(n).padStart(2, '0');
   const totalMins = Math.floor(diffMs / 60_000);
   const days = Math.floor(totalMins / 1440);
   const hours = Math.floor((totalMins % 1440) / 60);
   const mins = totalMins % 60;
   let countdown = '';
-  if (days > 0) {
-    countdown = hours > 0 ? `${days}天${hours}小时` : `${days}天`;
-  } else if (hours > 0) {
-    countdown = mins > 0 ? `${hours}小时${mins}分` : `${hours}小时`;
+  if (totalMins <= 0) {
+    countdown = '<1m';
+  } else if (days > 0) {
+    countdown = `${days}d${pad2(hours)}h`;
   } else {
-    countdown = mins > 0 ? `${mins}分钟` : '<1分钟';
+    countdown = `${hours}h${pad2(mins)}m`;
   }
   const nowDate = new Date(nowMs);
   const targetDate = new Date(ts);
-  const pad2 = (n) => String(n).padStart(2, '0');
   const hhmm = `${pad2(targetDate.getHours())}:${pad2(targetDate.getMinutes())}`;
+  const mmdd = `${pad2(targetDate.getMonth() + 1)}/${pad2(targetDate.getDate())}`;
   const sameDay =
     nowDate.getFullYear() === targetDate.getFullYear() &&
     nowDate.getMonth() === targetDate.getMonth() &&
     nowDate.getDate() === targetDate.getDate();
-  const targetStr =
-    sameDay && !includeDate
-      ? hhmm
-      : `${targetDate.getMonth() + 1}/${targetDate.getDate()} ${hhmm}`;
-  return `${countdown} (${targetStr})`;
+  const targetStr = sameDay && !includeDate ? hhmm : `${mmdd} ${hhmm}`;
+  return { countdown, targetStr, text: `${countdown} (${targetStr})` };
+}
+
+export function formatResetCountdown(resetTimeIso, nowMs = Date.now(), { includeDate = false } = {}) {
+  return formatResetCountdownParts(resetTimeIso, nowMs, { includeDate }).text;
 }
 
 export function formatContextCompact(tokens) {
@@ -415,6 +423,7 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
   if (groups.length === 0) {
     return {
       state: 'unknown',
+      unstarted: false,
       label: '暂无 Gemini 额度记录',
       nextAvailableAt: null,
       nextResetAt: null,
@@ -445,6 +454,7 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
   if (!primary) {
     return {
       state: 'unknown',
+      unstarted: false,
       label: '暂无 Gemini 额度记录',
       nextAvailableAt: null,
       nextResetAt: null,
@@ -456,6 +466,7 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
   if (buckets.length === 0) {
     return {
       state: 'unknown',
+      unstarted: false,
       label: '暂无 Gemini 额度记录',
       nextAvailableAt: null,
       nextResetAt: null,
@@ -469,6 +480,7 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
   let latestDepletedResetIso = '';
   let fiveHourInfo = null;
   let weeklyInfo = null;
+  let firstInfo = null;
   const parts = [];
   for (const b of buckets) {
     const win = String(b.window || '').toLowerCase();
@@ -478,7 +490,8 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
     const hasReset = Number.isFinite(resetTs);
     const expired = !isCurrent && hasReset && resetTs <= nowMs;
     const frac = Number(b.remainingFraction);
-    const info = { win, winLabel, resetIso, resetTs: hasReset ? resetTs : null, expired, frac };
+    const info = { b, win, winLabel, resetIso, resetTs: hasReset ? resetTs : null, expired, frac };
+    if (!firstInfo) firstInfo = info;
     if (win === '5h' && !fiveHourInfo) fiveHourInfo = info;
     if (win === 'weekly' && !weeklyInfo) weeklyInfo = info;
 
@@ -500,11 +513,8 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
 
   const formatCountdownOnly = (iso, ts) => {
     if (!iso || !Number.isFinite(ts)) return '';
-    const diffMs = ts - nowMs;
-    if (diffMs <= 0) return '<1分钟';
-    const raw = formatResetCountdown(iso, nowMs, { includeDate: false });
-    const m = raw.match(/^(.+?)\s+\([^)]+\)$/);
-    return m ? m[1] : raw;
+    if (ts - nowMs <= 0) return '<1m';
+    return formatResetCountdownParts(iso, nowMs, { includeDate: false }).countdown;
   };
 
   const formatBucketPct = (info) =>
@@ -517,11 +527,20 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
 
   const detail = parts.join(' / ');
   if (allAvailable) {
+    const isBucketInfoUnstarted = (info) => {
+      if (!info) return false;
+      if (info.expired) return true;
+      const cadence = info.win === '5h' ? '5h' : info.win === 'weekly' ? 'weekly' : 'bucket';
+      return isCurrent
+        ? isQuotaBucketUnstarted(info.b, cadence, nowMs)
+        : info.frac >= 0.999999 && !/used\s+some|consumed/i.test(String(info.b?.description || ''));
+    };
     const countdownTarget =
       [fiveHourInfo, weeklyInfo].find(
-        (info) => info && !info.expired && info.frac < 0.995 && info.resetTs && info.resetTs > nowMs
+        (info) => info && !info.expired && !isBucketInfoUnstarted(info) && info.resetTs && info.resetTs > nowMs
       ) || null;
-    const primaryInfo = fiveHourInfo || weeklyInfo || null;
+    const primaryInfo = fiveHourInfo || weeklyInfo || firstInfo || null;
+    const unstarted = isBucketInfoUnstarted(primaryInfo);
     const nextResetAt =
       countdownTarget?.resetTs || (primaryInfo && !primaryInfo.expired ? primaryInfo.resetTs : null);
     const timeText = countdownTarget
@@ -531,6 +550,7 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
 
     return {
       state: 'available',
+      unstarted,
       label: anyInferredReset ? `Gemini 预计可用（${detail}）` : `Gemini 可用（${detail}）`,
       nextAvailableAt: null,
       nextResetAt,
@@ -545,6 +565,7 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
   const countdownText = [...quotaParts, depletedTimeText].filter(Boolean).join(' · ') || '0%';
   return {
     state: 'depleted',
+    unstarted: false,
     label: `Gemini 已用完（${detail}）`,
     nextAvailableAt,
     nextResetAt: nextAvailableAt,

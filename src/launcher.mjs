@@ -458,6 +458,7 @@ export async function runLauncher({
   explicitStart = isSea() ||
     process.env.ANTIGRAVITY_QUOTA_EXPLICIT_START === '1' ||
     process.argv.includes('--explicit-start'),
+  statusFile = process.env.AQ_LAUNCH_STATUS_FILE || '',
 } = {}) {
   const version = readPackageVersion();
   if (process.argv.includes('--version')) {
@@ -469,7 +470,11 @@ export async function runLauncher({
   }
 
   const mode = isSea() ? 'formal' : 'dev';
-  const statusFile = process.env.AQ_LAUNCH_STATUS_FILE || '';
+  // Clear internal launcher handshake markers so any descendant processes (like Antigravity)
+  // never inherit AQ_DETACHED_CHILD=1 or stale status paths.
+  delete process.env.AQ_DETACHED_CHILD;
+  delete process.env.AQ_LAUNCH_STATUS_FILE;
+  delete process.env.ANTIGRAVITY_QUOTA_DEV_EXTERNAL_START;
   process.title = 'Antigravity Quota Injector';
   const logPath = installFileLogger();
   if (!explicitStart) {
@@ -643,12 +648,13 @@ if (isEntrypoint) {
     isSea() ||
     process.env.ANTIGRAVITY_QUOTA_EXPLICIT_START === '1' ||
     process.argv.includes('--explicit-start');
+  const entryStatusFile = process.env.AQ_LAUNCH_STATUS_FILE || '';
   const runner = shouldDetachMacDevLauncher({ explicitStart, once })
     ? launchDetachedMacLauncher({
         entrypointPath: fileURLToPath(import.meta.url),
         argv: process.argv.slice(2),
       })
-    : runLauncher({ once, explicitStart });
+    : runLauncher({ once, explicitStart, statusFile: entryStatusFile });
   runner
     .then((code) => {
       if (typeof code === 'number' && code !== 0) {
@@ -656,7 +662,7 @@ if (isEntrypoint) {
       }
     })
     .catch((err) => {
-      writeLaunchStatusFile(process.env.AQ_LAUNCH_STATUS_FILE || '', {
+      writeLaunchStatusFile(entryStatusFile, {
         ok: false,
         phase: 'failed',
         exitCode: 1,

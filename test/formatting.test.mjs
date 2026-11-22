@@ -13,6 +13,7 @@ import {
   formatElapsedDuration,
   formatPricingSourceNote,
   formatResetCountdown,
+  formatResetCountdownParts,
   formatTurnSummary,
   formatUnitPrice,
   matchQuotaGroup,
@@ -156,12 +157,19 @@ test('matchQuotaGroup picks the group matching active model selector label', () 
 test('formatResetCountdown formats remaining time with local target time cleanly', () => {
   const now = new Date(2026, 10, 17, 10, 0, 0).getTime();
   const sameDayTarget = new Date(2026, 10, 17, 14, 16, 0).toISOString();
+  const underHourTarget = new Date(2026, 10, 17, 10, 8, 0).toISOString();
   const crossDayTarget = new Date(2026, 10, 19, 12, 5, 0).toISOString();
   const expiredTarget = new Date(2026, 10, 17, 9, 59, 0).toISOString();
-  assert.equal(formatResetCountdown(sameDayTarget, now), '4小时16分 (14:16)');
-  assert.equal(formatResetCountdown(sameDayTarget, now, { includeDate: true }), '4小时16分 (11/17 14:16)');
-  assert.equal(formatResetCountdown(crossDayTarget, now), '2天2小时 (11/19 12:05)');
+  assert.equal(formatResetCountdown(sameDayTarget, now), '4h16m (14:16)');
+  assert.equal(formatResetCountdown(sameDayTarget, now, { includeDate: true }), '4h16m (11/17 14:16)');
+  assert.equal(formatResetCountdown(underHourTarget, now, { includeDate: true }), '0h08m (11/17 10:08)');
+  assert.equal(formatResetCountdown(crossDayTarget, now), '2d02h (11/19 12:05)');
   assert.equal(formatResetCountdown(expiredTarget, now), '即将重置');
+  assert.deepEqual(formatResetCountdownParts(crossDayTarget, now, { includeDate: true }), {
+    countdown: '2d02h',
+    targetStr: '11/19 12:05',
+    text: '2d02h (11/19 12:05)',
+  });
 });
 
 test('formatContextCompact and contextLevelClass format context window cleanly', () => {
@@ -341,7 +349,7 @@ test('resolveGeminiQuotaAvailability identifies available, depleted, inferred-re
   assert.equal(okRes.state, 'available');
   assert.match(okRes.label, /5h 83%/);
   assert.match(okRes.label, /周 63%/);
-  assert.equal(okRes.countdownText, '83% · 63% · 3小时');
+  assert.equal(okRes.countdownText, '83% · 63% · 3h00m');
 
   // Depleted 5h before resetTime
   const depleted5h = resolveGeminiQuotaAvailability(
@@ -360,7 +368,7 @@ test('resolveGeminiQuotaAvailability identifies available, depleted, inferred-re
   );
   assert.equal(depleted5h.state, 'depleted');
   assert.equal(depleted5h.nextAvailableAt, Date.parse('2026-11-20T08:00:00Z'));
-  assert.equal(depleted5h.countdownText, '0% · 50% · 2小时');
+  assert.equal(depleted5h.countdownText, '0% · 50% · 2h00m');
 
   // Expired 5h resetTime on cached non-active account flips back to available (100%) and falls back to weekly reset countdown
   const recovered5h = resolveGeminiQuotaAvailability(
@@ -378,9 +386,33 @@ test('resolveGeminiQuotaAvailability identifies available, depleted, inferred-re
     { isCurrent: false, nowMs }
   );
   assert.equal(recovered5h.state, 'available');
+  assert.equal(recovered5h.unstarted, true);
   assert.match(recovered5h.label, /预计可用/);
   assert.match(recovered5h.label, /5h 已重置/);
-  assert.equal(recovered5h.countdownText, '100% · 50% · 4天20小时');
+  assert.equal(recovered5h.countdownText, '100% · 50% · 4d20h');
+
+  // Active 100% unstarted 5h cycle is also marked unstarted
+  const liveUnstarted = resolveGeminiQuotaAvailability(
+    {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          buckets: [
+            {
+              bucketId: 'gemini-5h',
+              window: '5h',
+              remainingFraction: 1,
+              resetTime: new Date(nowMs + 5 * 3600_000).toISOString(),
+            },
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.7, resetTime: '2026-11-25T02:00:00Z' },
+          ],
+        },
+      ],
+    },
+    { isCurrent: true, nowMs }
+  );
+  assert.equal(liveUnstarted.state, 'available');
+  assert.equal(liveUnstarted.unstarted, true);
 
   // Weekly-only snapshot keeps consistent compact percentage · countdown format
   const weeklyOnly = resolveGeminiQuotaAvailability(
@@ -397,7 +429,7 @@ test('resolveGeminiQuotaAvailability identifies available, depleted, inferred-re
     { isCurrent: false, nowMs }
   );
   assert.equal(weeklyOnly.state, 'available');
-  assert.equal(weeklyOnly.countdownText, '99% · 6天10小时');
+  assert.equal(weeklyOnly.countdownText, '99% · 6d10h');
 
   // Weekly still 0% before reset even if 5h reset expired -> still depleted
   const depletedWeekly = resolveGeminiQuotaAvailability(
@@ -416,7 +448,7 @@ test('resolveGeminiQuotaAvailability identifies available, depleted, inferred-re
   );
   assert.equal(depletedWeekly.state, 'depleted');
   assert.equal(depletedWeekly.nextAvailableAt, Date.parse('2026-11-25T02:00:00Z'));
-  assert.equal(depletedWeekly.countdownText, '100% · 0% · 4天20小时');
+  assert.equal(depletedWeekly.countdownText, '100% · 0% · 4d20h');
 
   // Residual 1% (< 1.5%, displays as 1%) is treated as depleted rather than available green dot
   const residual1Pct = resolveGeminiQuotaAvailability(
@@ -452,6 +484,30 @@ test('resolveGeminiQuotaAvailability identifies available, depleted, inferred-re
     { isCurrent: false, nowMs }
   );
   assert.equal(twoPctAvailable.state, 'available');
+  assert.equal(twoPctAvailable.unstarted, false);
+  assert.equal(okRes.unstarted, false);
+  assert.equal(depleted5h.unstarted, false);
+  assert.equal(weeklyOnly.unstarted, false);
+  assert.equal(depletedWeekly.unstarted, false);
+
+  // Lightly consumed active 5h cycle (>= 0.995, still rounds to 100%) still prefers 5h countdown over weekly
+  const lightlyConsumed5h = resolveGeminiQuotaAvailability(
+    {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          buckets: [
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.71, resetTime: '2026-11-26T16:00:00Z' },
+            { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.99963, resetTime: '2026-11-20T09:30:00Z' },
+          ],
+        },
+      ],
+    },
+    { isCurrent: false, nowMs }
+  );
+  assert.equal(lightlyConsumed5h.state, 'available');
+  assert.equal(lightlyConsumed5h.unstarted, false);
+  assert.equal(lightlyConsumed5h.countdownText, '100% · 71% · 3h30m');
 });
 
 test('resolveComposerChipMode switches cleanly from pill -> dual rings -> single ring on squeeze', () => {

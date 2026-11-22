@@ -34,6 +34,11 @@ import {
   isAntigravityProcessRunning,
   stopDaemonPid,
 } from './platform.mjs';
+import {
+  computeBatchEligibleSummary,
+  createBatchKeepAliveStore,
+  planBatchKeepAliveRun,
+} from './batch-keepalive.mjs';
 import { createKeepAliveManager } from './keepalive.mjs';
 import {
   getDbSignature,
@@ -347,6 +352,8 @@ export async function runDaemon({
     ? createFollowAppController({ startupGraceMs, exitConfirmTicks })
     : null;
   const keepAliveManager = createKeepAliveManager({ stateDir: paths.stateDir });
+  const batchStore = createBatchKeepAliveStore();
+  let batchDriverInFlight = false;
   const attached = new Map(); // targetId -> session state
   const targetCooldownUntil = new Map(); // non-host / unreachable targetId -> retry timestamp
   const turnsCache = new Map(); // dbPath -> { sig, payload }
@@ -437,15 +444,26 @@ export async function runDaemon({
     const activeEmail = extra.resolvedEmail !== undefined
       ? extra.resolvedEmail
       : resolveSessionEmail(session, extra.activeEmail);
+    const accountsList = Array.isArray(extra.accounts)
+      ? extra.accounts
+      : accountSupport.supported
+        ? listAccounts(paths.accountsFile, activeEmail)
+        : [];
+    const batchSummary = extra.batchSummary || (
+      accountSupport.supported
+        ? computeBatchEligibleSummary({
+            accounts: accountsList,
+            activeEmail,
+            getKeepAliveState: (email) => keepAliveManager.getState(email),
+          })
+        : { eligibleCount: 0, hasEnabledSwitch: false, note: accountSupport.reason || '' }
+    );
     const payload = {
       supported: accountSupport.supported,
       unsupportedReason: accountSupport.reason,
-      accounts: Array.isArray(extra.accounts)
-        ? extra.accounts
-        : accountSupport.supported
-          ? listAccounts(paths.accountsFile, activeEmail)
-          : [],
-      busy: Boolean(extra.busy ?? switchInFlight),
+      accounts: accountsList,
+      batchSummary,
+      busy: Boolean(extra.busy ?? (switchInFlight || batchStore.getRaw().active)),
       status: String(extra.status || ''),
       error: String(extra.error || ''),
     };
@@ -463,6 +481,7 @@ export async function runDaemon({
     let fallbackEmail;
     let baseList = null;
     const accountsByEmail = new Map();
+    const summaryByEmail = new Map();
     if (accountSupport.supported && !Array.isArray(extra.accounts)) {
       baseList = listAccounts(paths.accountsFile, '');
     }
@@ -481,6 +500,24 @@ export async function runDaemon({
       }
       return accountsByEmail.get(key);
     };
+    const resolveSharedSummary = (email, accountsForEmail) => {
+      if (extra.batchSummary) return extra.batchSummary;
+      if (!accountSupport.supported) {
+        return { eligibleCount: 0, hasEnabledSwitch: false, note: accountSupport.reason || '' };
+      }
+      const key = String(email || '').trim().toLowerCase();
+      if (!summaryByEmail.has(key)) {
+        summaryByEmail.set(
+          key,
+          computeBatchEligibleSummary({
+            accounts: accountsForEmail,
+            activeEmail: email,
+            getKeepAliveState: (acctEmail) => keepAliveManager.getState(acctEmail),
+          })
+        );
+      }
+      return summaryByEmail.get(key);
+    };
     await Promise.allSettled(
       sessions.map((s) => {
         let resolvedEmail = String(extra.activeEmail || s?.activeEmail || '').trim();
@@ -491,10 +528,12 @@ export async function runDaemon({
           resolvedEmail = fallbackEmail;
           if (resolvedEmail && s) s.activeEmail = resolvedEmail;
         }
+        const accountsForEmail = resolveSharedAccounts(resolvedEmail);
         return pushAccountsToSession(s, {
           ...extra,
           resolvedEmail,
-          accounts: resolveSharedAccounts(resolvedEmail),
+          accounts: accountsForEmail,
+          batchSummary: resolveSharedSummary(resolvedEmail, accountsForEmail),
         });
       })
     );
@@ -607,6 +646,7 @@ export async function runDaemon({
         enabled: Boolean(msg?.enabled),
       });
       await pushKeepAliveToAllSessions(accountEmail);
+      await pushAccountsToAllSessions();
       return;
     }
     if (type === 'set-model') {
@@ -648,6 +688,330 @@ export async function runDaemon({
         error: msg?.error,
       });
       await pushKeepAliveToAllSessions(accountEmail);
+    }
+  };
+
+  const pushBatchKeepAliveToSession = async (session) => {
+    if (!session?.client?.isOpen() || !session.hostConfirmed) return;
+    const payload = batchStore.getPublicState(session.targetId);
+    try {
+      await session.client.send('Runtime.evaluate', {
+        expression: `window.__aqRenderBatchKeepAlive && window.__aqRenderBatchKeepAlive(${JSON.stringify(payload)})`,
+        returnByValue: false,
+      });
+    } catch {}
+  };
+
+  const pushBatchKeepAliveToAllSessions = async () => {
+    await Promise.allSettled([...attached.values()].map((s) => pushBatchKeepAliveToSession(s)));
+  };
+
+  const finishBatchOrReturnToOrigin = async () => {
+    if (batchDriverInFlight) return;
+    const raw = batchStore.getRaw();
+    if (!raw.active) return;
+    batchDriverInFlight = true;
+    try {
+      if (raw.cancelRequested) {
+        batchStore.markCancelled();
+        await pushBatchKeepAliveToAllSessions();
+        await pushAccountsToAllSessions({ busy: false, status: '已中途停止一键唤醒' });
+        return;
+      }
+
+      const activeSessions = [...attached.values()];
+      const alreadyOnOrigin =
+        !raw.switchedAwayOnce ||
+        (Boolean(raw.originEmail) &&
+          activeSessions.some(
+            (s) => String(s?.activeEmail || '').trim().toLowerCase() === raw.originEmail.toLowerCase()
+          ) &&
+          raw.items.length === 1 &&
+          Boolean(raw.items[0]?.isOrigin));
+
+      if (alreadyOnOrigin) {
+        batchStore.markFinished({ skippedReturn: true });
+        await pushBatchKeepAliveToAllSessions();
+        await pushAccountsToAllSessions({ busy: false });
+        return;
+      }
+
+      raw.phase = 'returning';
+      raw.assignedSessionId = '';
+      raw.assignedStepToken = '';
+      raw.activePoolLabel = '';
+      raw.statusText = `全部唤醒完成，正在切回 ${raw.originEmail}…`;
+      await pushBatchKeepAliveToAllSessions();
+      await pushAccountsToAllSessions({ busy: true, status: raw.statusText });
+
+      switchInFlight = true;
+      let failedReturnError = '';
+      try {
+        log(`[batch-keepalive] returning to origin account ${raw.originEmail}...`);
+        await switchAccountWithRestart({
+          accountId: raw.originAccountId,
+          accountsFile: paths.accountsFile,
+          appSupportDir: paths.appSupportDir,
+          channel,
+        });
+      } catch (err) {
+        failedReturnError = String(err?.message || '切回原账号失败');
+        log(`[batch-keepalive] return switch failed: ${failedReturnError}`);
+      } finally {
+        switchInFlight = false;
+      }
+
+      batchStore.markFinished({ failedReturnError });
+      await pushBatchKeepAliveToAllSessions();
+      await pushAccountsToAllSessions({ busy: false, error: failedReturnError });
+      void tick();
+    } finally {
+      batchDriverInFlight = false;
+    }
+  };
+
+  const advanceToBatchTarget = async (nextIndex) => {
+    if (batchDriverInFlight) return;
+    const raw = batchStore.getRaw();
+    if (!raw.active) return;
+    if (raw.cancelRequested) {
+      batchStore.markCancelled();
+      await pushBatchKeepAliveToAllSessions();
+      await pushAccountsToAllSessions({ busy: false, status: '已中途停止一键唤醒' });
+      return;
+    }
+    if (nextIndex >= raw.items.length) {
+      await finishBatchOrReturnToOrigin();
+      return;
+    }
+
+    const item = raw.items[nextIndex];
+    batchDriverInFlight = true;
+    try {
+      raw.currentIndex = nextIndex;
+      raw.stepSeq += 1;
+      raw.assignedSessionId = '';
+      raw.assignedStepToken = '';
+      raw.activePoolLabel = '';
+      raw.phase = 'switching';
+      raw.stepPhaseStartedAt = Date.now();
+      item.status = 'switching';
+      item.detail = '正在切号重启';
+      raw.statusText = `正在切换至 ${item.email} (${nextIndex + 1}/${raw.items.length})…`;
+      await pushBatchKeepAliveToAllSessions();
+      await pushAccountsToAllSessions({ busy: true, status: raw.statusText });
+
+      switchInFlight = true;
+      let switchError = '';
+      try {
+        log(`[batch-keepalive] switching to ${item.email} (${nextIndex + 1}/${raw.items.length})...`);
+        await switchAccountWithRestart({
+          accountId: item.accountId,
+          accountsFile: paths.accountsFile,
+          appSupportDir: paths.appSupportDir,
+          channel,
+        });
+        raw.switchedAwayOnce = true;
+      } catch (err) {
+        switchError = String(err?.message || '切号失败');
+        log(`[batch-keepalive] switch to ${item.email} failed: ${switchError}`);
+      } finally {
+        switchInFlight = false;
+      }
+
+      if (raw.cancelRequested || stopping) {
+        if (!switchError) {
+          item.status = 'cancelled';
+          item.detail = '已取消';
+        }
+        batchStore.markCancelled();
+        await pushBatchKeepAliveToAllSessions();
+        await pushAccountsToAllSessions({ busy: false, status: '已中途停止一键唤醒' });
+        void tick();
+        return;
+      }
+
+      if (switchError) {
+        item.status = 'failed';
+        item.detail = switchError;
+        batchDriverInFlight = false;
+        await advanceToBatchTarget(nextIndex + 1);
+        return;
+      }
+
+      raw.phase = 'waiting_ready';
+      raw.stepPhaseStartedAt = Date.now();
+      item.status = 'waiting_ready';
+      item.detail = '等待配额就绪';
+      raw.statusText = `已切至 ${item.email}，等待页面与配额就绪…`;
+      await pushBatchKeepAliveToAllSessions();
+      void tick();
+    } finally {
+      batchDriverInFlight = false;
+    }
+  };
+
+  const advanceBatchAfterCurrentItem = async () => {
+    const raw = batchStore.getRaw();
+    if (!raw.active) return;
+    if (raw.cancelRequested) {
+      batchStore.markCancelled();
+      await pushBatchKeepAliveToAllSessions();
+      await pushAccountsToAllSessions({ busy: false, status: '已中途停止一键唤醒' });
+      return;
+    }
+    const nextIndex = raw.currentIndex + 1;
+    if (nextIndex < raw.items.length) {
+      await advanceToBatchTarget(nextIndex);
+    } else {
+      await finishBatchOrReturnToOrigin();
+    }
+  };
+
+  const checkBatchKeepAliveTimeouts = async () => {
+    const raw = batchStore.getRaw();
+    if (!raw.active || batchDriverInFlight || switchInFlight) return;
+    const item = raw.items[raw.currentIndex];
+    if (!item) return;
+    const elapsed = Date.now() - raw.stepPhaseStartedAt;
+    if (raw.phase === 'waiting_ready' && elapsed > 35_000) {
+      item.status = 'failed';
+      item.detail = '页面或登录状态就绪超时';
+      await advanceBatchAfterCurrentItem();
+    } else if (raw.phase === 'waking' && elapsed > 120_000) {
+      item.status = 'failed';
+      item.detail = '唤醒执行超时';
+      await advanceBatchAfterCurrentItem();
+    }
+  };
+
+  const handleBatchKeepAliveAction = async (session, rawPayload) => {
+    let msg;
+    try {
+      msg = JSON.parse(String(rawPayload || '{}'));
+    } catch {
+      return;
+    }
+    const type = String(msg?.type || '');
+    if (type === 'dismiss') {
+      batchStore.dismiss();
+      await pushBatchKeepAliveToAllSessions();
+      return;
+    }
+    if (type === 'cancel') {
+      const raw = batchStore.getRaw();
+      if (!raw.active) return;
+      raw.cancelRequested = true;
+      if (switchInFlight || batchDriverInFlight) {
+        raw.statusText = '正在取消，等待当前重启步骤结束后停在当前账号…';
+        await pushBatchKeepAliveToAllSessions();
+        return;
+      }
+      batchStore.markCancelled();
+      await pushBatchKeepAliveToAllSessions();
+      await pushAccountsToAllSessions({ busy: false, status: '已中途停止一键唤醒' });
+      return;
+    }
+    if (!accountSupport.supported) return;
+
+    if (type === 'start') {
+      if (switchInFlight || batchDriverInFlight || batchStore.getRaw().active) return;
+      const profile = msg?.profile && typeof msg.profile === 'object' ? msg.profile : null;
+      if (profile?.email) {
+        session.activeEmail = String(profile.email).trim();
+        try {
+          snapshotCurrentAccount({
+            accountsFile: paths.accountsFile,
+            appSupportDir: paths.appSupportDir,
+            profile,
+            quota: msg?.quota || null,
+          });
+        } catch {}
+      }
+      const activeEmail = resolveSessionEmail(session, profile?.email || '');
+      const accounts = listAccounts(paths.accountsFile, activeEmail);
+      const plan = planBatchKeepAliveRun({
+        accounts,
+        activeEmail,
+        liveProfile: profile,
+        getKeepAliveState: (email) => keepAliveManager.getState(email),
+      });
+      if (!plan.ok) {
+        await pushAccountsToSession(session, { activeEmail, error: plan.error });
+        return;
+      }
+
+      batchStore.start({
+        originAccount: plan.originAccount,
+        targets: plan.targets,
+      });
+      const raw = batchStore.getRaw();
+      await pushBatchKeepAliveToAllSessions();
+      await pushAccountsToAllSessions({ busy: true });
+      if (!raw.items[0]?.isOrigin) {
+        await advanceToBatchTarget(0);
+      }
+      return;
+    }
+
+    const raw = batchStore.getRaw();
+    if (!raw.active || raw.cancelRequested) return;
+    const item = raw.items[raw.currentIndex];
+    if (!item) return;
+
+    if (type === 'step-ready') {
+      if (raw.phase !== 'waiting_ready' || msg?.stepSeq !== raw.stepSeq || raw.assignedSessionId) return;
+      const readyEmail = String(msg?.email || '').trim().toLowerCase();
+      if (!readyEmail || readyEmail !== item.email.toLowerCase()) return;
+      session.activeEmail = String(msg?.email || '').trim();
+      raw.assignedSessionId = session.targetId;
+      raw.assignedStepToken = crypto.randomUUID();
+      raw.phase = 'waking';
+      raw.stepPhaseStartedAt = Date.now();
+      item.status = 'waking';
+      item.detail = '正在唤醒模型池…';
+      raw.statusText = `正在唤醒 ${item.email} (${raw.currentIndex + 1}/${raw.items.length})…`;
+      await pushBatchKeepAliveToAllSessions();
+      return;
+    }
+
+    if (type === 'step-progress') {
+      if (raw.phase !== 'waking' || msg?.runToken !== raw.assignedStepToken) return;
+      const poolLabel = String(msg?.poolLabel || '').trim();
+      raw.activePoolLabel = poolLabel;
+      item.detail = poolLabel ? `唤醒 ${poolLabel}` : '唤醒中…';
+      raw.statusText = poolLabel
+        ? `正在唤醒 ${item.email} · ${poolLabel} (${raw.currentIndex + 1}/${raw.items.length})`
+        : raw.statusText;
+      await pushBatchKeepAliveToAllSessions();
+      return;
+    }
+
+    if (type === 'step-complete') {
+      if (raw.phase !== 'waking' || msg?.runToken !== raw.assignedStepToken) return;
+      if (msg?.quota) {
+        try {
+          updateAccountQuotaSnapshot({
+            accountsFile: paths.accountsFile,
+            email: item.email,
+            quota: msg.quota,
+          });
+        } catch {}
+      }
+      const wokenCount = Number(msg?.wokenCount || 0);
+      const errors = Array.isArray(msg?.errors) ? msg.errors.filter(Boolean) : [];
+      if (wokenCount > 0) {
+        item.status = 'done';
+        item.detail = errors.length > 0 ? `已唤醒 ${wokenCount} 组（${errors.length} 组失败）` : `已唤醒 ${wokenCount} 组`;
+      } else if (errors.length > 0) {
+        item.status = 'failed';
+        item.detail = String(errors[0]);
+      } else {
+        item.status = 'skipped';
+        item.detail = String(msg?.skippedReason || '已在计时中');
+      }
+      await pushAccountsToAllSessions();
+      await advanceBatchAfterCurrentItem();
     }
   };
 
@@ -813,7 +1177,7 @@ export async function runDaemon({
         return;
       }
       if (type === 'add-account' || type === 'prepare-add') {
-        if (switchInFlight) return;
+        if (switchInFlight || batchStore.getRaw().active) return;
         switchInFlight = true;
         await pushAccountsToAllSessions({
           activeEmail,
@@ -856,7 +1220,7 @@ export async function runDaemon({
         return;
       }
       if (type === 'switch') {
-        if (switchInFlight) return;
+        if (switchInFlight || batchStore.getRaw().active) return;
         switchInFlight = true;
         await pushAccountsToAllSessions({
           activeEmail,
@@ -1024,6 +1388,7 @@ export async function runDaemon({
     await client.send('Runtime.addBinding', { name: '__aqUpdateAction' });
     await client.send('Runtime.addBinding', { name: '__aqGroupAction' });
     await client.send('Runtime.addBinding', { name: '__aqKeepAliveAction' });
+    await client.send('Runtime.addBinding', { name: '__aqBatchKeepAliveAction' });
     await client.send('Runtime.addBinding', { name: '__aqUiPrefsAction' });
 
     client.onBinding((params) => {
@@ -1042,6 +1407,8 @@ export async function runDaemon({
         void handleGroupAction(session, params.payload);
       } else if (params?.name === '__aqKeepAliveAction') {
         void handleKeepAliveAction(session, params.payload);
+      } else if (params?.name === '__aqBatchKeepAliveAction') {
+        void handleBatchKeepAliveAction(session, params.payload);
       } else if (params?.name === '__aqUiPrefsAction') {
         void handleUiPrefsAction(session, params.payload);
       }
@@ -1060,6 +1427,7 @@ export async function runDaemon({
     await pushAccountsToSession(session);
     await pushGroupsToSession(session);
     await pushKeepAliveToSession(session);
+    await pushBatchKeepAliveToSession(session);
     await pushUpdateToSession(session);
     await session.client.send('Runtime.evaluate', {
       expression: 'window.__aqHydrated = true;',
@@ -1129,6 +1497,7 @@ export async function runDaemon({
         }
       })
     );
+    await checkBatchKeepAliveTimeouts();
     return { liveCount: liveIds.size, attachedCount: attached.size };
   };
 
@@ -1213,7 +1582,11 @@ export async function runDaemon({
   };
   const onSigInt = () => handleExitSignal('SIGINT');
   const onSigTerm = () => handleExitSignal('SIGTERM');
-  const onSigHup = () => handleExitSignal('SIGHUP');
+  // Ignore terminal/parent-session SIGHUP so closing a host terminal or restarting Antigravity
+  // during an account switch never terminates the daemon mid-flight.
+  const onSigHup = () => {
+    log('[antigravity-quota-injector] ignoring SIGHUP to stay alive across host restarts');
+  };
 
   process.on('SIGINT', onSigInt);
   process.on('SIGTERM', onSigTerm);

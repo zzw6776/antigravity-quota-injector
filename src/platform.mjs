@@ -475,6 +475,14 @@ export async function quitAndWaitAntigravityProcesses({
   return getPids().length === 0;
 }
 
+export function sanitizeAppLaunchEnv(env = process.env) {
+  const cleaned = { ...(env && typeof env === 'object' ? env : {}) };
+  delete cleaned.AQ_DETACHED_CHILD;
+  delete cleaned.AQ_LAUNCH_STATUS_FILE;
+  delete cleaned.ANTIGRAVITY_QUOTA_DEV_EXTERNAL_START;
+  return cleaned;
+}
+
 export function launchAntigravityExecutable({
   channel = 'stable',
   platform = process.platform,
@@ -486,10 +494,11 @@ export function launchAntigravityExecutable({
   existsSyncFn = fs.existsSync,
   readFileSyncFn = fs.readFileSync,
 } = {}) {
+  const cleanEnv = sanitizeAppLaunchEnv(env);
   const { exePath, source } = resolveAntigravityExecutable({
     channel,
     platform,
-    env,
+    env: cleanEnv,
     homedir,
     stateDir,
     existsSyncFn,
@@ -512,6 +521,7 @@ export function launchAntigravityExecutable({
     const child = spawnFn('open', ['-a', exePath, '--args', ...ANTIGRAVITY_REMOTE_DEBUGGING_ARGS], {
       detached: true,
       stdio: 'ignore',
+      env: cleanEnv,
     });
     child?.unref?.();
     return { launched: true, exePath, source };
@@ -540,6 +550,7 @@ export function launchAntigravityExecutable({
         timeout: 8000,
         stdio: 'ignore',
         windowsHide: true,
+        env: cleanEnv,
       }
     );
     if (res?.status === 0) {
@@ -551,6 +562,7 @@ export function launchAntigravityExecutable({
     detached: true,
     stdio: 'ignore',
     windowsHide: false,
+    env: cleanEnv,
   });
   child?.unref?.();
   return { launched: true, exePath, source };

@@ -153,6 +153,16 @@
     accountsError: '',
     pendingSwitchConfirmId: '',
     pendingSwitchTimer: null,
+    pendingBatchConfirm: false,
+    pendingBatchConfirmTimer: null,
+    keepAliveLoaded: false,
+    batchKeepAlive: null,
+    batchSummary: null,
+    batchWakeRunningToken: '',
+    batchFreshQuotaStepSeq: 0,
+    batchFreshQuotaAttemptAt: 0,
+    batchReadySentStepSeq: 0,
+    batchReadyRetryTimer: null,
     autoSavedSignature: '',
     updateInfo: null,
     updateOpening: false,
@@ -509,7 +519,7 @@
         border: 1px solid var(--border, rgba(127, 127, 127, 0.22));
         background: transparent;
         color: var(--secondary-foreground, var(--foreground, #3f3f46));
-        font: 500 12px/1 var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+        font: 400 12px/1 var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
         cursor: pointer;
@@ -567,7 +577,7 @@
         flex-shrink: 0;
       }
       .aq-lvl-ok {
-        color: #15803d;
+        color: inherit;
       }
       .aq-lvl-warn {
         color: #b45309;
@@ -577,9 +587,6 @@
       }
       .aq-lvl-muted {
         color: var(--muted-foreground, #71717a);
-      }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-lvl-ok {
-        color: #4ade80;
       }
       :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-lvl-warn {
         color: #fbbf24;
@@ -632,8 +639,9 @@
         box-shadow: 0 14px 32px -8px rgba(0, 0, 0, 0.65), 0 4px 12px rgba(0, 0, 0, 0.34);
       }
       .aq-ctx-tt-row {
-        display: inline-flex;
-        align-items: baseline;
+        display: flex;
+        align-items: center;
+        justify-content: center;
         gap: 6px;
       }
       :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-floating-tooltip {
@@ -870,6 +878,7 @@
         align-items: center;
         justify-content: space-between;
         gap: 8px;
+        padding: 0 2px;
         margin-bottom: 8px;
       }
       .aq-qp-title-wrap {
@@ -889,9 +898,13 @@
         white-space: nowrap;
       }
       .aq-qp-badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        height: 16px;
         font-size: 9.5px;
         font-weight: 550;
-        line-height: 15px;
+        line-height: 1;
         padding: 0 6px;
         border-radius: 9999px;
         background: rgba(15, 23, 42, 0.055);
@@ -930,18 +943,15 @@
       }
       .aq-qp-ctx-val {
         font-variant-numeric: tabular-nums;
-        color: #71717a;
+        color: #27272a;
         white-space: nowrap;
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-ctx-val {
-        color: #9697a3;
+        color: #e4e4e7;
       }
       .aq-qp-ctx-strong {
-        font-weight: 600;
-        color: #15803d;
-      }
-      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-ctx-strong {
-        color: #4ade80;
+        font-weight: 400;
+        color: inherit;
       }
       .aq-qp-ctx-strong.aq-lvl-muted {
         color: #71717a;
@@ -1005,6 +1015,7 @@
         height: 5.5px;
         border-radius: 9999px;
         flex-shrink: 0;
+        transform: translateY(0.5px);
         background: #3b82f6;
         box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.16);
       }
@@ -1116,13 +1127,25 @@
         white-space: nowrap;
         font-variant-numeric: tabular-nums;
       }
+      .aq-qp-bkt-val.is-grid {
+        display: grid;
+        grid-template-columns: 31px auto auto auto;
+        column-gap: 4px;
+        align-items: baseline;
+      }
+      .aq-qp-bkt-val.is-grid .aq-qp-bkt-pct {
+        text-align: right;
+      }
+      .aq-qp-bkt-val.is-grid .aq-qp-bkt-sep {
+        text-align: center;
+      }
       .aq-qp-bkt-pct {
-        font-weight: 600;
+        font-weight: 550;
         font-size: 11px;
-        color: #15803d;
+        color: #059669;
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-bkt-pct {
-        color: #4ade80;
+        color: #34d399;
       }
       .aq-qp-bkt-pct.is-muted {
         color: #71717a;
@@ -1137,7 +1160,7 @@
         color: #dc2626;
       }
       .aq-qp-bkt-pct.is-reset {
-        color: #15803d;
+        color: #059669;
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-bkt-pct.is-warn {
         color: #fbbf24;
@@ -1146,20 +1169,33 @@
         color: #f87171;
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-bkt-pct.is-reset {
-        color: #4ade80;
+        color: #34d399;
       }
       .aq-qp-bkt-sep {
-        font-size: 10px;
+        font-size: 10.5px;
         color: #a1a1aa;
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-bkt-sep {
         color: #5c5d69;
       }
+      .aq-qp-bkt-dur,
+      .aq-qp-bkt-date,
       .aq-qp-bkt-reset {
-        font-size: 10px;
+        font-size: 10.5px;
         color: #71717a;
         white-space: nowrap;
       }
+      .aq-qp-bkt-dur,
+      .aq-qp-bkt-date {
+        text-align: right;
+      }
+      .aq-qp-bkt-dur {
+        font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+        font-size: 10.3px;
+        letter-spacing: 0.01em;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-bkt-dur,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-bkt-date,
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-bkt-reset {
         color: #9697a3;
       }
@@ -1185,30 +1221,53 @@
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-hdr {
         color: #9697a3;
       }
+      .aq-q-acct-hdr-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        flex-shrink: 0;
+      }
+      .aq-q-acct-hdr-actions .aq-qp-add-btn {
+        margin: -1px 0;
+      }
+      .aq-q-acct-hdr-actions .aq-qp-add-btn:last-child {
+        margin-right: 0;
+      }
       .aq-qp-add-btn {
         appearance: none;
-        border: 0;
-        background: transparent;
-        color: #2563eb;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+        height: 19px;
+        border: 1px solid rgba(15, 23, 42, 0.14);
+        background: #ffffff;
+        color: #3f3f46;
         border-radius: 5px;
-        padding: 1px 6px;
-        margin: -1px -6px -1px 0;
+        padding: 0 7px;
+        margin: -1px 0;
         font: inherit;
         font-size: 10px;
         font-weight: 500;
-        line-height: 16px;
+        line-height: 1;
         cursor: pointer;
         white-space: nowrap;
-        transition: background-color 0.12s ease, color 0.12s ease, opacity 0.12s ease;
+        transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease, opacity 0.12s ease;
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-add-btn {
-        color: #60a5fa;
+        background: rgba(255, 255, 255, 0.06);
+        border-color: rgba(255, 255, 255, 0.13);
+        color: #e4e4e7;
       }
       .aq-qp-add-btn:hover:not(:disabled) {
-        background: rgba(59, 130, 246, 0.1);
+        border-color: rgba(15, 23, 42, 0.28);
+        color: #18181b;
+        background: #fafafa;
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-add-btn:hover:not(:disabled) {
-        background: rgba(96, 165, 250, 0.14);
+        border-color: rgba(255, 255, 255, 0.25);
+        color: #f4f4f5;
+        background: rgba(255, 255, 255, 0.1);
       }
       .aq-qp-add-btn:disabled {
         opacity: 0.4;
@@ -1217,11 +1276,13 @@
       .aq-qp-add-btn.is-warn,
       .aq-qp-add-btn.is-warn:hover:not(:disabled) {
         background: rgba(245, 158, 11, 0.15);
+        border-color: rgba(245, 158, 11, 0.35);
         color: #b45309;
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-add-btn.is-warn,
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-add-btn.is-warn:hover:not(:disabled) {
         background: rgba(251, 191, 36, 0.16);
+        border-color: rgba(251, 191, 36, 0.35);
         color: #fbbf24;
       }
       .aq-q-acct-list {
@@ -1235,10 +1296,10 @@
         justify-content: space-between;
         gap: 8px;
         min-height: 36px;
-        padding: 5px 8.5px;
+        padding: 5px 7px;
         margin: 0 -6px;
         border-radius: 7.5px;
-        font-size: 10.5px;
+        font-size: 11px;
         background: rgba(15, 23, 42, 0.028);
         border: 1px solid transparent;
         transition: background-color 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
@@ -1331,7 +1392,7 @@
         transition: opacity 0.12s ease, background-color 0.12s ease;
       }
       .aq-q-acct-gem.is-available {
-        background: #16a34a;
+        background: #059669;
       }
       .aq-q-acct-gem.is-depleted {
         background: #dc2626;
@@ -1366,13 +1427,31 @@
         color: #fafafa;
       }
       .aq-q-acct-sub {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        font-size: 9.5px;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        min-width: 0;
+        font-size: 10px;
         line-height: 1.25;
         font-variant-numeric: tabular-nums;
         color: #8a8a93;
+      }
+      .aq-q-acct-sub-text {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
+      }
+      .aq-q-acct-unstarted-dot {
+        display: inline-block;
+        width: 5px;
+        height: 5px;
+        border-radius: 9999px;
+        flex-shrink: 0;
+        background: #f59e0b;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-unstarted-dot {
+        background: #fbbf24;
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-sub {
         color: #8c8c96;
@@ -1384,7 +1463,7 @@
         color: #fbbf24;
       }
       .aq-q-acct-plan {
-        font-size: 9.5px;
+        font-size: 10px;
         color: #8e8e98;
         white-space: nowrap;
         flex-shrink: 0;
@@ -1464,6 +1543,7 @@
         width: 18px;
         height: 18px;
         padding: 0;
+        margin-right: -3px;
         border-radius: 5px;
         display: inline-flex;
         align-items: center;
@@ -1546,7 +1626,7 @@
         width: 6px;
         height: 6px;
         border-radius: 9999px;
-        background: #22c55e;
+        background: #059669;
         margin-left: 2px;
         flex-shrink: 0;
       }
@@ -1618,6 +1698,188 @@
       }
       :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-update-error {
         color: #f87171;
+      }
+
+      /* Batch account switch + keep-alive floating progress panel */
+      #aq-batch-wake-panel {
+        position: fixed;
+        right: 16px;
+        bottom: 58px;
+        z-index: 2147483646;
+        width: 288px;
+        max-width: calc(100vw - 24px);
+        padding: 10px 12px;
+        border-radius: 12px;
+        background: #ffffff;
+        color: #18181b;
+        border: 1px solid rgba(15, 23, 42, 0.09);
+        box-shadow: 0 18px 40px -8px rgba(15, 23, 42, 0.16), 0 3px 10px rgba(15, 23, 42, 0.06);
+        font: 400 11px/1.45 var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+        font-variant-numeric: tabular-nums;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-batch-wake-panel {
+        background: #191a20;
+        color: #f4f4f6;
+        border-color: rgba(255, 255, 255, 0.09);
+        box-shadow: 0 22px 48px -10px rgba(0, 0, 0, 0.65), 0 4px 14px rgba(0, 0, 0, 0.34);
+      }
+      .aq-bw-hdr {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .aq-bw-title-wrap {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+        font-weight: 600;
+        font-size: 11.5px;
+      }
+      .aq-bw-pulse {
+        width: 5.5px;
+        height: 5.5px;
+        border-radius: 9999px;
+        background: #2563eb;
+        flex-shrink: 0;
+        animation: aq-ka-pulse 1.1s ease-in-out infinite;
+      }
+      .aq-bw-pulse.is-done {
+        background: #059669;
+        animation: none;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-bw-pulse.is-done {
+        background: #34d399;
+      }
+      .aq-bw-pulse.is-cancelled {
+        background: #f59e0b;
+        animation: none;
+      }
+      .aq-bw-pulse.is-failed {
+        background: #dc2626;
+        animation: none;
+      }
+      .aq-bw-action {
+        appearance: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+        height: 19px;
+        border: 1px solid rgba(15, 23, 42, 0.14);
+        background: transparent;
+        color: #3f3f46;
+        border-radius: 5px;
+        padding: 0 7px;
+        font: inherit;
+        font-size: 10px;
+        font-weight: 500;
+        line-height: 1;
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+      .aq-bw-action:hover {
+        background: rgba(15, 23, 42, 0.05);
+        color: #18181b;
+      }
+      .aq-bw-action.is-stop {
+        border-color: rgba(245, 158, 11, 0.4);
+        color: #b45309;
+        background: rgba(245, 158, 11, 0.08);
+      }
+      .aq-bw-action.is-stop:hover {
+        background: rgba(245, 158, 11, 0.16);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-bw-action {
+        border-color: rgba(255, 255, 255, 0.13);
+        color: #e4e4e7;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-bw-action:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: #f4f4f6;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-bw-action.is-stop {
+        border-color: rgba(251, 191, 36, 0.35);
+        color: #fbbf24;
+        background: rgba(251, 191, 36, 0.12);
+      }
+      .aq-bw-status {
+        margin-top: 4px;
+        font-size: 10px;
+        color: #71717a;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-bw-status {
+        color: #9a9aa6;
+      }
+      .aq-bw-list {
+        margin-top: 7px;
+        display: grid;
+        gap: 4px;
+        max-height: 156px;
+        overflow-y: auto;
+      }
+      .aq-bw-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 3.5px 6px;
+        border-radius: 6px;
+        background: rgba(15, 23, 42, 0.03);
+        font-size: 10px;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-bw-row {
+        background: rgba(255, 255, 255, 0.04);
+      }
+      .aq-bw-row-left {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        min-width: 0;
+        flex: 1;
+      }
+      .aq-bw-dot {
+        width: 5px;
+        height: 5px;
+        border-radius: 9999px;
+        flex-shrink: 0;
+        background: #a1a1aa;
+      }
+      .aq-bw-dot.is-running {
+        background: #2563eb;
+        animation: aq-ka-pulse 1.1s ease-in-out infinite;
+      }
+      .aq-bw-dot.is-done {
+        background: #059669;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-bw-dot.is-done {
+        background: #34d399;
+      }
+      .aq-bw-dot.is-failed {
+        background: #dc2626;
+      }
+      .aq-bw-dot.is-cancelled {
+        background: #f59e0b;
+      }
+      .aq-bw-email {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .aq-bw-detail {
+        flex-shrink: 0;
+        max-width: 112px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #71717a;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-bw-detail {
+        color: #9a9aa6;
       }
 
       /* Sidebar custom conversation groups */
@@ -3346,6 +3608,25 @@
     return toolbarContainer?.parentElement || contentAnchor || turnEl;
   }
 
+  function resolveTurnToolbarChild(host) {
+    const toolbar = host?.querySelector?.('[data-testid="cascade-system-message-toolbar"]');
+    if (!toolbar) return null;
+    let cur = toolbar;
+    while (cur && cur.parentElement !== host) {
+      cur = cur.parentElement;
+    }
+    return cur && cur.parentElement === host ? cur : null;
+  }
+
+  function isTurnLineAtExpectedSlot(host, line) {
+    if (!host || !line || line.parentElement !== host) return false;
+    const toolbarChild = resolveTurnToolbarChild(host);
+    if (toolbarChild && toolbarChild === host.lastElementChild) {
+      return line.nextElementSibling === toolbarChild;
+    }
+    return line === host.lastElementChild;
+  }
+
   function mountTurnLine(turnEl, turnData) {
     const host = resolveTurnUsageHost(turnEl);
     if (!host) return null;
@@ -3377,13 +3658,13 @@
       line.setAttribute('data-aq-turn-usage', idxAttr);
     }
 
-    const toolbar = host.querySelector('[data-testid="cascade-system-message-toolbar"]');
-    const toolbarContainer = toolbar?.parentElement && toolbar.parentElement !== host ? toolbar.parentElement : toolbar;
-    if (toolbarContainer && toolbarContainer.parentElement === host && toolbarContainer === host.lastElementChild) {
-      if (line.parentElement !== host || line.nextElementSibling !== toolbarContainer) {
-        host.insertBefore(line, toolbarContainer);
+    const toolbarChild = resolveTurnToolbarChild(host);
+    if (toolbarChild && toolbarChild === host.lastElementChild) {
+      if (line.parentElement !== host || line.nextElementSibling !== toolbarChild) {
+        host.insertBefore(line, toolbarChild);
       }
     } else if (line.parentElement !== host || line !== host.lastElementChild) {
+      // Keep the live metrics row at the bottom below any active Working indicator until the toolbar mounts last
       host.appendChild(line);
     }
 
@@ -3449,11 +3730,14 @@
       const turnData = turns[offset + i] || null;
       if (turnData && (turnData.totalTokens > 0 || !turnData.completed)) {
         const fastExisting = turnEl.querySelector('[data-aq-turn-usage]');
+        const fastHost = resolveTurnUsageHost(turnEl);
         if (
           turnData.completed &&
           fastExisting &&
           fastExisting.__aqRenderedTurnRef === turnData &&
-          fastExisting.getAttribute('data-aq-turn-usage') === String(turnData.turnIndex)
+          fastExisting.getAttribute('data-aq-turn-usage') === String(turnData.turnIndex) &&
+          fastHost &&
+          isTurnLineAtExpectedSlot(fastHost, fastExisting)
         ) {
           activeLines.add(fastExisting);
           continue;
@@ -3762,6 +4046,56 @@
     }
   }
 
+  function renderQuotaBucketRow(b, { markExpired = false, nowMs = Date.now() } = {}) {
+    const pct = formatRemainingPercent(b.remainingFraction);
+    const lvl = quotaLevelClass(b.remainingFraction);
+    const win = String(b.window || '').toLowerCase();
+    const label =
+      win === '5h'
+        ? '5h'
+        : win === 'weekly'
+          ? '周'
+          : escapeHtml(b.displayName || b.bucketId || '配额');
+    const resetTs = Date.parse(b.resetTime || '');
+    if (markExpired && Number.isFinite(resetTs) && resetTs <= nowMs) {
+      const origNote = Number(b.remainingFraction) < 0.995 ? `原 ${pct}` : '';
+      return `
+        <div class="aq-qp-bkt-row">
+          <span class="aq-qp-bkt-win">${label}</span>
+          <span class="aq-qp-bkt-val">
+            <span class="aq-qp-bkt-pct is-reset">已重置</span>
+            ${origNote ? `<span class="aq-qp-bkt-sep">·</span><span class="aq-qp-bkt-reset">${escapeHtml(origNote)}</span>` : ''}
+          </span>
+        </div>
+      `;
+    }
+    const toneCls =
+      lvl === 'aq-lvl-crit'
+        ? ' is-crit'
+        : lvl === 'aq-lvl-warn'
+          ? ' is-warn'
+          : lvl === 'aq-lvl-muted'
+            ? ' is-muted'
+            : '';
+    const reset = formatResetCountdownParts(b.resetTime, nowMs, { includeDate: true });
+    const useGrid = Boolean(reset.countdown && reset.targetStr);
+    return `
+      <div class="aq-qp-bkt-row">
+        <span class="aq-qp-bkt-win">${label}</span>
+        <span class="aq-qp-bkt-val${useGrid ? ' is-grid' : ''}">
+          <span class="aq-qp-bkt-pct${toneCls}">${pct}</span>
+          ${
+            useGrid
+              ? `<span class="aq-qp-bkt-sep">·</span><span class="aq-qp-bkt-dur">${escapeHtml(reset.countdown)}</span><span class="aq-qp-bkt-date">(${escapeHtml(reset.targetStr)})</span>`
+              : reset.text
+                ? `<span class="aq-qp-bkt-sep">·</span><span class="aq-qp-bkt-reset">${escapeHtml(reset.text)}</span>`
+                : ''
+          }
+        </span>
+      </div>
+    `;
+  }
+
   function showQuotaTooltip(chipEl) {
     if (state.quotaTooltipShowTimer) {
       clearTimeout(state.quotaTooltipShowTimer);
@@ -3809,6 +4143,10 @@
             const switchBtn = isCur
               ? '<span class="aq-q-active-tag">当前</span>'
               : `<button type="button" class="aq-q-btn${confirming ? ' aq-q-btn-warn' : ''}" data-aq-acct-switch="${escapeHtml(acct.id)}" title="${confirming ? '再次点击确认重启并切换账号' : '切换至此账号'}" ${state.accountsBusy ? 'disabled' : ''}>${confirming ? '确认重启' : '切换'}</button>`;
+            const unstartedTitle = '刷新倒计时未开始（需使用一次才会开始计时）';
+            const unstartedDotHtml = gemStatus.unstarted
+              ? `<span class="aq-q-acct-unstarted-dot" data-aq-acct-unstarted="1" title="${unstartedTitle}" aria-label="${unstartedTitle}"></span>`
+              : '';
             const subText = gemStatus.countdownText || gemStatus.label;
             return `
               <div class="aq-q-acct-row${isCur ? ' is-current' : ''}${canDragAcct ? ' is-draggable' : ''}" data-aq-acct-id="${escapeHtml(acct.id)}">
@@ -3816,7 +4154,7 @@
                   <span class="aq-q-acct-gem is-${escapeHtml(gemStatus.state)}" data-aq-acct-gem="${escapeHtml(gemStatus.state)}" title="${escapeHtml(gemStatus.label)}" aria-label="${escapeHtml(gemStatus.label)}"></span>
                   <div class="aq-q-acct-meta">
                     <span class="aq-q-acct-email" title="${escapeHtml(acct.email)}">${escapeHtml(acct.email)}</span>
-                    <span class="aq-q-acct-sub is-${escapeHtml(gemStatus.state)}" title="${escapeHtml(gemStatus.label)}">${escapeHtml(subText)}</span>
+                    <span class="aq-q-acct-sub is-${escapeHtml(gemStatus.state)}" title="${escapeHtml(gemStatus.unstarted ? `${gemStatus.label} · ${unstartedTitle}` : gemStatus.label)}"><span class="aq-q-acct-sub-text">${escapeHtml(subText)}</span>${unstartedDotHtml}</span>
                   </div>
                 </div>
                 <div class="aq-q-acct-right">
@@ -3842,12 +4180,29 @@
         ? `<div class="aq-q-acct-list">${acctRows}</div>`
         : '<div class="aq-q-acct-note">暂无已保存快照，登录后会自动保存</div>';
     const addConfirming = state.pendingSwitchConfirmId === '__add__';
+    const batchActive = Boolean(state.batchKeepAlive?.active);
+    const batchConfirming = Boolean(!batchActive && state.pendingBatchConfirm);
+    const batchEligibleCount = Number(state.batchSummary?.eligibleCount || 0);
+    const batchBtnDisabled = !accountsSupported || (!batchActive && (state.accountsBusy || batchEligibleCount <= 0));
+    const batchBtnLabel = batchActive
+      ? '停止唤醒'
+      : batchConfirming
+        ? `确认唤醒 (${batchEligibleCount})`
+        : '一键唤醒';
+    const batchBtnTitle = batchActive
+      ? '点击立即停止批量切换唤醒，保留在当前账号'
+      : batchEligibleCount > 0
+        ? String(state.batchSummary?.note || '依次切换全部已订阅账号唤醒已开启开关的模型池')
+        : String(state.batchSummary?.note || '暂无可唤醒的已订阅账号');
     const disabledTipAttr = !accountsSupported ? ` title="${escapeHtml(unsupportedReason)}"` : '';
     const accountsHtml = `
       <div class="aq-q-accounts">
         <div class="aq-q-acct-hdr">
           <span>账号切换</span>
-          <button type="button" class="aq-qp-add-btn${addConfirming ? ' is-warn' : ''}" data-aq-acct-add="1" ${!accountsSupported || state.accountsBusy ? 'disabled' : ''}${disabledTipAttr}>${addConfirming ? '确认重启' : '+ 登录新号'}</button>
+          <div class="aq-q-acct-hdr-actions">
+            <button type="button" class="aq-qp-add-btn${batchActive || batchConfirming ? ' is-warn' : ''}" data-aq-batch-wake="1" title="${escapeHtml(batchBtnTitle)}" ${batchBtnDisabled ? 'disabled' : ''}>${batchBtnLabel}</button>
+            <button type="button" class="aq-qp-add-btn${addConfirming ? ' is-warn' : ''}" data-aq-acct-add="1" ${!accountsSupported || state.accountsBusy ? 'disabled' : ''}${disabledTipAttr}>${addConfirming ? '确认重启' : '+ 登录新号'}</button>
+          </div>
         </div>
         ${accountsBodyHtml}
         ${statusHtml}
@@ -3918,37 +4273,7 @@
         const poolCfg = poolKey ? state.keepAliveState?.pools?.[poolKey] || null : null;
         const kaEnabled = Boolean(poolCfg?.enabled);
         const kaRunning = Boolean(poolKey && (state.keepAliveRunningPools.has(poolKey) || poolCfg?.inFlight));
-        const bucketHtml = buckets
-          .map((b) => {
-            const pct = formatRemainingPercent(b.remainingFraction);
-            const lvl = quotaLevelClass(b.remainingFraction);
-            const toneCls =
-              lvl === 'aq-lvl-crit'
-                ? ' is-crit'
-                : lvl === 'aq-lvl-warn'
-                  ? ' is-warn'
-                  : lvl === 'aq-lvl-muted'
-                    ? ' is-muted'
-                    : '';
-            const win = String(b.window || '').toLowerCase();
-            const label =
-              win === '5h'
-                ? '5h'
-                : win === 'weekly'
-                  ? '周'
-                  : escapeHtml(b.displayName || b.bucketId || '配额');
-            const reset = formatResetCountdown(b.resetTime, Date.now(), { includeDate: true });
-            return `
-              <div class="aq-qp-bkt-row">
-                <span class="aq-qp-bkt-win">${label}</span>
-                <span class="aq-qp-bkt-val">
-                  <span class="aq-qp-bkt-pct${toneCls}">${pct}</span>
-                  ${reset ? `<span class="aq-qp-bkt-sep">·</span><span class="aq-qp-bkt-reset">${escapeHtml(reset)}</span>` : ''}
-                </span>
-              </div>
-            `;
-          })
-          .join('');
+        const bucketHtml = buckets.map((b) => renderQuotaBucketRow(b, { nowMs: Date.now() })).join('');
 
         const kaTitle = buildKeepAliveToggleTitle(g, kaPlan, poolCfg, kaEnabled, kaRunning);
         const kaToggleHtml = kaPlan
@@ -4090,6 +4415,16 @@
     } catch {}
   }
 
+  function sendBatchKeepAliveAction(payload) {
+    if (typeof window.__aqBatchKeepAliveAction !== 'function') return false;
+    try {
+      window.__aqBatchKeepAliveAction(JSON.stringify(payload || {}));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function claimKeepAliveFromDaemon({ poolKey, manual = false }) {
     if (typeof window.__aqKeepAliveAction !== 'function') {
       return Promise.resolve({ allowed: false, reason: 'unavailable' });
@@ -4163,14 +4498,14 @@
     }
   }
 
-  async function runKeepAliveForGroup(group, { manual = false } = {}) {
+  async function runKeepAliveForGroup(group, { manual = false, skipPostRefresh = false } = {}) {
     const plan = classifyQuotaGroupKeepAlive(group);
-    if (!plan) return;
+    if (!plan) return { ok: false, error: '' };
     const poolKey = plan.poolKey;
-    if (state.keepAliveRunningPools.has(poolKey)) return;
+    if (state.keepAliveRunningPools.has(poolKey)) return { ok: false, error: '该分组正在唤醒中' };
 
     const poolCfg = state.keepAliveState?.pools?.[poolKey] || {};
-    if (!manual && !poolCfg.enabled) return;
+    if (!manual && !poolCfg.enabled) return { ok: false, error: '' };
 
     let model = pickKeepAliveModelForGroup(group, state.clientModelConfigs, poolCfg.preferredModel || '');
     if (!model) {
@@ -4180,11 +4515,11 @@
         ok: false,
         error: '未匹配到该分组的模型',
       });
-      return;
+      return { ok: false, error: '未匹配到该分组的模型' };
     }
 
     const claim = await claimKeepAliveFromDaemon({ poolKey, manual });
-    if (!claim?.allowed) return;
+    if (!claim?.allowed) return { ok: false, error: claim?.reason || '唤醒未获准' };
 
     const runId = String(claim.runId || '');
     const cascadeId =
@@ -4316,13 +4651,258 @@
         setTimeout(() => {
           state.hiddenKeepAliveCids.delete(cidLower);
         }, 30_000);
-        await fetchQuota({ force: true, immediate: true, includeUserStatus: true });
-        refreshQuotaTooltipIfVisible();
+        if (!skipPostRefresh) {
+          await fetchQuota({ force: true, immediate: true, includeUserStatus: true });
+          refreshQuotaTooltipIfVisible();
+        }
       }
+    }
+    return { ok, error: errMsg };
+  }
+
+  function renderBatchWakePanel() {
+    const b = state.batchKeepAlive;
+    let panel = document.getElementById('aq-batch-wake-panel');
+    if (!b || !b.visible || b.phase === 'idle') {
+      panel?.remove();
+      return;
+    }
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'aq-batch-wake-panel';
+      panel.addEventListener('click', (ev) => {
+        const stopBtn = ev.target?.closest?.('[data-aq-bw-stop]');
+        if (stopBtn) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          sendBatchKeepAliveAction({ type: 'cancel' });
+          return;
+        }
+        const closeBtn = ev.target?.closest?.('[data-aq-bw-close]');
+        if (closeBtn) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          sendBatchKeepAliveAction({ type: 'dismiss' });
+        }
+      });
+      document.body.appendChild(panel);
+    }
+
+    const items = Array.isArray(b.items) ? b.items : [];
+    const total = items.length;
+    const stepText =
+      b.phase === 'returning'
+        ? '切回起始号'
+        : total > 0 && b.currentIndex >= 0
+          ? `${Math.min(b.currentIndex + 1, total)}/${total}`
+          : '';
+    const pulseCls = b.active
+      ? ''
+      : b.phase === 'done'
+        ? ' is-done'
+        : b.phase === 'cancelled'
+          ? ' is-cancelled'
+          : ' is-failed';
+    const actionBtnHtml = b.active
+      ? '<button type="button" class="aq-bw-action is-stop" data-aq-bw-stop="1" title="停止批量唤醒并保留在当前账号">停止</button>'
+      : '<button type="button" class="aq-bw-action" data-aq-bw-close="1" title="关闭进度面板">关闭</button>';
+    const rowsHtml = items
+      .map((it) => {
+        const dotCls =
+          it.status === 'switching' || it.status === 'waiting_ready' || it.status === 'waking'
+            ? ' is-running'
+            : it.status === 'done'
+              ? ' is-done'
+              : it.status === 'failed'
+                ? ' is-failed'
+                : it.status === 'cancelled'
+                  ? ' is-cancelled'
+                  : '';
+        return `
+          <div class="aq-bw-row">
+            <span class="aq-bw-row-left">
+              <span class="aq-bw-dot${dotCls}"></span>
+              <span class="aq-bw-email" title="${escapeHtml(it.email)}">${escapeHtml(it.email)}</span>
+            </span>
+            <span class="aq-bw-detail" title="${escapeHtml(it.detail || '')}">${escapeHtml(it.detail || '')}</span>
+          </div>
+        `;
+      })
+      .join('');
+    const subText = b.active ? b.statusText : b.summaryText || b.statusText;
+    const nextHtml = `
+      <div class="aq-bw-hdr">
+        <span class="aq-bw-title-wrap">
+          <span class="aq-bw-pulse${pulseCls}" aria-hidden="true"></span>
+          <span>批量唤醒${stepText ? ` · ${escapeHtml(stepText)}` : ''}</span>
+        </span>
+        ${actionBtnHtml}
+      </div>
+      <div class="aq-bw-status" title="${escapeHtml(subText || '')}">${escapeHtml(subText || '')}</div>
+      ${rowsHtml ? `<div class="aq-bw-list">${rowsHtml}</div>` : ''}
+    `;
+    if (panel.__aqLastHtml !== nextHtml) {
+      panel.__aqLastHtml = nextHtml;
+      panel.innerHTML = nextHtml;
+    }
+  }
+
+  function scheduleBatchReadyRetry() {
+    if (state.batchReadyRetryTimer || state.disposed) return;
+    state.batchReadyRetryTimer = setTimeout(() => {
+      state.batchReadyRetryTimer = null;
+      void maybeExecuteBatchWakeStep();
+    }, 1500);
+  }
+
+  async function maybeExecuteBatchWakeStep() {
+    const b = state.batchKeepAlive;
+    if (state.disposed || !b || !b.active || b.cancelRequested) return;
+
+    if (b.phase === 'waiting_ready') {
+      const nowMs = Date.now();
+      const targetEmail = String(b.currentTargetEmail || '').trim().toLowerCase();
+      const curEmail = String(state.userProfile?.email || '').trim().toLowerCase();
+      const needFreshQuota =
+        state.batchFreshQuotaStepSeq !== b.stepSeq ||
+        ((!curEmail || curEmail !== targetEmail || !state.quotaData?.groups?.length || state.clientModelConfigs.length === 0) &&
+          !state.quotaFetching &&
+          nowMs - state.batchFreshQuotaAttemptAt >= 1500);
+      if (needFreshQuota) {
+        state.batchFreshQuotaStepSeq = b.stepSeq;
+        state.batchFreshQuotaAttemptAt = nowMs;
+        await fetchQuota({ force: true, immediate: true, includeUserStatus: true });
+      }
+      const latest = state.batchKeepAlive;
+      if (state.disposed || !latest || !latest.active || latest.phase !== 'waiting_ready' || latest.stepSeq !== b.stepSeq) {
+        return;
+      }
+      const liveEmail = String(state.userProfile?.email || '').trim().toLowerCase();
+      const latestTargetEmail = String(latest.currentTargetEmail || '').trim().toLowerCase();
+      if (
+        !liveEmail ||
+        !latestTargetEmail ||
+        liveEmail !== latestTargetEmail ||
+        !state.accountsMetaLoaded ||
+        !state.keepAliveLoaded
+      ) {
+        scheduleBatchReadyRetry();
+        return;
+      }
+      if (String(state.keepAliveState?.accountId || '').trim().toLowerCase() !== latestTargetEmail) {
+        sendKeepAliveAction({ type: 'get' });
+        scheduleBatchReadyRetry();
+        return;
+      }
+      if (!Array.isArray(state.quotaData?.groups) || state.quotaData.groups.length === 0 || state.clientModelConfigs.length === 0) {
+        scheduleBatchReadyRetry();
+        return;
+      }
+      if (state.batchReadyRetryTimer) {
+        clearTimeout(state.batchReadyRetryTimer);
+        state.batchReadyRetryTimer = null;
+      }
+      if (state.batchReadySentStepSeq === latest.stepSeq) return;
+      state.batchReadySentStepSeq = latest.stepSeq;
+      sendBatchKeepAliveAction({
+        type: 'step-ready',
+        stepSeq: latest.stepSeq,
+        email: state.userProfile.email,
+      });
+      return;
+    }
+
+    if (b.phase === 'waking' && b.isAssignedExecutor && b.assignedStepToken) {
+      const runToken = b.assignedStepToken;
+      if (state.batchWakeRunningToken === runToken) return;
+      state.batchWakeRunningToken = runToken;
+
+      const groups = Array.isArray(state.quotaData?.groups) ? state.quotaData.groups : [];
+      const enabledGroups = [];
+      for (let i = 0; i < groups.length; i++) {
+        const g = groups[i];
+        const plan = classifyQuotaGroupKeepAlive(g);
+        if (!plan) continue;
+        const poolCfg = state.keepAliveState?.pools?.[plan.poolKey];
+        if (poolCfg?.enabled) {
+          enabledGroups.push({ group: g, plan, poolCfg });
+        }
+      }
+
+      let wokenCount = 0;
+      const errors = [];
+      let skippedReason = '';
+
+      if (enabledGroups.length === 0) {
+        skippedReason = '未开启唤醒开关';
+      } else {
+        let alreadyActiveCount = 0;
+        let weeklyDepletedCount = 0;
+        for (let i = 0; i < enabledGroups.length; i++) {
+          const activeBatch = state.batchKeepAlive;
+          if (state.disposed || !activeBatch?.active || activeBatch.assignedStepToken !== runToken || activeBatch.cancelRequested) {
+            return;
+          }
+          const { group, plan, poolCfg } = enabledGroups[i];
+          const evalRes = evaluateQuotaPoolKeepAlive({
+            group,
+            enabled: true,
+            poolState: {
+              ...poolCfg,
+              lastTriggeredAt: 0,
+              backoffUntil: 0,
+              inFlight: Boolean(state.keepAliveRunningPools.has(plan.poolKey)),
+            },
+            nowMs: Date.now(),
+          });
+          if (!evalRes.eligible) {
+            if (evalRes.reason === 'weekly_depleted') weeklyDepletedCount += 1;
+            else alreadyActiveCount += 1;
+            continue;
+          }
+          sendBatchKeepAliveAction({
+            type: 'step-progress',
+            stepSeq: b.stepSeq,
+            runToken,
+            poolLabel: group.displayName || plan.poolKey,
+          });
+          const res = await runKeepAliveForGroup(group, { manual: true, skipPostRefresh: true });
+          if (res?.ok) {
+            wokenCount += 1;
+          } else if (res?.error) {
+            errors.push(res.error);
+          }
+        }
+        if (wokenCount === 0 && errors.length === 0) {
+          skippedReason = weeklyDepletedCount > 0 && alreadyActiveCount === 0 ? '周额度不足' : '已在计时中';
+        }
+      }
+
+      const activeAfter = state.batchKeepAlive;
+      if (state.disposed || !activeAfter?.active || activeAfter.assignedStepToken !== runToken || activeAfter.cancelRequested) {
+        return;
+      }
+      if (wokenCount > 0) {
+        await fetchQuota({ force: true, immediate: true, includeUserStatus: true });
+      }
+      if (state.disposed || !state.batchKeepAlive?.active || state.batchKeepAlive?.assignedStepToken !== runToken) {
+        return;
+      }
+      sendBatchKeepAliveAction({
+        type: 'step-complete',
+        stepSeq: b.stepSeq,
+        runToken,
+        wokenCount,
+        skippedReason,
+        errors,
+        quota: buildCurrentQuotaSnapshot(),
+        profile: state.userProfile,
+      });
     }
   }
 
   async function maybeRunKeepAlives() {
+    if (state.batchKeepAlive?.active) return;
     const groups = state.quotaData?.groups;
     if (!Array.isArray(groups) || groups.length === 0) {
       scheduleKeepAliveDeadlineTimer();
@@ -4468,49 +5048,7 @@
       const blocks = groups.map((g) => {
         const buckets = orderQuotaBuckets(g.buckets);
         const bucketHtml = buckets
-          .map((b) => {
-            const pct = formatRemainingPercent(b.remainingFraction);
-            const lvl = quotaLevelClass(b.remainingFraction);
-            const win = String(b.window || '').toLowerCase();
-            const label =
-              win === '5h'
-                ? '5h'
-                : win === 'weekly'
-                  ? '周'
-                  : escapeHtml(b.displayName || b.bucketId || '配额');
-            const resetTs = Date.parse(b.resetTime || '');
-            const isExpired = !isCur && Number.isFinite(resetTs) && resetTs <= nowMs;
-            if (isExpired) {
-              const origNote = Number(b.remainingFraction) < 0.995 ? `原 ${pct}` : '';
-              return `
-                <div class="aq-qp-bkt-row">
-                  <span class="aq-qp-bkt-win">${label}</span>
-                  <span class="aq-qp-bkt-val">
-                    <span class="aq-qp-bkt-pct is-reset">已重置</span>
-                    ${origNote ? `<span class="aq-qp-bkt-sep">·</span><span class="aq-qp-bkt-reset">${escapeHtml(origNote)}</span>` : ''}
-                  </span>
-                </div>
-              `;
-            }
-            const toneCls =
-              lvl === 'aq-lvl-crit'
-                ? ' is-crit'
-                : lvl === 'aq-lvl-warn'
-                  ? ' is-warn'
-                  : lvl === 'aq-lvl-muted'
-                    ? ' is-muted'
-                    : '';
-            const reset = formatResetCountdown(b.resetTime, Date.now(), { includeDate: true });
-            return `
-              <div class="aq-qp-bkt-row">
-                <span class="aq-qp-bkt-win">${label}</span>
-                <span class="aq-qp-bkt-val">
-                  <span class="aq-qp-bkt-pct${toneCls}">${pct}</span>
-                  ${reset ? `<span class="aq-qp-bkt-sep">·</span><span class="aq-qp-bkt-reset">${escapeHtml(reset)}</span>` : ''}
-                </span>
-              </div>
-            `;
-          })
+          .map((b) => renderQuotaBucketRow(b, { markExpired: !isCur, nowMs }))
           .join('');
 
         return `
@@ -4685,6 +5223,12 @@
   function syncAccountConfirmButtonsInPlace(tt) {
     if (!tt) return;
     tt.__aqLastHtml = '';
+    const batchBtn = tt.querySelector('[data-aq-batch-wake]');
+    if (batchBtn && !state.batchKeepAlive?.active) {
+      const eligibleCount = Number(state.batchSummary?.eligibleCount || 0);
+      batchBtn.classList.toggle('is-warn', Boolean(state.pendingBatchConfirm));
+      batchBtn.textContent = state.pendingBatchConfirm ? `确认唤醒 (${eligibleCount})` : '一键唤醒';
+    }
     const addBtn = tt.querySelector('[data-aq-acct-add]');
     if (addBtn) {
       const addConfirm = state.pendingSwitchConfirmId === '__add__';
@@ -4703,6 +5247,50 @@
   }
 
   function bindQuotaTooltipActions(tt) {
+    const batchBtn = tt.querySelector('[data-aq-batch-wake]');
+    if (batchBtn) {
+      batchBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (!state.accountsSupported) return;
+        state.quotaTooltipPinned = true;
+        if (state.batchKeepAlive?.active) {
+          state.pendingBatchConfirm = false;
+          if (state.pendingBatchConfirmTimer) {
+            clearTimeout(state.pendingBatchConfirmTimer);
+            state.pendingBatchConfirmTimer = null;
+          }
+          sendBatchKeepAliveAction({ type: 'cancel' });
+          return;
+        }
+        const eligibleCount = Number(state.batchSummary?.eligibleCount || 0);
+        if (state.accountsBusy || eligibleCount <= 0) return;
+        if (!state.pendingBatchConfirm) {
+          state.pendingBatchConfirm = true;
+          if (state.pendingBatchConfirmTimer) clearTimeout(state.pendingBatchConfirmTimer);
+          state.pendingBatchConfirmTimer = setTimeout(() => {
+            state.pendingBatchConfirmTimer = null;
+            if (state.pendingBatchConfirm) {
+              state.pendingBatchConfirm = false;
+              syncAccountConfirmButtonsInPlace(document.getElementById('aq-quota-tooltip'));
+            }
+          }, 3000);
+          syncAccountConfirmButtonsInPlace(tt);
+          return;
+        }
+        state.pendingBatchConfirm = false;
+        if (state.pendingBatchConfirmTimer) {
+          clearTimeout(state.pendingBatchConfirmTimer);
+          state.pendingBatchConfirmTimer = null;
+        }
+        state.accountsError = '';
+        sendBatchKeepAliveAction({
+          type: 'start',
+          profile: state.userProfile,
+          quota: buildCurrentQuotaSnapshot(),
+        });
+      });
+    }
     const addBtn = tt.querySelector('[data-aq-acct-add]');
     if (addBtn) {
       addBtn.addEventListener('click', (ev) => {
@@ -4918,9 +5506,9 @@
       ? (() => {
           const pct = Math.min(100, Math.max(0, Math.round((ctx.usedTokens / ctx.maxTokens) * 100)));
           const lvl = contextLevelClass(ctx.usedTokens, ctx.maxTokens);
-          return `<div class="aq-ctx-tt-row"><span class="aq-qp-ctx-lbl">上下文</span><span class="aq-qp-ctx-val"><span class="aq-qp-ctx-strong ${lvl}">${formatContextK(ctx.usedTokens)}</span> / ${formatContextK(ctx.maxTokens)} · ${pct}%</span></div>`;
+          return `<div class="aq-ctx-tt-row"><span class="aq-qp-ctx-val"><span class="aq-qp-ctx-strong ${lvl}">${formatContextK(ctx.usedTokens)}</span> / ${formatContextK(ctx.maxTokens)} · ${pct}%</span></div>`;
         })()
-      : '<div class="aq-ctx-tt-row"><span class="aq-qp-ctx-lbl">上下文</span><span class="aq-qp-ctx-val">暂无数据</span></div>';
+      : '<div class="aq-ctx-tt-row"><span class="aq-qp-ctx-val">暂无数据</span></div>';
 
     if (tt.__aqLastHtml !== nextHtml) {
       tt.__aqLastHtml = nextHtml;
@@ -5228,6 +5816,7 @@
       state.quotaFetching = false;
       renderQuotaChipContent();
       refreshQuotaTooltipIfVisible();
+      void maybeExecuteBatchWakeStep();
       if (state.quotaPendingRefresh) {
         const nextForce = state.quotaPendingForce;
         state.quotaPendingRefresh = false;
@@ -5244,7 +5833,7 @@
   }
 
   const TRANSLATE_SKIP_SELECTOR =
-    '[data-markdown-root], [data-testid="user-message"], [data-testid="user-message-content"], [data-lexical-editor], [data-testid="model-selector-trigger"], [data-aq-turn-usage], [data-aq-native-menu-ext], .aq-conv-width-resizer, #aq-turn-tooltip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-context-chip, #aq-quota-chip, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost, code, pre, script, style, .codicon, .google-symbols, .agy-sidebar-row';
+    '[data-markdown-root], [data-testid="user-message"], [data-testid="user-message-content"], [data-lexical-editor], [data-testid="model-selector-trigger"], [data-aq-turn-usage], [data-aq-native-menu-ext], .aq-conv-width-resizer, #aq-turn-tooltip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-batch-wake-panel, #aq-context-chip, #aq-quota-chip, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost, code, pre, script, style, .codicon, .google-symbols, .agy-sidebar-row';
 
   const CHROME_ROOT_SELECTOR = [
     '.settings-modal-container',
@@ -9208,6 +9797,9 @@
       }
       state.accountsUnsupportedReason = String(payload?.unsupportedReason || '');
       if (Array.isArray(payload?.accounts)) state.accounts = payload.accounts;
+      if (payload?.batchSummary && typeof payload.batchSummary === 'object') {
+        state.batchSummary = payload.batchSummary;
+      }
       state.accountsBusy = Boolean(payload?.busy);
       state.accountsStatus = String(payload?.status || '');
       state.accountsError = String(payload?.error || '');
@@ -9222,6 +9814,7 @@
         syncCurrentAccountQuotaSnapshot();
       }
       refreshQuotaTooltipIfVisible();
+      void maybeExecuteBatchWakeStep();
     } catch {}
   };
 
@@ -9251,11 +9844,22 @@
         payload && typeof payload === 'object'
           ? { accountId: incomingAcct, pools: payload.pools || {} }
           : { accountId: '', pools: {} };
+      state.keepAliveLoaded = true;
       scheduleKeepAliveDeadlineTimer();
       syncQuotaTooltipKeepAliveInPlace();
       if (state.keepAliveRunningPools.size === 0) {
         void maybeRunKeepAlives();
       }
+      void maybeExecuteBatchWakeStep();
+    } catch {}
+  };
+
+  window.__aqRenderBatchKeepAlive = function (payload) {
+    try {
+      state.batchKeepAlive = payload && typeof payload === 'object' ? payload : null;
+      renderBatchWakePanel();
+      refreshQuotaTooltipIfVisible();
+      void maybeExecuteBatchWakeStep();
     } catch {}
   };
 
@@ -9398,7 +10002,7 @@
   injectStyles();
 
   const SELF_MUTATION_IGNORE_SELECTOR =
-    '[data-aq-turn-usage], [data-aq-native-menu-ext], [data-aq-proj-card], [data-aq-row-grp-btn], .aq-conv-width-resizer, #aq-context-chip, #aq-quota-chip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-turn-tooltip, #aq-sidebar-tabs, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost';
+    '[data-aq-turn-usage], [data-aq-native-menu-ext], [data-aq-proj-card], [data-aq-row-grp-btn], .aq-conv-width-resizer, #aq-context-chip, #aq-quota-chip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-batch-wake-panel, #aq-turn-tooltip, #aq-sidebar-tabs, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost';
 
   const POPUP_CHROME_SELECTOR = [
     '.settings-modal-container',
@@ -10095,6 +10699,8 @@
     if (state.acctQuotaTooltipShowTimer) clearTimeout(state.acctQuotaTooltipShowTimer);
     if (state.acctQuotaTooltipHideTimer) clearTimeout(state.acctQuotaTooltipHideTimer);
     if (state.pendingSwitchTimer) clearTimeout(state.pendingSwitchTimer);
+    if (state.pendingBatchConfirmTimer) clearTimeout(state.pendingBatchConfirmTimer);
+    if (state.batchReadyRetryTimer) clearTimeout(state.batchReadyRetryTimer);
     if (state.groupDeleteConfirmTimer) clearTimeout(state.groupDeleteConfirmTimer);
     if (state.smartGraceTimer) clearTimeout(state.smartGraceTimer);
     if (state.groupResizeSnapTimer) clearTimeout(state.groupResizeSnapTimer);
@@ -10178,6 +10784,7 @@
     document.getElementById('aq-context-tooltip')?.remove();
     document.getElementById('aq-quota-tooltip')?.remove();
     document.getElementById('aq-acct-quota-tooltip')?.remove();
+    document.getElementById('aq-batch-wake-panel')?.remove();
     document.getElementById('aq-turn-tooltip')?.remove();
     document.getElementById('aq-sidebar-tabs-row')?.remove();
     document.getElementById('aq-sidebar-tabs')?.remove();
@@ -10214,6 +10821,7 @@
       delete window.__aqRenderUpdate;
       delete window.__aqRenderKeepAlive;
       delete window.__aqResolveKeepAliveClaim;
+      delete window.__aqRenderBatchKeepAlive;
       delete window.__aqRenderUiPrefs;
       delete window.__aqRenderGroups;
       delete window.__aqHydrated;
