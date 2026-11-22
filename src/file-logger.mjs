@@ -30,14 +30,24 @@ export function getDefaultLogPath(opts = {}) {
 export function installFileLogger(logPath = getDefaultLogPath()) {
   const dir = path.dirname(logPath);
   fs.mkdirSync(dir, { recursive: true });
-  try {
-    const st = fs.statSync(logPath, { throwIfNoEntry: false });
-    if (st && st.size > MAX_LOG_BYTES) {
+  let approxBytes = 0;
+  const rotateIfNeeded = () => {
+    try {
       const oldPath = `${logPath}.old`;
       try {
         if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
       } catch {}
-      fs.renameSync(logPath, oldPath);
+      if (fs.existsSync(logPath)) {
+        fs.renameSync(logPath, oldPath);
+      }
+      approxBytes = 0;
+    } catch {}
+  };
+  try {
+    const st = fs.statSync(logPath, { throwIfNoEntry: false });
+    approxBytes = st?.size || 0;
+    if (approxBytes > MAX_LOG_BYTES) {
+      rotateIfNeeded();
     }
   } catch {}
 
@@ -45,7 +55,12 @@ export function installFileLogger(logPath = getDefaultLogPath()) {
     const text = util.format(...args);
     const line = `[${new Date().toISOString()}] [${level}] ${text}\n`;
     try {
+      const bytes = Buffer.byteLength(line, 'utf8');
+      if (approxBytes + bytes > MAX_LOG_BYTES) {
+        rotateIfNeeded();
+      }
       fs.appendFileSync(logPath, line, 'utf8');
+      approxBytes += bytes;
     } catch {}
   };
 

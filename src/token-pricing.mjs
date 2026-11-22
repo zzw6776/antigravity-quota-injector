@@ -142,6 +142,8 @@ export function resolveContextTier(model, inputTokens, modelLabel = '') {
 }
 
 export class TokenPricingManager {
+  #turnCostCache = new WeakMap();
+
   constructor({
     stateDir,
     fetchImpl = globalThis.fetch,
@@ -310,15 +312,26 @@ export class TokenPricingManager {
 
   enrichConversationPayload(payload) {
     if (!payload || !Array.isArray(payload.turns)) return payload;
+    const rateSig = this.getRateSignature();
     let runningCny = 0;
     let pendingTurns = 0;
 
     const turns = payload.turns.map((turn) => {
       const hasUsage = positiveNumber(turn?.totalTokens) > 0;
-      const rawCost = hasUsage ? this.calculateTurnCost(turn) : null;
-      const viewCost = hasUsage
-        ? this.toViewModel(rawCost)
-        : unavailableCost(turn?.model || turn?.modelLabel || '', '本轮未获取到 Token 数据');
+      let viewCost = null;
+      if (hasUsage) {
+        const cached = turn && typeof turn === 'object' ? this.#turnCostCache.get(turn) : null;
+        if (cached && cached.rateSig === rateSig) {
+          viewCost = cached.viewCost;
+        } else {
+          viewCost = this.toViewModel(this.calculateTurnCost(turn));
+          if (turn?.completed === true && turn && typeof turn === 'object') {
+            this.#turnCostCache.set(turn, { rateSig, viewCost });
+          }
+        }
+      } else {
+        viewCost = unavailableCost(turn?.model || turn?.modelLabel || '', '本轮未获取到 Token 数据');
+      }
 
       if (hasUsage && viewCost.available) {
         runningCny += positiveNumber(viewCost.totalCny);

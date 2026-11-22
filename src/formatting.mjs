@@ -2,13 +2,25 @@
  * Pure formatting and quota matching helpers shared between tests and injected browser script.
  */
 
+const numberFormatCache = new Map();
+
+function formatLocaleFixed(value, minDigits, maxDigits = minDigits) {
+  const key = `${minDigits}:${maxDigits}`;
+  let fmt = numberFormatCache.get(key);
+  if (!fmt) {
+    fmt = new Intl.NumberFormat(undefined, {
+      minimumFractionDigits: minDigits,
+      maximumFractionDigits: maxDigits,
+    });
+    numberFormatCache.set(key, fmt);
+  }
+  return fmt.format(value);
+}
+
 export function formatTokenCount(value) {
   const num = Number(value);
   if (!Number.isFinite(num) || num < 0) return '0.00M';
-  return `${(num / 1_000_000).toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 3,
-  })}M`;
+  return `${formatLocaleFixed(num / 1_000_000, 2, 3)}M`;
 }
 
 export function formatDurationMs(value) {
@@ -17,10 +29,7 @@ export function formatDurationMs(value) {
   if (ms < 1_000) return `${Math.round(ms)}ms`;
   const seconds = ms / 1_000;
   const digits = seconds >= 100 ? 0 : 1;
-  return `${seconds.toLocaleString(undefined, {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  })}s`;
+  return `${formatLocaleFixed(seconds, digits)}s`;
 }
 
 /**
@@ -44,10 +53,7 @@ export function formatRate(value) {
   const num = Number(value);
   if (!Number.isFinite(num) || num <= 0) return null;
   const digits = num >= 100 ? 0 : num >= 10 ? 1 : 2;
-  return `${num.toLocaleString(undefined, {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  })} tok/s`;
+  return `${formatLocaleFixed(num, digits)} tok/s`;
 }
 
 export function formatCacheHitRate(cachedTokens, inputTokens) {
@@ -56,20 +62,14 @@ export function formatCacheHitRate(cachedTokens, inputTokens) {
   if (!Number.isFinite(input) || input <= 0 || !Number.isFinite(cached) || cached < 0) {
     return '—';
   }
-  return `${((cached / input) * 100).toLocaleString(undefined, {
-    minimumFractionDigits: 1,
-    maximumFractionDigits: 1,
-  })}%`;
+  return `${formatLocaleFixed((cached / input) * 100, 1)}%`;
 }
 
 export function formatCny(value) {
   const num = Number(value);
   if (!Number.isFinite(num) || num < 0) return '¥0.000000';
   const digits = num >= 1 ? 2 : num >= 0.01 ? 4 : 6;
-  return `¥${num.toLocaleString(undefined, {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  })}`;
+  return `¥${formatLocaleFixed(num, digits)}`;
 }
 
 export function formatExchangeRate(value) {

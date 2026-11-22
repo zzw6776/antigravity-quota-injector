@@ -53,26 +53,13 @@
   }
 
   window.__aq_active_token = INSTANCE_TOKEN;
-  if (!window.__aqRafGuarded && typeof window.requestAnimationFrame === 'function') {
-    const origRaf = window.requestAnimationFrame.bind(window);
-    window.__aqOrigRaf = origRaf;
-    window.__aqRafGuarded = true;
-    window.requestAnimationFrame = function (cb) {
-      if (typeof cb === 'function') {
-        if (cb.__aqToken && cb.__aqToken !== window.__aq_active_token) {
-          return -1;
-        }
-        if (!cb.__aqToken && cb.length === 0) {
-          try {
-            const src = Function.prototype.toString.call(cb);
-            if (src.includes('ensureSidebarGroupsPanel') && src.includes('ensureQuotaChip')) {
-              return -1;
-            }
-          } catch {}
-        }
-      }
-      return origRaf(cb);
-    };
+  // Clean up legacy global rAF wrapper if left by an earlier injected version
+  if (typeof window.__aqOrigRaf === 'function') {
+    try {
+      window.requestAnimationFrame = window.__aqOrigRaf;
+      delete window.__aqOrigRaf;
+      delete window.__aqRafGuarded;
+    } catch {}
   }
 
   // __AQ_FORMATTING_HELPERS__
@@ -86,6 +73,26 @@
   const OPTIMISTIC_SEND_GRACE_MS = 8_000;
   const COMPOSER_BUSY_SELECTOR =
     '[data-testid="input-cancel-button"], [data-testid="send-button-pending"]';
+  const MIN_CONV_WIDTH = 560;
+  const MAX_CONV_WIDTH = 8192;
+  const DEFAULT_CONV_WIDTH = 768;
+
+  function parseConvWidthStorageValue(raw) {
+    if (raw === 'full') return { mode: 'full', width: 0 };
+    const v = Number(raw);
+    if (raw !== null && raw !== '' && Number.isFinite(v) && v >= MIN_CONV_WIDTH) {
+      return { mode: 'custom', width: Math.min(MAX_CONV_WIDTH, Math.round(v)) };
+    }
+    return { mode: 'unset', width: DEFAULT_CONV_WIDTH };
+  }
+
+  const initConvWidthPref = (() => {
+    try {
+      return parseConvWidthStorageValue(localStorage.getItem('aq_conv_max_width_v1'));
+    } catch {
+      return { mode: 'unset', width: DEFAULT_CONV_WIDTH };
+    }
+  })();
 
   const state = {
     disposed: false,
@@ -157,9 +164,6 @@
     groupRenamingId: '',
     groupDeleteConfirmId: '',
     groupDeleteConfirmTimer: null,
-    groupDragId: '',
-    groupDragMode: '',
-    groupDragTargetId: '',
     groupMenuTarget: null,
     groupRenderKey: '',
     smartActiveCollapsed: (() => {
@@ -222,6 +226,14 @@
     cachedGroupedCids: null,
     projScrollEl: null,
     onProjScroll: null,
+    projScrollRaf: 0,
+    convDragRaf: 0,
+    historyTimers: new Set(),
+    i18nTextCache: new WeakMap(),
+    i18nAttrCache: new WeakMap(),
+    i18nCtrlSigCache: new WeakMap(),
+    turnsRenderSeq: 0,
+    latestSidebarDomInfo: null,
     groupsBodyHeight: (() => {
       try {
         const v = Number(localStorage.getItem('aq_groups_body_height_v1'));
@@ -232,16 +244,10 @@
     })(),
     groupResizeDrag: null,
     groupResizeSnapTimer: null,
-    convMaxWidth: (() => {
-      try {
-        const raw = localStorage.getItem('aq_conv_max_width_v1');
-        if (!raw || raw === 'full') return 0;
-        const v = Number(raw);
-        return Number.isFinite(v) && v >= 560 ? Math.round(v) : 0;
-      } catch {
-        return 0;
-      }
-    })(),
+    convWidthMode: initConvWidthPref.mode,
+    convMaxWidth: initConvWidthPref.width,
+    uiPrefsLoaded: false,
+    uiPrefsMigrated: false,
     convLastCustomWidth: (() => {
       try {
         const v = Number(localStorage.getItem('aq_conv_last_custom_width_v1'));
@@ -254,8 +260,6 @@
     convWidthDragRaf: 0,
     convWidthHoverTimer: null,
     convWidthBadgeTimer: null,
-    convResizeObserver: null,
-    convObservedNodes: new Set(),
     convDrag: null,
     convDragLongPressTimer: null,
     convDragExpandTimer: null,
@@ -285,16 +289,21 @@
     contextMenuPatched: false,
     contextMenuProto: null,
     contextMenuProviderFiber: null,
-    cleanups: [],
   };
 
   window.__aqCleanupRegistry.push(() => {
     state.disposed = true;
     state.domObserver?.disconnect();
     state.footerObserver?.disconnect();
-    state.convResizeObserver?.disconnect();
+    state.footerResizeObserver?.disconnect();
     if (state.renderRaf) cancelAnimationFrame(state.renderRaf);
     state.renderRaf = 0;
+    if (state.chipResizeRaf) cancelAnimationFrame(state.chipResizeRaf);
+    state.chipResizeRaf = 0;
+    if (state.projScrollRaf) cancelAnimationFrame(state.projScrollRaf);
+    state.projScrollRaf = 0;
+    if (state.convDragRaf) cancelAnimationFrame(state.convDragRaf);
+    state.convDragRaf = 0;
     if (state.routeTimer) clearInterval(state.routeTimer);
     if (state.trajStatusTimer) clearInterval(state.trajStatusTimer);
     if (state.quotaTimer) clearInterval(state.quotaTimer);
@@ -371,12 +380,12 @@
       :root,
       html,
       body {
-        --max-conversation-width: var(--aq-conv-max-width, 100%) !important;
-        --max-artifact-width: var(--aq-conv-max-width, 100%) !important;
+        --max-conversation-width: var(--aq-conv-max-width, 768px) !important;
+        --max-artifact-width: var(--aq-conv-max-width, 768px) !important;
       }
       [style*="--max-conversation-width"],
       [style*="--max-artifact-width"] {
-        max-width: min(100%, var(--aq-conv-max-width, 100%)) !important;
+        max-width: min(100%, var(--aq-conv-max-width, 768px)) !important;
       }
 
       .aq-conv-width-resizer {
@@ -3351,6 +3360,7 @@
     }
 
     line.__aqTurnData = turnData;
+    line.__aqRenderedTurnRef = turnData;
     const summary = formatTurnSummary(turnData);
     if (line.textContent !== summary) {
       line.textContent = summary;
@@ -3407,11 +3417,22 @@
     const offset = computeTurnPairingOffset(turnEls.length, turns.length);
     const activeLines = new Set();
     for (let i = 0; i < turnEls.length; i++) {
+      const turnEl = turnEls[i];
       const turnData = turns[offset + i] || null;
       if (turnData && (turnData.totalTokens > 0 || !turnData.completed)) {
-        activeLines.add(mountTurnLine(turnEls[i], turnData));
+        const fastExisting = turnEl.querySelector('[data-aq-turn-usage]');
+        if (
+          turnData.completed &&
+          fastExisting &&
+          fastExisting.__aqRenderedTurnRef === turnData &&
+          fastExisting.getAttribute('data-aq-turn-usage') === String(turnData.turnIndex)
+        ) {
+          activeLines.add(fastExisting);
+          continue;
+        }
+        activeLines.add(mountTurnLine(turnEl, turnData));
       } else {
-        turnEls[i].querySelectorAll('[data-aq-turn-usage]').forEach((el) => el.remove());
+        turnEl.querySelectorAll('[data-aq-turn-usage]').forEach((el) => el.remove());
       }
     }
     document.querySelectorAll('[data-aq-turn-usage]').forEach((el) => {
@@ -3628,8 +3649,8 @@
     }
   }
 
-  function renderQuotaChipContent() {
-    const parts = findComposerParts();
+  function renderQuotaChipContent(partsArg = null) {
+    const parts = partsArg || findComposerParts();
     const chipMode = computeComposerChipMode(parts);
     renderContextChipContent(chipMode);
     const chip = document.getElementById('aq-quota-chip');
@@ -4017,6 +4038,16 @@
     } catch {}
   }
 
+  function sendUiPrefsAction(payload) {
+    if (typeof window.__aqUiPrefsAction !== 'function') return false;
+    try {
+      window.__aqUiPrefsAction(JSON.stringify(payload || {}));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function sendKeepAliveAction(payload) {
     if (typeof window.__aqKeepAliveAction !== 'function') return;
     try {
@@ -4182,8 +4213,9 @@
 
       let settledStatus = '';
       const deadline = Date.now() + 20_000;
-      while (Date.now() < deadline) {
+      while (Date.now() < deadline && !state.disposed) {
         await new Promise((r) => setTimeout(r, 1200));
+        if (state.disposed) break;
         try {
           const checkRes = await fetch('/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories', {
             method: 'POST',
@@ -4207,13 +4239,23 @@
           }
         } catch {}
       }
-      try {
-        await fetch('/exa.language_server_pb.LanguageServerService/CancelCascadeInvocation', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ cascadeId }),
-        });
-      } catch {}
+      if (!settledStatus && !state.disposed) {
+        try {
+          await fetch('/exa.language_server_pb.LanguageServerService/CancelCascadeInvocation', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ cascadeId }),
+          });
+        } catch {}
+      } else if (settledStatus === '' && state.disposed) {
+        try {
+          await fetch('/exa.language_server_pb.LanguageServerService/CancelCascadeInvocation', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ cascadeId }),
+          });
+        } catch {}
+      }
       if (!settledStatus) {
         throw new Error('唤醒响应超时');
       }
@@ -4240,11 +4282,13 @@
         modelLabel: model.label,
         error: errMsg,
       });
-      setTimeout(() => {
-        state.hiddenKeepAliveCids.delete(cidLower);
-      }, 30_000);
-      await fetchQuota({ force: true, immediate: true, includeUserStatus: true });
-      refreshQuotaTooltipIfVisible();
+      if (!state.disposed) {
+        setTimeout(() => {
+          state.hiddenKeepAliveCids.delete(cidLower);
+        }, 30_000);
+        await fetchQuota({ force: true, immediate: true, includeUserStatus: true });
+        refreshQuotaTooltipIfVisible();
+      }
     }
   }
 
@@ -4929,7 +4973,7 @@
       }
       state.observedFooterBox = parts.leftGroup;
       state.footerObserver = new MutationObserver(() => {
-        renderQuotaChipContent();
+        scheduleRender({ chip: true });
       });
       state.footerObserver.observe(parts.leftGroup, { childList: true, subtree: true, characterData: true });
     }
@@ -4945,13 +4989,13 @@
         if (state.chipResizeRaf) return;
         state.chipResizeRaf = requestAnimationFrame(() => {
           state.chipResizeRaf = 0;
-          renderQuotaChipContent();
+          if (!state.disposed) renderQuotaChipContent();
         });
       });
       state.footerResizeObserver.observe(parts.footer);
     }
 
-    renderQuotaChipContent();
+    renderQuotaChipContent(parts);
     if (chipCreated && !state.quotaData && !state.quotaFetching) {
       void fetchQuota(true);
     }
@@ -5141,48 +5185,60 @@
   }
 
   function translateTextInRoot(root, allowRules = true) {
-    if (!root || typeof translateUiText !== 'function') return;
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const textCache = state.i18nTextCache;
+    const attrCache = state.i18nAttrCache;
+    if (!root || state.disposed || !textCache || !attrCache || typeof translateUiText !== 'function') return;
+    if (root.nodeType === 1 && (root.matches?.(TRANSLATE_SKIP_SELECTOR) || isProjectFolderNode(root))) {
+      return;
+    }
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (node.nodeType === 1) {
+          if (node.matches?.(TRANSLATE_SKIP_SELECTOR) || isProjectFolderNode(node)) {
+            return NodeFilter.FILTER_REJECT;
+          }
+          return NodeFilter.FILTER_SKIP;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
     let node;
     while ((node = walker.nextNode())) {
       const val = node.nodeValue;
-      if (!val || (node.__aqI18nRaw === val && (node.__aqI18nRules || !allowRules))) continue;
+      if (!val) continue;
+      const cached = textCache.get(node);
+      if (cached && cached.raw === val && (cached.rules || !allowRules)) continue;
       if (!/[A-Za-z]/.test(val)) {
-        node.__aqI18nRaw = val;
-        node.__aqI18nRules = true;
-        continue;
-      }
-      const parent = node.parentElement;
-      if (!parent || parent.closest(TRANSLATE_SKIP_SELECTOR) || isProjectFolderNode(parent)) {
-        node.__aqI18nRaw = val;
-        node.__aqI18nRules = true;
+        textCache.set(node, { raw: val, rules: true });
         continue;
       }
       const next = translateUiText(val, allowRules);
       if (next && next !== val) {
         node.nodeValue = next;
-        node.__aqI18nRaw = next;
-        node.__aqI18nRules = true;
+        textCache.set(node, { raw: next, rules: true });
       } else {
-        node.__aqI18nRaw = val;
-        node.__aqI18nRules = Boolean(node.__aqI18nRules || allowRules);
+        textCache.set(node, { raw: val, rules: Boolean(cached?.rules || allowRules) });
       }
     }
     const translateAttrs = (el) => {
       if (!el || el.nodeType !== 1) return;
       let skipChecked = false;
+      let elAttrs = attrCache.get(el);
       for (const attr of ['placeholder', 'aria-label', 'title']) {
         const val = el.getAttribute(attr);
         if (!val) continue;
-        const cacheProp = `__aqI18nAttr_${attr}`;
-        if (el[cacheProp] === val) continue;
+        if (elAttrs && elAttrs[attr] === val) continue;
+        if (!elAttrs) {
+          elAttrs = Object.create(null);
+          attrCache.set(el, elAttrs);
+        }
         if (!/[A-Za-z]/.test(val)) {
-          el[cacheProp] = val;
+          elAttrs[attr] = val;
           continue;
         }
         if (!skipChecked) {
           if (el.closest(TRANSLATE_SKIP_SELECTOR) || isProjectFolderNode(el)) {
-            el[cacheProp] = val;
+            elAttrs[attr] = val;
             return;
           }
           skipChecked = true;
@@ -5190,9 +5246,9 @@
         const nextVal = translateUiText(val, false);
         if (nextVal && nextVal !== val) {
           el.setAttribute(attr, nextVal);
-          el[cacheProp] = nextVal;
+          elAttrs[attr] = nextVal;
         } else {
-          el[cacheProp] = val;
+          elAttrs[attr] = val;
         }
       }
     };
@@ -5206,7 +5262,8 @@
   }
 
   function applyUiTranslations({ includeSidebar = true } = {}) {
-    if (state.isTranslating || typeof translateUiText !== 'function') return;
+    const ctrlCache = state.i18nCtrlSigCache;
+    if (state.disposed || state.isTranslating || !ctrlCache || typeof translateUiText !== 'function') return;
     state.isTranslating = true;
     try {
       const chromeRoots = document.querySelectorAll(CHROME_ROOT_SELECTOR);
@@ -5232,26 +5289,32 @@
       const chromeControls = document.querySelectorAll('button, [role="tab"], [data-testid="title-menu-bar"] *');
       for (let i = 0; i < chromeControls.length; i++) {
         const ctrl = chromeControls[i];
+        if (ctrl.closest?.('#aq-conv-groups, #aq-sidebar-tabs, #aq-quota-chip, #aq-context-chip')) continue;
         const txt = ctrl.textContent;
         const aria = ctrl.getAttribute('aria-label');
         const title = ctrl.getAttribute('title');
         const sig = `${txt || ''}\u0000${aria || ''}\u0000${title || ''}`;
-        if (ctrl.__aqI18nCtrlSig === sig) continue;
+        if (ctrlCache.get(ctrl) === sig) continue;
         if (ctrl.closest(TRANSLATE_SKIP_SELECTOR) || isProjectFolderNode(ctrl)) {
-          ctrl.__aqI18nCtrlSig = sig;
+          ctrlCache.set(ctrl, sig);
           continue;
         }
         if (
           ctrl.closest('[data-turn-content]') &&
           !ctrl.closest('[data-testid="turn-cards-container"], [data-testid="changed-files-card"], [data-testid="worked-for-collapsible"]')
         ) {
-          ctrl.__aqI18nCtrlSig = sig;
+          ctrlCache.set(ctrl, sig);
           continue;
         }
         if ((txt && txt.length <= 60 && /[A-Za-z]/.test(txt)) || (aria && /[A-Za-z]/.test(aria)) || (title && /[A-Za-z]/.test(title))) {
           translateTextInRoot(ctrl, false);
+          ctrlCache.set(
+            ctrl,
+            `${ctrl.textContent || ''}\u0000${ctrl.getAttribute('aria-label') || ''}\u0000${ctrl.getAttribute('title') || ''}`
+          );
+        } else {
+          ctrlCache.set(ctrl, sig);
         }
-        ctrl.__aqI18nCtrlSig = `${ctrl.textContent || ''}\u0000${ctrl.getAttribute('aria-label') || ''}\u0000${ctrl.getAttribute('title') || ''}`;
       }
     } finally {
       state.isTranslating = false;
@@ -5833,7 +5896,7 @@
     return '';
   }
 
-  function syncGroupedConversationMetadata() {
+  function syncGroupedConversationMetadata(domInfo = null) {
     if (!state.groups.length) return;
     const needed = new Set();
     for (let i = 0; i < state.groups.length; i++) {
@@ -5845,17 +5908,29 @@
     }
     if (!needed.size) return;
 
-    const rows = document.querySelectorAll('[data-testid="conversation-row-sidebar"][data-cascade-id]');
-    for (let i = 0; i < rows.length; i++) {
-      const info = extractRowConversationInfo(rows[i]);
-      if (info) {
-        const key = info.cascadeId.toLowerCase();
+    if (domInfo && typeof domInfo === 'object') {
+      for (const [key, info] of Object.entries(domInfo)) {
+        if (!info) continue;
         const prev = state.trajMetaById[key] || {};
         state.trajMetaById[key] = {
           ...prev,
           title: info.title || prev.title || '',
           project: info.project || prev.project || '',
         };
+      }
+    } else {
+      const rows = document.querySelectorAll('[data-testid="conversation-row-sidebar"][data-cascade-id]');
+      for (let i = 0; i < rows.length; i++) {
+        const info = extractRowConversationInfo(rows[i]);
+        if (info) {
+          const key = info.cascadeId.toLowerCase();
+          const prev = state.trajMetaById[key] || {};
+          state.trajMetaById[key] = {
+            ...prev,
+            title: info.title || prev.title || '',
+            project: info.project || prev.project || '',
+          };
+        }
       }
     }
 
@@ -5961,9 +6036,6 @@
     }
   }
 
-  const MIN_CONV_WIDTH = 560;
-  const DEFAULT_CONV_WIDTH = 768;
-
   function applyConversationMaxWidthVar(widthPx = state.convMaxWidth) {
     const val = widthPx > 0 ? `${Math.round(widthPx)}px` : '100%';
     if (document.documentElement.style.getPropertyValue('--aq-conv-max-width') !== val) {
@@ -5971,17 +6043,25 @@
     }
   }
 
-  function saveConversationMaxWidth(widthPx) {
-    const clean = widthPx > 0 ? Math.max(MIN_CONV_WIDTH, Math.round(widthPx)) : 0;
-    state.convMaxWidth = clean;
-    applyConversationMaxWidthVar(clean);
+  function syncConvWidthLocalCache(widthPx) {
     try {
-      localStorage.setItem('aq_conv_max_width_v1', clean > 0 ? String(clean) : 'full');
-      if (clean > 0) {
-        state.convLastCustomWidth = clean;
-        localStorage.setItem('aq_conv_last_custom_width_v1', String(clean));
+      localStorage.setItem('aq_conv_max_width_v1', widthPx > 0 ? String(widthPx) : 'full');
+      if (widthPx > 0) {
+        state.convLastCustomWidth = widthPx;
+        localStorage.setItem('aq_conv_last_custom_width_v1', String(widthPx));
       }
     } catch {}
+  }
+
+  function saveConversationMaxWidth(widthPx) {
+    const clean = widthPx > 0 ? Math.min(MAX_CONV_WIDTH, Math.max(MIN_CONV_WIDTH, Math.round(widthPx))) : 0;
+    const mode = clean > 0 ? 'custom' : 'full';
+    state.convWidthMode = mode;
+    state.convMaxWidth = clean;
+    state.uiPrefsMigrated = true;
+    applyConversationMaxWidthVar(clean);
+    syncConvWidthLocalCache(clean);
+    sendUiPrefsAction({ type: 'set-conv-width', mode, width: clean });
   }
 
   function formatConversationWidthLabel(widthPx) {
@@ -6393,6 +6473,7 @@
       return a.domIndex - b.domIndex;
     });
     const recentItems = recentCandidates.slice(0, 10);
+    state.latestSidebarDomInfo = domInfo;
 
     return { statusById, activeItems, recentItems };
   }
@@ -7164,6 +7245,10 @@
 
   function cleanupConversationPointerDrag(opts = {}) {
     clearConvDragExpandTimer();
+    if (state.convDragRaf) {
+      cancelAnimationFrame(state.convDragRaf);
+      state.convDragRaf = 0;
+    }
     const d = state.convDrag;
     state.convDrag = null;
     if (d?.mode === 'group-item' || d?.mode === 'group-folder' || d?.switchedFromProjects) {
@@ -7746,6 +7831,15 @@
   }
 
   function patchSidebarGroupsDynamicState(panel, activeCid, convStatuses, stableActiveItems, recentItems = []) {
+    // Read layout measurement BEFORE mutating DOM to avoid forced synchronous reflow in step 3
+    const bodyElForHeight =
+      !state.groupResizeDrag && !state.groupResizeSnapTimer ? panel.querySelector('.aq-grp-body') : null;
+    const expectedMaxH = bodyElForHeight
+      ? state.groupsBodyHeight > 0
+        ? `${clampGroupsBodyHeight(state.groupsBodyHeight, panel)}px`
+        : ''
+      : null;
+
     // 1. Update smart group header, collapse state, count, empty placeholder, and keyed list
     const activeBlockEl = panel.querySelector('[data-aq-smart-block="active"]');
     const smartFoldHintEl = panel.querySelector('[data-aq-smart-fold-hint]');
@@ -7937,17 +8031,12 @@
     }
 
     // 3. Keep max-height ceiling synced without disturbing active drag or spring-back animation
-    if (!state.groupResizeDrag && !state.groupResizeSnapTimer) {
-      const bodyEl = panel.querySelector('.aq-grp-body');
-      if (bodyEl) {
-        const expectedMaxH =
-          state.groupsBodyHeight > 0 ? `${clampGroupsBodyHeight(state.groupsBodyHeight, panel)}px` : '';
-        if (bodyEl.style.maxHeight !== expectedMaxH) {
-          bodyEl.style.maxHeight = expectedMaxH;
-        }
-        if (bodyEl.style.height && bodyEl.style.height !== 'auto') {
-          bodyEl.style.height = 'auto';
-        }
+    if (bodyElForHeight) {
+      if (expectedMaxH !== null && bodyElForHeight.style.maxHeight !== expectedMaxH) {
+        bodyElForHeight.style.maxHeight = expectedMaxH;
+      }
+      if (bodyElForHeight.style.height && bodyElForHeight.style.height !== 'auto') {
+        bodyElForHeight.style.height = 'auto';
       }
     }
   }
@@ -8653,7 +8742,13 @@
           state.projScrollEl.removeEventListener('scroll', state.onProjScroll);
         }
       }
-      state.onProjScroll = () => syncProjectSplitCards(findSidebarRoot());
+      state.onProjScroll = () => {
+        if (state.projScrollRaf || state.disposed) return;
+        state.projScrollRaf = requestAnimationFrame(() => {
+          state.projScrollRaf = 0;
+          if (!state.disposed) syncProjectSplitCards(findSidebarRoot());
+        });
+      };
       convList.addEventListener('scroll', state.onProjScroll, { passive: true });
       state.projScrollEl = convList;
     }
@@ -8823,8 +8918,10 @@
       state.groupRenderKey = '';
     }
     syncSidebarTabState(sidebar);
+    state.latestSidebarDomInfo = null;
     renderSidebarGroupsPanel(false);
-    syncGroupedConversationMetadata();
+    syncGroupedConversationMetadata(state.latestSidebarDomInfo);
+    state.latestSidebarDomInfo = null;
   }
 
   function syncCascadeRoute() {
@@ -8932,16 +9029,39 @@
   }
 
   function checkRoute() {
-    syncCascadeRoute();
-    scheduleRenderAll();
+    if (state.disposed) return;
+    const routeChanged = syncCascadeRoute();
+    if (
+      routeChanged ||
+      (!document.hidden && (!document.getElementById('aq-quota-chip') || !document.getElementById('aq-conv-groups')))
+    ) {
+      scheduleRenderAll();
+    }
   }
 
   // Expose receiver called by Node daemon
   window.__aqRenderTurns = function (payload) {
     try {
+      if (state.disposed) return;
       const cid = typeof payload?.cascadeId === 'string' ? payload.cascadeId.trim() : '';
       const sameChat = Boolean(cid && cid === state.lastTurnsCid);
-      const turns = Array.isArray(payload?.turns) ? payload.turns : [];
+      let nextPayload = payload;
+      if (
+        payload?.mode === 'tail' &&
+        sameChat &&
+        Array.isArray(state.turnsPayload?.turns) &&
+        Number.isInteger(payload.tailStartIndex) &&
+        payload.tailStartIndex >= 0 &&
+        payload.tailStartIndex <= state.turnsPayload.turns.length
+      ) {
+        const tailTurns = Array.isArray(payload.turns) ? payload.turns : [];
+        nextPayload = {
+          ...payload,
+          mode: 'full',
+          turns: state.turnsPayload.turns.slice(0, payload.tailStartIndex).concat(tailTurns),
+        };
+      }
+      const turns = Array.isArray(nextPayload?.turns) ? nextPayload.turns : [];
       let totalTokens = 0;
       let totalCalls = 0;
       for (let i = 0; i < turns.length; i++) {
@@ -8956,7 +9076,8 @@
       state.lastTurnsCid = cid;
       state.lastTurnActivitySig = activitySig;
       state.lastTurnCompleted = lastCompleted;
-      state.turnsPayload = payload;
+      state.turnsPayload = nextPayload;
+      state.turnsRenderSeq += 1;
       if (cid && activityChanged) {
         const meta = state.trajMetaById[cid.toLowerCase()];
         if (meta) {
@@ -8965,7 +9086,7 @@
           meta.lastOperatedMs = Math.max(meta.lastOperatedMs || 0, now);
         }
       }
-      scheduleRenderAll();
+      scheduleRender({ turns: true, chip: true });
       if (sameChat && !document.hidden) {
         if (lastCompleted && (activityChanged || !prevCompleted)) {
           scheduleQuotaForceRefresh(1500);
@@ -9049,6 +9170,53 @@
         state.keepAliveClaims.delete(reqId);
         resolver(payload);
       }
+    } catch {}
+  };
+
+  window.__aqRenderUiPrefs = function (payload) {
+    try {
+      const mode =
+        payload?.convWidthMode === 'full'
+          ? 'full'
+          : payload?.convWidthMode === 'custom'
+            ? 'custom'
+            : 'unset';
+      if (mode === 'unset') {
+        if (!state.uiPrefsMigrated) {
+          state.uiPrefsMigrated = true;
+          let legacy = { mode: 'unset', width: DEFAULT_CONV_WIDTH };
+          try {
+            legacy = parseConvWidthStorageValue(localStorage.getItem('aq_conv_max_width_v1'));
+          } catch {}
+          if (legacy.mode === 'custom' || legacy.mode === 'full') {
+            state.convWidthMode = legacy.mode;
+            state.convMaxWidth = legacy.width;
+            if (!state.convWidthDrag) {
+              applyConversationMaxWidthVar(legacy.width);
+            }
+            sendUiPrefsAction({ type: 'set-conv-width', mode: legacy.mode, width: legacy.width });
+            state.uiPrefsLoaded = true;
+            return;
+          }
+        }
+        state.convWidthMode = 'unset';
+        state.convMaxWidth = DEFAULT_CONV_WIDTH;
+        if (!state.convWidthDrag) {
+          applyConversationMaxWidthVar(DEFAULT_CONV_WIDTH);
+        }
+      } else {
+        const nextW =
+          mode === 'full'
+            ? 0
+            : Math.min(MAX_CONV_WIDTH, Math.max(MIN_CONV_WIDTH, Math.round(Number(payload?.convMaxWidth) || DEFAULT_CONV_WIDTH)));
+        state.convWidthMode = mode;
+        state.convMaxWidth = nextW;
+        syncConvWidthLocalCache(nextW);
+        if (!state.convWidthDrag) {
+          applyConversationMaxWidthVar(nextW);
+        }
+      }
+      state.uiPrefsLoaded = true;
     } catch {}
   };
 
@@ -9248,7 +9416,6 @@
     }
     if (shouldFlushNow) {
       syncNativeConversationMenus();
-      applyUiTranslations({ includeSidebar: false });
     }
     if (dirtyChip || dirtySidebar || dirtyTurns || dirtyMenus || dirtyI18n) {
       scheduleRender({
@@ -9269,18 +9436,26 @@
     attributeFilter: ['data-selected', 'data-cascade-id'],
   });
 
+  function scheduleHistoryRouteCheck(delayMs) {
+    const id = setTimeout(() => {
+      state.historyTimers.delete(id);
+      if (!state.disposed) checkRoute();
+    }, delayMs);
+    state.historyTimers.add(id);
+  }
+
   // Hook history API
   const origPush = history.pushState;
   const origReplace = history.replaceState;
   history.pushState = function (...args) {
     const r = origPush.apply(this, args);
-    setTimeout(checkRoute, 0);
-    setTimeout(checkRoute, 120);
+    scheduleHistoryRouteCheck(0);
+    scheduleHistoryRouteCheck(120);
     return r;
   };
   history.replaceState = function (...args) {
     const r = origReplace.apply(this, args);
-    setTimeout(checkRoute, 0);
+    scheduleHistoryRouteCheck(0);
     return r;
   };
   const onPopState = () => checkRoute();
@@ -9561,7 +9736,17 @@
       }
       activateConversationPointerDrag(d);
     }
-    updateConversationDragTarget(ev.clientX, ev.clientY);
+    d.lastX = ev.clientX;
+    d.lastY = ev.clientY;
+    if (!state.convDragRaf) {
+      state.convDragRaf = requestAnimationFrame(() => {
+        state.convDragRaf = 0;
+        const active = state.convDrag;
+        if (!state.disposed && active?.started) {
+          updateConversationDragTarget(active.lastX, active.lastY);
+        }
+      });
+    }
   };
   const onWinPointerUpCapture = (ev) => {
     const cw = state.convWidthDrag;
@@ -9782,12 +9967,19 @@
     state.domObserver?.disconnect();
     state.footerObserver?.disconnect();
     state.footerResizeObserver?.disconnect();
-    state.convResizeObserver?.disconnect();
-    state.convObservedNodes.clear();
+    state.domObserver = null;
+    state.footerObserver = null;
+    state.footerResizeObserver = null;
     if (state.renderRaf) cancelAnimationFrame(state.renderRaf);
     state.renderRaf = 0;
     if (state.chipResizeRaf) cancelAnimationFrame(state.chipResizeRaf);
     state.chipResizeRaf = 0;
+    if (state.projScrollRaf) cancelAnimationFrame(state.projScrollRaf);
+    state.projScrollRaf = 0;
+    if (state.convDragRaf) cancelAnimationFrame(state.convDragRaf);
+    state.convDragRaf = 0;
+    for (const tid of state.historyTimers) clearTimeout(tid);
+    state.historyTimers.clear();
     if (state.routeTimer) clearInterval(state.routeTimer);
     if (state.trajStatusTimer) clearInterval(state.trajStatusTimer);
     if (state.quotaTimer) clearInterval(state.quotaTimer);
@@ -9850,11 +10042,30 @@
       closeGroupCtxMenu();
     } catch {}
     document.documentElement.style.removeProperty('--aq-conv-max-width');
+    document.querySelectorAll('[data-testid="conversation-view"].aq-conv-width-armed').forEach((el) => {
+      el.classList.remove('aq-conv-width-armed');
+    });
     document.querySelectorAll('.aq-conv-width-resizer').forEach((el) => el.remove());
     state.optimisticRunningById.clear();
     state.keepAliveClaims.clear();
     state.keepAliveRunningPools.clear();
     state.hiddenKeepAliveCids.clear();
+    state.smartStableMap.clear();
+    state.trajMetaById = Object.create(null);
+    state.localViewedAtById = Object.create(null);
+    state.groups = [];
+    state.accounts = [];
+    state.turnsPayload = null;
+    state.latestSidebarDomInfo = null;
+    state.contextMenuProviderFiber = null;
+    state.contextMenuProto = null;
+    state.observedFooterBox = null;
+    state.observedResizeFooter = null;
+    state.turnTooltipAnchor = null;
+    state.quotaTooltipAnchor = null;
+    state.i18nTextCache = null;
+    state.i18nAttrCache = null;
+    state.i18nCtrlSigCache = null;
     document.getElementById('aq-codex-theme')?.remove();
     document.getElementById('aq-style')?.remove();
     document.getElementById('aq-context-chip')?.remove();
@@ -9897,6 +10108,7 @@
       delete window.__aqRenderUpdate;
       delete window.__aqRenderKeepAlive;
       delete window.__aqResolveKeepAliveClaim;
+      delete window.__aqRenderUiPrefs;
       delete window.__aqRenderGroups;
       delete window.__aqHydrated;
       delete window.__aq_version;

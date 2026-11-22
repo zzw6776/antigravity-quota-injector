@@ -225,10 +225,262 @@ export function getDbSignature(dbPath) {
   }
 }
 
+const parseMetaByResult = new WeakMap();
+
+function aggregateTurnSlice({
+  userStepIndices,
+  turnIndexOffset = 0,
+  allSteps,
+  genRows,
+  parsedGenRows = null,
+  initialCumulative = 0,
+  initialHasUsage = false,
+  initialLatestContext = null,
+}) {
+  const stepByIdx = new Map();
+  let lastTurnRunning = false;
+  const lastUserIdx = userStepIndices[userStepIndices.length - 1];
+  for (let i = 0; i < allSteps.length; i++) {
+    const s = allSteps[i];
+    const idx = Number(s.idx);
+    stepByIdx.set(idx, s);
+    if (idx >= lastUserIdx && Number(s.status) === 1) {
+      lastTurnRunning = true;
+    }
+  }
+
+  const buckets = userStepIndices.map((startStepIdx, localIdx) => ({
+    turnIndex: turnIndexOffset + localIdx,
+    startStepIdx,
+    calls: 0,
+    callDetails: [],
+    segments: [],
+    model: '',
+    modelLabel: '',
+    uncachedInputTokens: 0,
+    cachedInputTokens: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    thinkingTokens: 0,
+    responseTokens: 0,
+    totalTokens: 0,
+    cumulativeTotalTokens: 0,
+    contextTokens: 0,
+    maxContextTokens: 0,
+    ttftTotalMs: 0,
+    ttftSamples: 0,
+    streamDurationMs: 0,
+    streamTokens: 0,
+    totalDurationMs: 0,
+    wallDurationMs: null,
+    firstTokenLatencyMs: null,
+    outputSpeed: null,
+    completed: localIdx < userStepIndices.length - 1 ? true : !lastTurnRunning,
+  }));
+
+  const turnWallBounds = userStepIndices.map(() => ({ startTsSec: 0, endTsSec: 0 }));
+  for (let i = 0; i < allSteps.length; i++) {
+    const s = allSteps[i];
+    if (!(s.metadata instanceof Uint8Array)) continue;
+    const idx = Number(s.idx);
+    const localIdx = findTurnIndex(userStepIndices, idx);
+    if (localIdx < 0 || localIdx >= turnWallBounds.length) continue;
+    const m = parseProto(s.metadata);
+    const bounds = turnWallBounds[localIdx];
+    if (Number(s.step_type) === 14 && bounds.startTsSec === 0) {
+      bounds.startTsSec = readTimestampSec(m.get(1)) || readTimestampSec(m.get(6)) || 0;
+    }
+    const stepMaxTs = extractStepMaxTimestampSec(m);
+    if (stepMaxTs > bounds.endTsSec) {
+      bounds.endTsSec = stepMaxTs;
+    }
+  }
+
+  const rowAnchorTurns = [];
+  const totalGenRows = parsedGenRows ? parsedGenRows.length : genRows.length;
+  for (let i = 0; i < totalGenRows; i++) {
+    const parsed = parsedGenRows ? parsedGenRows[i] : parseGenMetadataRow(genRows[i]);
+    if (parsed.stepIds.length === 0) {
+      rowAnchorTurns.push({ idx: parsed.idx, localIdx: -1 });
+      continue;
+    }
+    const totalCallTokens = parsed.inTok + parsed.cacheRead + parsed.outTok;
+    if (totalCallTokens <= 0) {
+      rowAnchorTurns.push({ idx: parsed.idx, localIdx: -1 });
+      continue;
+    }
+
+    const anchorStep = Math.max(...parsed.stepIds);
+    const localIdx = findTurnIndex(userStepIndices, anchorStep);
+    rowAnchorTurns.push({ idx: parsed.idx, localIdx });
+    if (localIdx < 0 || localIdx >= buckets.length) continue;
+
+    const turn = buckets[localIdx];
+    turn.calls += 1;
+    if (parsed.model) {
+      turn.model = parsed.model;
+    } else if (!turn.model && parsed.modelLabel) {
+      turn.model = parsed.modelLabel;
+    }
+    if (parsed.modelLabel) turn.modelLabel = parsed.modelLabel;
+    turn.uncachedInputTokens += parsed.inTok;
+    turn.cachedInputTokens += parsed.cacheRead;
+    const callInput = parsed.inTok + parsed.cacheRead;
+    turn.inputTokens += callInput;
+    turn.outputTokens += parsed.outTok;
+    turn.thinkingTokens += parsed.thinkTok;
+    turn.responseTokens += parsed.respTok;
+    turn.totalTokens += callInput + parsed.outTok;
+    turn.contextTokens = callInput;
+    if (parsed.maxCtx > 0) turn.maxContextTokens = parsed.maxCtx;
+
+    const segModel = parsed.model || '';
+    const segLabel = parsed.modelLabel || '';
+    const contextTier = resolveContextTier(segModel || turn.model, callInput, segLabel || turn.modelLabel);
+    const lastSeg = turn.segments.at(-1);
+    if (lastSeg && lastSeg.model === segModel && lastSeg.modelLabel === segLabel && lastSeg.contextTier === contextTier) {
+      lastSeg.usage.inputTokens += callInput;
+      lastSeg.usage.uncachedInputTokens += parsed.inTok;
+      lastSeg.usage.cachedInputTokens += parsed.cacheRead;
+      lastSeg.usage.outputTokens += parsed.outTok;
+      lastSeg.usage.thinkingTokens += parsed.thinkTok;
+      lastSeg.usage.responseTokens += parsed.respTok;
+      lastSeg.usage.totalTokens += callInput + parsed.outTok;
+    } else {
+      turn.segments.push({
+        model: segModel,
+        modelLabel: segLabel,
+        contextTier,
+        usage: {
+          inputTokens: callInput,
+          uncachedInputTokens: parsed.inTok,
+          cachedInputTokens: parsed.cacheRead,
+          outputTokens: parsed.outTok,
+          thinkingTokens: parsed.thinkTok,
+          responseTokens: parsed.respTok,
+          totalTokens: callInput + parsed.outTok,
+        },
+      });
+    }
+
+    if (parsed.ttft > 0) {
+      turn.ttftTotalMs += parsed.ttft * 1000;
+      turn.ttftSamples += 1;
+    }
+    const totDur = parsed.ttft + parsed.stream;
+    turn.totalDurationMs += totDur * 1000;
+
+    // Only aggregate measurable streaming windows; exclude short buffered bursts
+    // and pre-first-token queueing/prefill (TTFT) from generation throughput.
+    const rawStreamTps = parsed.stream >= 0.5 ? parsed.outTok / parsed.stream : 0;
+    const streamRatio = totDur > 0 ? parsed.stream / totDur : 0;
+    const isMeasurableStream =
+      parsed.stream >= 0.5 &&
+      parsed.outTok > 1 &&
+      rawStreamTps > 0 &&
+      rawStreamTps <= 600 &&
+      (streamRatio >= 0.15 || (parsed.stream >= 2.0 && rawStreamTps <= 250));
+    if (isMeasurableStream) {
+      turn.streamDurationMs += parsed.stream * 1000;
+      turn.streamTokens += parsed.outTok - 1;
+    }
+    const { hasVisibleText, toolCalls } = extractStepCallDetails(parsed.stepIds, stepByIdx);
+    const followsToolResult = turn.callDetails.some(
+      (prev) => Array.isArray(prev.toolCalls) && prev.toolCalls.length > 0
+    );
+    turn.callDetails.push({
+      callIndex: turn.calls,
+      model: parsed.model || parsed.modelLabel || '',
+      modelLabel: parsed.modelLabel || '',
+      ttftMs: Math.round(parsed.ttft * 1000),
+      streamMs: Math.round(parsed.stream * 1000),
+      outTok: parsed.outTok,
+      speed: isMeasurableStream ? Number(((parsed.outTok - 1) / parsed.stream).toFixed(1)) : null,
+      hasVisibleText,
+      followsToolResult,
+      toolCalls,
+    });
+  }
+
+  let runningCumulative = initialCumulative;
+  let hasAnyUsage = initialHasUsage;
+  let latestContext = initialLatestContext;
+  for (let i = 0; i < buckets.length; i++) {
+    const turn = buckets[i];
+    runningCumulative += turn.totalTokens;
+    turn.cumulativeTotalTokens = runningCumulative;
+    if (turn.totalTokens > 0) hasAnyUsage = true;
+    if (turn.contextTokens > 0) {
+      latestContext = {
+        usedTokens: turn.contextTokens,
+        maxTokens: turn.maxContextTokens > 0 ? turn.maxContextTokens : 256000,
+      };
+    }
+    if (turn.ttftSamples > 0) {
+      turn.firstTokenLatencyMs = turn.ttftTotalMs / turn.ttftSamples;
+    }
+    if (turn.streamDurationMs > 0 && turn.streamTokens > 0) {
+      turn.outputSpeed = turn.streamTokens / (turn.streamDurationMs / 1000);
+    }
+    const bounds = turnWallBounds[i];
+    if (bounds.startTsSec > 0 && bounds.endTsSec >= bounds.startTsSec) {
+      turn.wallDurationMs = Math.round((bounds.endTsSec - bounds.startTsSec) * 1000);
+    }
+  }
+
+  return { buckets, latestContext, hasAnyUsage, rowAnchorTurns };
+}
+
+function buildFrozenTurnMeta(db, allUserIndices, turns, maxFrozenGenIdxHint = -1) {
+  let frozenCount = 0;
+  for (let i = 0; i < turns.length - 1; i++) {
+    if (!turns[i].completed) break;
+    frozenCount = i + 1;
+  }
+  if (frozenCount <= 0 || frozenCount >= allUserIndices.length) return null;
+  const tailStartIdx = allUserIndices[frozenCount];
+  let maxFrozenGenIdx = maxFrozenGenIdxHint;
+  let frozenGenCount = 0;
+  try {
+    if (maxFrozenGenIdx >= 0) {
+      frozenGenCount = Number(
+        db.prepare('SELECT count(*) AS cnt FROM gen_metadata WHERE idx <= ?').get(maxFrozenGenIdx)?.cnt || 0
+      );
+    }
+  } catch {
+    return null;
+  }
+  const frozenTurns = turns.slice(0, frozenCount);
+  const lastFrozen = frozenTurns[frozenTurns.length - 1];
+  let frozenLatestContext = null;
+  let frozenHasUsage = false;
+  for (let i = 0; i < frozenTurns.length; i++) {
+    const t = frozenTurns[i];
+    if (t.totalTokens > 0) frozenHasUsage = true;
+    if (t.contextTokens > 0) {
+      frozenLatestContext = {
+        usedTokens: t.contextTokens,
+        maxTokens: t.maxContextTokens > 0 ? t.maxContextTokens : 256000,
+      };
+    }
+  }
+  return {
+    frozenCount,
+    tailStartIdx,
+    userStepIndicesPrefix: allUserIndices.slice(0, frozenCount + 1),
+    frozenTurns,
+    frozenCumulative: lastFrozen ? lastFrozen.cumulativeTotalTokens : 0,
+    frozenLatestContext,
+    frozenHasUsage,
+    maxFrozenGenIdx,
+    frozenGenCount,
+  };
+}
+
 /**
  * Parse per-turn usage metrics from an Antigravity conversation SQLite database.
  */
-export function parseConversationTurns(dbPath, cascadeId = '') {
+export function parseConversationTurns(dbPath, cascadeId = '', { prevPayload = null } = {}) {
   if (!dbPath || !fs.existsSync(dbPath)) {
     return { cascadeId, hasData: false, turns: [] };
   }
@@ -236,6 +488,12 @@ export function parseConversationTurns(dbPath, cascadeId = '') {
   try {
     db = new DatabaseSync(dbPath, { readOnly: true, timeout: 200 });
     const stepCols = new Set(db.prepare('PRAGMA table_info(steps)').all().map((c) => c.name));
+    const userRows = db.prepare('SELECT idx FROM steps WHERE step_type = 14 ORDER BY idx ASC').all();
+    const userStepIndices = userRows.map((r) => Number(r.idx));
+    if (userStepIndices.length === 0) {
+      return { cascadeId, hasData: false, turns: [] };
+    }
+
     const selectCols = [
       'idx',
       'step_type',
@@ -245,208 +503,121 @@ export function parseConversationTurns(dbPath, cascadeId = '') {
         ? ['CASE WHEN step_type = 15 THEN step_payload ELSE NULL END AS step_payload']
         : []),
     ];
+
+    const prevMeta = prevPayload ? parseMetaByResult.get(prevPayload) : null;
+    if (prevMeta && prevMeta.frozenCount > 0 && userStepIndices.length > prevMeta.frozenCount) {
+      let prefixMatches = true;
+      for (let i = 0; i < prevMeta.userStepIndicesPrefix.length; i++) {
+        if (userStepIndices[i] !== prevMeta.userStepIndicesPrefix[i]) {
+          prefixMatches = false;
+          break;
+        }
+      }
+      if (prefixMatches) {
+        const hasEarlierRunning = db
+          .prepare('SELECT 1 FROM steps WHERE idx < ? AND status = 1 LIMIT 1')
+          .get(prevMeta.tailStartIdx);
+        const curFrozenGenCount =
+          prevMeta.maxFrozenGenIdx >= 0
+            ? Number(
+                db
+                  .prepare('SELECT count(*) AS cnt FROM gen_metadata WHERE idx <= ?')
+                  .get(prevMeta.maxFrozenGenIdx)?.cnt || 0
+              )
+            : 0;
+        if (!hasEarlierRunning && curFrozenGenCount === prevMeta.frozenGenCount) {
+          const tailGenRows = db
+            .prepare('SELECT idx, data FROM gen_metadata WHERE idx > ? ORDER BY idx ASC')
+            .all(prevMeta.maxFrozenGenIdx);
+          const parsedTailGenRows = [];
+          let genSpillsBeforeTail = false;
+          for (let i = 0; i < tailGenRows.length; i++) {
+            const parsed = parseGenMetadataRow(tailGenRows[i]);
+            if (
+              parsed.stepIds.length > 0 &&
+              parsed.inTok + parsed.cacheRead + parsed.outTok > 0 &&
+              Math.max(...parsed.stepIds) < prevMeta.tailStartIdx
+            ) {
+              genSpillsBeforeTail = true;
+              break;
+            }
+            parsedTailGenRows.push(parsed);
+          }
+          if (!genSpillsBeforeTail) {
+            const tailSteps = db
+              .prepare(
+                `SELECT ${selectCols.join(', ')} FROM steps WHERE idx >= ? AND (step_type IN (14, 15, 132) OR status = 1) ORDER BY idx ASC`
+              )
+              .all(prevMeta.tailStartIdx);
+            const tailUserIndices = userStepIndices.slice(prevMeta.frozenCount);
+            const tailAgg = aggregateTurnSlice({
+              userStepIndices: tailUserIndices,
+              turnIndexOffset: prevMeta.frozenCount,
+              allSteps: tailSteps,
+              genRows: tailGenRows,
+              parsedGenRows: parsedTailGenRows,
+              initialCumulative: prevMeta.frozenCumulative,
+              initialHasUsage: prevMeta.frozenHasUsage,
+              initialLatestContext: prevMeta.frozenLatestContext,
+            });
+            const allTurns = [...prevMeta.frozenTurns, ...tailAgg.buckets];
+            let nextMaxFrozenGenIdx = prevMeta.maxFrozenGenIdx;
+            const nextFreezeCutoffLocal = Math.max(0, tailAgg.buckets.length - 1);
+            for (let i = 0; i < tailAgg.rowAnchorTurns.length; i++) {
+              const info = tailAgg.rowAnchorTurns[i];
+              if (info.localIdx >= 0 && info.localIdx < nextFreezeCutoffLocal && Number(info.idx) > nextMaxFrozenGenIdx) {
+                nextMaxFrozenGenIdx = Number(info.idx);
+              }
+            }
+            const result = {
+              cascadeId,
+              hasData: tailAgg.hasAnyUsage,
+              latestContext: tailAgg.latestContext,
+              turns: allTurns,
+            };
+            const nextMeta = buildFrozenTurnMeta(db, userStepIndices, allTurns, nextMaxFrozenGenIdx);
+            if (nextMeta) parseMetaByResult.set(result, nextMeta);
+            return result;
+          }
+        }
+      }
+    }
+
     const allSteps = db
       .prepare(
         `SELECT ${selectCols.join(', ')} FROM steps WHERE step_type IN (14, 15, 132) OR status = 1 ORDER BY idx ASC`
       )
       .all();
-    const stepByIdx = new Map();
-    const userStepIndices = [];
-    for (let i = 0; i < allSteps.length; i++) {
-      const s = allSteps[i];
-      const idx = Number(s.idx);
-      stepByIdx.set(idx, s);
-      if (Number(s.step_type) === 14) {
-        userStepIndices.push(idx);
-      }
-    }
-
-    if (userStepIndices.length === 0) {
-      return { cascadeId, hasData: false, turns: [] };
-    }
-
-    const lastUserIdx = userStepIndices[userStepIndices.length - 1];
-    const lastTurnRunning = allSteps.some(
-      (s) => Number(s.idx) >= lastUserIdx && Number(s.status) === 1
-    );
-
-    const buckets = userStepIndices.map((startStepIdx, turnIndex) => ({
-      turnIndex,
-      startStepIdx,
-      calls: 0,
-      callDetails: [],
-      segments: [],
-      model: '',
-      modelLabel: '',
-      uncachedInputTokens: 0,
-      cachedInputTokens: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      thinkingTokens: 0,
-      responseTokens: 0,
-      totalTokens: 0,
-      cumulativeTotalTokens: 0,
-      contextTokens: 0,
-      maxContextTokens: 0,
-      ttftTotalMs: 0,
-      ttftSamples: 0,
-      streamDurationMs: 0,
-      streamTokens: 0,
-      totalDurationMs: 0,
-      wallDurationMs: null,
-      firstTokenLatencyMs: null,
-      outputSpeed: null,
-      completed: turnIndex < userStepIndices.length - 1 ? true : !lastTurnRunning,
-    }));
-
-    const turnWallBounds = userStepIndices.map(() => ({ startTsSec: 0, endTsSec: 0 }));
-    for (let i = 0; i < allSteps.length; i++) {
-      const s = allSteps[i];
-      if (!(s.metadata instanceof Uint8Array)) continue;
-      const idx = Number(s.idx);
-      const turnIdx = findTurnIndex(userStepIndices, idx);
-      if (turnIdx < 0 || turnIdx >= turnWallBounds.length) continue;
-      const m = parseProto(s.metadata);
-      const bounds = turnWallBounds[turnIdx];
-      if (Number(s.step_type) === 14 && bounds.startTsSec === 0) {
-        bounds.startTsSec = readTimestampSec(m.get(1)) || readTimestampSec(m.get(6)) || 0;
-      }
-      const stepMaxTs = extractStepMaxTimestampSec(m);
-      if (stepMaxTs > bounds.endTsSec) {
-        bounds.endTsSec = stepMaxTs;
-      }
-    }
-
     const genRows = db.prepare('SELECT idx, data FROM gen_metadata ORDER BY idx ASC').all();
-    for (let i = 0; i < genRows.length; i++) {
-      const parsed = parseGenMetadataRow(genRows[i]);
-      if (parsed.stepIds.length === 0) continue;
-      const totalCallTokens = parsed.inTok + parsed.cacheRead + parsed.outTok;
-      if (totalCallTokens <= 0) continue;
-
-      const anchorStep = Math.max(...parsed.stepIds);
-      const turnIdx = findTurnIndex(userStepIndices, anchorStep);
-      if (turnIdx < 0 || turnIdx >= buckets.length) continue;
-
-      const turn = buckets[turnIdx];
-      turn.calls += 1;
-      if (parsed.model) {
-        turn.model = parsed.model;
-      } else if (!turn.model && parsed.modelLabel) {
-        turn.model = parsed.modelLabel;
-      }
-      if (parsed.modelLabel) turn.modelLabel = parsed.modelLabel;
-      turn.uncachedInputTokens += parsed.inTok;
-      turn.cachedInputTokens += parsed.cacheRead;
-      const callInput = parsed.inTok + parsed.cacheRead;
-      turn.inputTokens += callInput;
-      turn.outputTokens += parsed.outTok;
-      turn.thinkingTokens += parsed.thinkTok;
-      turn.responseTokens += parsed.respTok;
-      turn.totalTokens += callInput + parsed.outTok;
-      turn.contextTokens = callInput;
-      if (parsed.maxCtx > 0) turn.maxContextTokens = parsed.maxCtx;
-
-      const segModel = parsed.model || '';
-      const segLabel = parsed.modelLabel || '';
-      const contextTier = resolveContextTier(segModel || turn.model, callInput, segLabel || turn.modelLabel);
-      const lastSeg = turn.segments.at(-1);
-      if (lastSeg && lastSeg.model === segModel && lastSeg.modelLabel === segLabel && lastSeg.contextTier === contextTier) {
-        lastSeg.usage.inputTokens += callInput;
-        lastSeg.usage.uncachedInputTokens += parsed.inTok;
-        lastSeg.usage.cachedInputTokens += parsed.cacheRead;
-        lastSeg.usage.outputTokens += parsed.outTok;
-        lastSeg.usage.thinkingTokens += parsed.thinkTok;
-        lastSeg.usage.responseTokens += parsed.respTok;
-        lastSeg.usage.totalTokens += callInput + parsed.outTok;
-      } else {
-        turn.segments.push({
-          model: segModel,
-          modelLabel: segLabel,
-          contextTier,
-          usage: {
-            inputTokens: callInput,
-            uncachedInputTokens: parsed.inTok,
-            cachedInputTokens: parsed.cacheRead,
-            outputTokens: parsed.outTok,
-            thinkingTokens: parsed.thinkTok,
-            responseTokens: parsed.respTok,
-            totalTokens: callInput + parsed.outTok,
-          },
-        });
-      }
-
-      if (parsed.ttft > 0) {
-        turn.ttftTotalMs += parsed.ttft * 1000;
-        turn.ttftSamples += 1;
-      }
-      const totDur = parsed.ttft + parsed.stream;
-      turn.totalDurationMs += totDur * 1000;
-
-      // Only aggregate measurable streaming windows; exclude short buffered bursts
-      // and pre-first-token queueing/prefill (TTFT) from generation throughput.
-      const rawStreamTps = parsed.stream >= 0.5 ? parsed.outTok / parsed.stream : 0;
-      const streamRatio = totDur > 0 ? parsed.stream / totDur : 0;
-      const isMeasurableStream =
-        parsed.stream >= 0.5 &&
-        parsed.outTok > 1 &&
-        rawStreamTps > 0 &&
-        rawStreamTps <= 600 &&
-        (streamRatio >= 0.15 || (parsed.stream >= 2.0 && rawStreamTps <= 250));
-      if (isMeasurableStream) {
-        turn.streamDurationMs += parsed.stream * 1000;
-        turn.streamTokens += parsed.outTok - 1;
-      }
-      const { hasVisibleText, toolCalls } = extractStepCallDetails(parsed.stepIds, stepByIdx);
-      const followsToolResult = turn.callDetails.some(
-        (prev) => Array.isArray(prev.toolCalls) && prev.toolCalls.length > 0
-      );
-      turn.callDetails.push({
-        callIndex: turn.calls,
-        model: parsed.model || parsed.modelLabel || '',
-        modelLabel: parsed.modelLabel || '',
-        ttftMs: Math.round(parsed.ttft * 1000),
-        streamMs: Math.round(parsed.stream * 1000),
-        outTok: parsed.outTok,
-        speed: isMeasurableStream ? Number(((parsed.outTok - 1) / parsed.stream).toFixed(1)) : null,
-        hasVisibleText,
-        followsToolResult,
-        toolCalls,
-      });
+    const fullAgg = aggregateTurnSlice({
+      userStepIndices,
+      turnIndexOffset: 0,
+      allSteps,
+      genRows,
+    });
+    let maxFrozenGenIdx = -1;
+    let frozenCutoff = 0;
+    for (let i = 0; i < fullAgg.buckets.length - 1; i++) {
+      if (!fullAgg.buckets[i].completed) break;
+      frozenCutoff = i + 1;
     }
-
-    let runningCumulative = 0;
-    let hasAnyUsage = false;
-    let latestContext = null;
-    for (let i = 0; i < buckets.length; i++) {
-      const turn = buckets[i];
-      runningCumulative += turn.totalTokens;
-      turn.cumulativeTotalTokens = runningCumulative;
-      if (turn.totalTokens > 0) hasAnyUsage = true;
-      if (turn.contextTokens > 0) {
-        latestContext = {
-          usedTokens: turn.contextTokens,
-          maxTokens: turn.maxContextTokens > 0 ? turn.maxContextTokens : 256000,
-        };
-      }
-      if (turn.ttftSamples > 0) {
-        turn.firstTokenLatencyMs = turn.ttftTotalMs / turn.ttftSamples;
-      }
-      if (turn.streamDurationMs > 0 && turn.streamTokens > 0) {
-        turn.outputSpeed = turn.streamTokens / (turn.streamDurationMs / 1000);
-      }
-      const bounds = turnWallBounds[i];
-      if (bounds.startTsSec > 0 && bounds.endTsSec >= bounds.startTsSec) {
-        turn.wallDurationMs = Math.round((bounds.endTsSec - bounds.startTsSec) * 1000);
+    if (frozenCutoff > 0) {
+      for (let i = 0; i < fullAgg.rowAnchorTurns.length; i++) {
+        const info = fullAgg.rowAnchorTurns[i];
+        if (info.localIdx >= 0 && info.localIdx < frozenCutoff && Number(info.idx) > maxFrozenGenIdx) {
+          maxFrozenGenIdx = Number(info.idx);
+        }
       }
     }
-
-    return {
+    const result = {
       cascadeId,
-      hasData: hasAnyUsage,
-      latestContext,
-      turns: buckets,
+      hasData: fullAgg.hasAnyUsage,
+      latestContext: fullAgg.latestContext,
+      turns: fullAgg.buckets,
     };
+    const nextMeta = buildFrozenTurnMeta(db, userStepIndices, fullAgg.buckets, maxFrozenGenIdx);
+    if (nextMeta) parseMetaByResult.set(result, nextMeta);
+    return result;
   } catch (err) {
     const msg = String(err?.message || '');
     if (/locked|busy/i.test(msg)) {

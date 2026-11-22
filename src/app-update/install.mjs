@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -84,18 +84,35 @@ export async function verifyMacBundle(bundle, asset, { execImpl = execFileAsync,
 }
 
 export async function verifyWindowsInstallerPE(filePath) {
-  const buf = await readFile(filePath);
-  const peOffset = buf.length >= 64 ? buf.readUInt32LE(0x3c) : -1;
-  if (
-    buf.toString('ascii', 0, 2) !== 'MZ' ||
-    peOffset < 0 ||
-    peOffset + 6 > buf.length ||
-    buf.toString('ascii', peOffset, peOffset + 4) !== 'PE\0\0' ||
-    ![0x14c, 0x8664].includes(buf.readUInt16LE(peOffset + 4))
-  ) {
-    throw new Error('Windows 安装包不是有效的 PE 可执行文件');
+  let fh;
+  try {
+    fh = await open(filePath, 'r');
+    const info = await fh.stat();
+    if (info.size < 64) {
+      throw new Error('Windows 安装包不是有效的 PE 可执行文件');
+    }
+    const dosHeader = Buffer.allocUnsafe(64);
+    const dosRead = await fh.read(dosHeader, 0, 64, 0);
+    if (dosRead.bytesRead < 64 || dosHeader.toString('ascii', 0, 2) !== 'MZ') {
+      throw new Error('Windows 安装包不是有效的 PE 可执行文件');
+    }
+    const peOffset = dosHeader.readUInt32LE(0x3c);
+    if (peOffset < 0 || peOffset + 6 > info.size) {
+      throw new Error('Windows 安装包不是有效的 PE 可执行文件');
+    }
+    const peHeader = Buffer.allocUnsafe(6);
+    const peRead = await fh.read(peHeader, 0, 6, peOffset);
+    if (
+      peRead.bytesRead < 6 ||
+      peHeader.toString('ascii', 0, 4) !== 'PE\0\0' ||
+      ![0x14c, 0x8664].includes(peHeader.readUInt16LE(4))
+    ) {
+      throw new Error('Windows 安装包不是有效的 PE 可执行文件');
+    }
+    return true;
+  } finally {
+    await fh?.close().catch(() => {});
   }
-  return true;
 }
 
 export async function prepareUpdateArtifact({

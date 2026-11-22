@@ -34,13 +34,6 @@ body[data-agy-font] :where(.font-sans) {
   --agy-gsf-h1-wght: 600 !important;
   --agy-gsf-h3-wght: 600 !important;
   --agy-gsf-slnt: 0 !important;
-  --max-conversation-width: var(--aq-conv-max-width, 100%) !important;
-  --max-artifact-width: var(--aq-conv-max-width, 100%) !important;
-}
-
-[style*="--max-conversation-width"],
-[style*="--max-artifact-width"] {
-  max-width: min(100%, var(--aq-conv-max-width, 100%)) !important;
 }
 
 html,

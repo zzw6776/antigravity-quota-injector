@@ -269,3 +269,109 @@ test('parseConversationTurns extracts tool call names, durations, and visible re
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
+
+test('parseConversationTurns incremental tail parse matches full parse and freezes completed turns', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aq-proto-inc-test-'));
+  const dbPath = path.join(tmpDir, 'conv.db');
+  const cid = '22222222-2222-2222-2222-222222222222';
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE steps (
+      idx INTEGER PRIMARY KEY,
+      step_type INTEGER NOT NULL,
+      status INTEGER NOT NULL DEFAULT 3,
+      metadata BLOB,
+      step_payload BLOB
+    );
+    CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);
+  `);
+
+  const insertStep = db.prepare('INSERT INTO steps (idx, step_type, status) VALUES (?, ?, ?)');
+  const insertGen = db.prepare('INSERT INTO gen_metadata (idx, data) VALUES (?, ?)');
+
+  // Turn 0 (completed) + Turn 1 (running)
+  insertStep.run(0, 14, 3);
+  insertStep.run(1, 15, 3);
+  insertGen.run(
+    0,
+    buildGenMetadataBlob({
+      stepIds: [1],
+      inTok: 1000,
+      outTok: 100,
+      cacheRead: 500,
+      thinkTok: 20,
+      respTok: 80,
+      ttftSec: 1,
+      streamSec: 1,
+      model: 'gemini-4-hydrogen',
+    })
+  );
+
+  insertStep.run(2, 14, 3);
+  insertStep.run(3, 15, 1);
+  insertGen.run(
+    1,
+    buildGenMetadataBlob({
+      stepIds: [3],
+      inTok: 1200,
+      outTok: 50,
+      cacheRead: 800,
+      thinkTok: 10,
+      respTok: 40,
+      ttftSec: 1,
+      streamSec: 1,
+      model: 'gemini-4-hydrogen',
+    })
+  );
+
+  const pass1 = parseConversationTurns(dbPath, cid);
+  assert.equal(pass1.turns.length, 2);
+  assert.equal(pass1.turns[0].completed, true);
+  assert.equal(pass1.turns[1].completed, false);
+
+  // Turn 1 finishes and Turn 2 starts streaming
+  db.prepare('UPDATE steps SET status = 3 WHERE idx = 3').run();
+  insertStep.run(4, 14, 3);
+  insertStep.run(5, 15, 1);
+  insertGen.run(
+    2,
+    buildGenMetadataBlob({
+      stepIds: [5],
+      inTok: 1500,
+      outTok: 120,
+      cacheRead: 1000,
+      thinkTok: 20,
+      respTok: 100,
+      ttftSec: 1,
+      streamSec: 2,
+      model: 'gemini-4-hydrogen',
+    })
+  );
+
+  const inc = parseConversationTurns(dbPath, cid, { prevPayload: pass1 });
+  const full = parseConversationTurns(dbPath, cid);
+  assert.deepEqual(inc, full);
+  assert.equal(inc.turns[0], pass1.turns[0]);
+
+  // Late gen_metadata arrival referencing frozen Turn 0 falls back safely to full parse
+  insertGen.run(
+    3,
+    buildGenMetadataBlob({
+      stepIds: [1],
+      inTok: 100,
+      outTok: 20,
+      cacheRead: 0,
+      thinkTok: 0,
+      respTok: 20,
+      ttftSec: 1,
+      streamSec: 1,
+      model: 'gemini-4-hydrogen',
+    })
+  );
+  const incFallback = parseConversationTurns(dbPath, cid, { prevPayload: inc });
+  const fullFallback = parseConversationTurns(dbPath, cid);
+  assert.deepEqual(incFallback, fullFallback);
+
+  db.close();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});

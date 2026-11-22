@@ -41,6 +41,7 @@ import {
   resolveConversationDbPath,
 } from './proto-metrics.mjs';
 import { TokenPricingManager } from './token-pricing.mjs';
+import { readUiPrefsStore, updateConversationWidthPref } from './ui-prefs.mjs';
 
 function resolveSrcDir() {
   if (typeof __dirname === 'string') return __dirname;
@@ -95,6 +96,7 @@ export function getAppDataPaths(channel = 'stable') {
     stateDir,
     accountsFile: path.join(stateDir, 'accounts.json'),
     groupsFile: path.join(stateDir, 'conversation-groups.json'),
+    uiPrefsFile: path.join(stateDir, 'ui-prefs.json'),
   };
 }
 
@@ -346,6 +348,7 @@ export async function runDaemon({
     : null;
   const keepAliveManager = createKeepAliveManager({ stateDir: paths.stateDir });
   const attached = new Map(); // targetId -> session state
+  const targetCooldownUntil = new Map(); // non-host / unreachable targetId -> retry timestamp
   const turnsCache = new Map(); // dbPath -> { sig, payload }
   let stopping = false;
   let switchInFlight = false;
@@ -431,11 +434,17 @@ export async function runDaemon({
 
   const pushAccountsToSession = async (session, extra = {}) => {
     if (!session?.client?.isOpen() || !session.hostConfirmed) return;
-    const activeEmail = resolveSessionEmail(session, extra.activeEmail);
+    const activeEmail = extra.resolvedEmail !== undefined
+      ? extra.resolvedEmail
+      : resolveSessionEmail(session, extra.activeEmail);
     const payload = {
       supported: accountSupport.supported,
       unsupportedReason: accountSupport.reason,
-      accounts: accountSupport.supported ? listAccounts(paths.accountsFile, activeEmail) : [],
+      accounts: Array.isArray(extra.accounts)
+        ? extra.accounts
+        : accountSupport.supported
+          ? listAccounts(paths.accountsFile, activeEmail)
+          : [],
       busy: Boolean(extra.busy ?? switchInFlight),
       status: String(extra.status || ''),
       error: String(extra.error || ''),
@@ -449,9 +458,46 @@ export async function runDaemon({
   };
 
   const pushAccountsToAllSessions = async (extra = {}) => {
-    for (const s of attached.values()) {
-      await pushAccountsToSession(s, extra);
+    const sessions = [...attached.values()];
+    if (sessions.length === 0) return;
+    let fallbackEmail;
+    let baseList = null;
+    const accountsByEmail = new Map();
+    if (accountSupport.supported && !Array.isArray(extra.accounts)) {
+      baseList = listAccounts(paths.accountsFile, '');
     }
+    const resolveSharedAccounts = (email) => {
+      if (Array.isArray(extra.accounts)) return extra.accounts;
+      if (!accountSupport.supported || !baseList) return [];
+      const key = String(email || '').trim().toLowerCase();
+      if (!accountsByEmail.has(key)) {
+        accountsByEmail.set(
+          key,
+          baseList.map((item) => ({
+            ...item,
+            active: Boolean(key && item.email.toLowerCase() === key),
+          }))
+        );
+      }
+      return accountsByEmail.get(key);
+    };
+    await Promise.allSettled(
+      sessions.map((s) => {
+        let resolvedEmail = String(extra.activeEmail || s?.activeEmail || '').trim();
+        if (!resolvedEmail) {
+          if (fallbackEmail === undefined) {
+            fallbackEmail = readLastLoginEmail(paths.appSupportDir);
+          }
+          resolvedEmail = fallbackEmail;
+          if (resolvedEmail && s) s.activeEmail = resolvedEmail;
+        }
+        return pushAccountsToSession(s, {
+          ...extra,
+          resolvedEmail,
+          accounts: resolveSharedAccounts(resolvedEmail),
+        });
+      })
+    );
   };
 
   const pushGroupsToSession = async (session, extra = {}) => {
@@ -474,6 +520,49 @@ export async function runDaemon({
     const store = extra.store || readConversationGroupsStore(paths.groupsFile);
     for (const s of attached.values()) {
       await pushGroupsToSession(s, { ...extra, store });
+    }
+  };
+
+  const pushUiPrefsToSession = async (session, extra = {}) => {
+    if (!session?.client?.isOpen() || !session.hostConfirmed) return;
+    const store = extra.store || readUiPrefsStore(paths.uiPrefsFile);
+    const payload = {
+      convWidthMode: store.convWidthMode,
+      convMaxWidth: store.convMaxWidth,
+    };
+    try {
+      await session.client.send('Runtime.evaluate', {
+        expression: `window.__aqRenderUiPrefs && window.__aqRenderUiPrefs(${JSON.stringify(payload)})`,
+        returnByValue: false,
+      });
+    } catch {}
+  };
+
+  const pushUiPrefsToAllSessions = async (extra = {}) => {
+    const store = extra.store || readUiPrefsStore(paths.uiPrefsFile);
+    for (const s of attached.values()) {
+      await pushUiPrefsToSession(s, { ...extra, store });
+    }
+  };
+
+  const handleUiPrefsAction = async (session, rawPayload) => {
+    let msg;
+    try {
+      msg = JSON.parse(String(rawPayload || '{}'));
+    } catch {
+      return;
+    }
+    const type = String(msg?.type || '');
+    if (type === 'get') {
+      await pushUiPrefsToSession(session);
+      return;
+    }
+    if (type === 'set-conv-width') {
+      const store = updateConversationWidthPref(paths.uiPrefsFile, {
+        mode: msg?.mode,
+        width: msg?.width,
+      });
+      await pushUiPrefsToAllSessions({ store });
     }
   };
 
@@ -806,9 +895,9 @@ export async function runDaemon({
     }
   };
 
-  const syncTurnsForSession = async (session, force = false) => {
+  const syncTurnsForSession = async (session, force = false, { skipCidProbe = false } = {}) => {
     if (!session.client.isOpen() || !session.hostConfirmed) return;
-    if (!session.activeCascadeId || force) {
+    if ((!session.activeCascadeId && !skipCidProbe) || force) {
       const res = await session.client.send('Runtime.evaluate', {
         expression: `window.__aqGetWatchedCascadeId ? window.__aqGetWatchedCascadeId() : (() => {
           const m = location.pathname.match(/\\/c\\/([0-9a-f-]{36})/i);
@@ -834,7 +923,9 @@ export async function runDaemon({
     if (cached && cached.sig === sig) {
       basePayload = cached.payload;
     } else {
-      basePayload = parseConversationTurns(dbPath, session.activeCascadeId);
+      basePayload = parseConversationTurns(dbPath, session.activeCascadeId, {
+        prevPayload: cached?.payload || null,
+      });
       if (basePayload.transientError) return;
       if (turnsCache.size > 24) {
         turnsCache.delete(turnsCache.keys().next().value);
@@ -842,20 +933,57 @@ export async function runDaemon({
       turnsCache.set(dbPath, { sig, payload: basePayload });
     }
     const payload = pricingManager.enrichConversationPayload(basePayload);
+    const rawTurns = Array.isArray(basePayload.turns) ? basePayload.turns : [];
 
-    await session.client.send('Runtime.evaluate', {
-      expression: `window.__aqRenderTurns && window.__aqRenderTurns(${JSON.stringify(payload)})`,
+    let outPayload = payload;
+    if (
+      !force &&
+      session.lastPushedCid === session.activeCascadeId &&
+      session.lastPushedRateSig === rateSig &&
+      Array.isArray(session.lastPushedRawTurns) &&
+      session.lastPushedRawTurns.length > 0 &&
+      rawTurns.length >= session.lastPushedRawTurns.length
+    ) {
+      let stablePrefix = 0;
+      const limit = Math.min(session.lastPushedRawTurns.length - 1, rawTurns.length - 1);
+      while (stablePrefix < limit && rawTurns[stablePrefix] === session.lastPushedRawTurns[stablePrefix]) {
+        stablePrefix += 1;
+      }
+      if (stablePrefix > 0) {
+        outPayload = {
+          mode: 'tail',
+          cascadeId: payload.cascadeId,
+          hasData: payload.hasData,
+          latestContext: payload.latestContext,
+          tailStartIndex: stablePrefix,
+          turns: payload.turns.slice(stablePrefix),
+        };
+      }
+    }
+
+    const evalRes = await session.client.send('Runtime.evaluate', {
+      expression: `window.__aqRenderTurns && window.__aqRenderTurns(${JSON.stringify(outPayload)})`,
       returnByValue: false,
     });
+    if (!evalRes) return;
     session.lastPushedKey = sessionKey;
+    session.lastPushedCid = session.activeCascadeId;
+    session.lastPushedRateSig = rateSig;
+    session.lastPushedRawTurns = rawTurns;
   };
+
+  const PROBE_FAIL_COOLDOWN_MS = 60_000;
 
   const attachTarget = async (target) => {
     if (attached.has(target.id) || !target.webSocketDebuggerUrl) return;
+    const cooldownUntil = targetCooldownUntil.get(target.id) || 0;
+    if (cooldownUntil > Date.now()) return;
+
     let client;
     try {
       client = await createCdpClient(target.webSocketDebuggerUrl);
     } catch {
+      targetCooldownUntil.set(target.id, Date.now() + PROBE_FAIL_COOLDOWN_MS);
       return;
     }
 
@@ -865,6 +993,9 @@ export async function runDaemon({
       hostConfirmed: false,
       activeCascadeId: '',
       lastPushedKey: '',
+      lastPushedCid: '',
+      lastPushedRateSig: '',
+      lastPushedRawTurns: null,
       evalScriptId: null,
     };
     attached.set(target.id, session);
@@ -881,18 +1012,19 @@ export async function runDaemon({
     });
     if (probeRes?.result?.result?.value !== true) {
       attached.delete(target.id);
+      targetCooldownUntil.set(target.id, Date.now() + PROBE_FAIL_COOLDOWN_MS);
       client.close();
       return;
     }
+    targetCooldownUntil.delete(target.id);
 
     session.hostConfirmed = true;
-    await client.send('Runtime.enable');
-    await client.send('Page.enable');
     await client.send('Runtime.addBinding', { name: '__aqRequestTurns' });
     await client.send('Runtime.addBinding', { name: '__aqAccountAction' });
     await client.send('Runtime.addBinding', { name: '__aqUpdateAction' });
     await client.send('Runtime.addBinding', { name: '__aqGroupAction' });
     await client.send('Runtime.addBinding', { name: '__aqKeepAliveAction' });
+    await client.send('Runtime.addBinding', { name: '__aqUiPrefsAction' });
 
     client.onBinding((params) => {
       if (params?.name === '__aqRequestTurns') {
@@ -910,6 +1042,8 @@ export async function runDaemon({
         void handleGroupAction(session, params.payload);
       } else if (params?.name === '__aqKeepAliveAction') {
         void handleKeepAliveAction(session, params.payload);
+      } else if (params?.name === '__aqUiPrefsAction') {
+        void handleUiPrefsAction(session, params.payload);
       }
     });
 
@@ -921,6 +1055,7 @@ export async function runDaemon({
   };
 
   const hydrateSession = async (session) => {
+    await pushUiPrefsToSession(session);
     await syncTurnsForSession(session, true);
     await pushAccountsToSession(session);
     await pushGroupsToSession(session);
@@ -941,47 +1076,59 @@ export async function runDaemon({
     const targets = await fetchCdpTargets(port);
     const liveIds = new Set();
     const targetUrlById = new Map();
+    const attachCandidates = [];
 
     for (const t of targets) {
       if (t.type !== 'page' || !ALLOWED_ORIGIN_RE.test(String(t.url || ''))) continue;
       liveIds.add(t.id);
       targetUrlById.set(t.id, String(t.url || ''));
       if (!attached.has(t.id)) {
-        await attachTarget(t);
+        attachCandidates.push(t);
       }
+    }
+    for (const tid of targetCooldownUntil.keys()) {
+      if (!liveIds.has(tid)) targetCooldownUntil.delete(tid);
+    }
+    if (attachCandidates.length > 0) {
+      await Promise.allSettled(attachCandidates.map((t) => attachTarget(t)));
     }
 
-    for (const [id, session] of attached.entries()) {
-      if (!liveIds.has(id) || !session.client.isOpen()) {
-        session.client.close();
-        attached.delete(id);
-        continue;
-      }
-      const urlCid = targetUrlById.get(id)?.match(/\/c\/([0-9a-f-]{36})/i)?.[1] || '';
-      const stateRes = await session.client.send('Runtime.evaluate', {
-        expression:
-          '({ v: window.__aq_version || "", h: Boolean(window.__aqHydrated), cid: window.__aqGetWatchedCascadeId ? window.__aqGetWatchedCascadeId() : "" })',
-        returnByValue: true,
-      });
-      const pageState = stateRes?.result?.result?.value;
-      const watchedCid = UUID_RE.test(String(pageState?.cid || '')) ? String(pageState.cid) : '';
-      const resolvedCid = watchedCid || (pageState?.v ? '' : urlCid);
-      if (resolvedCid && resolvedCid !== session.activeCascadeId) {
-        session.activeCascadeId = resolvedCid;
-        session.lastPushedKey = '';
-      }
-      if (!stateRes) {
-        continue;
-      }
-      if (!pageState || pageState.v !== version) {
-        await session.client.send('Runtime.evaluate', { expression: script, returnByValue: false });
-        await hydrateSession(session);
-      } else if (!pageState.h) {
-        await hydrateSession(session);
-      } else {
-        await syncTurnsForSession(session, false);
-      }
-    }
+    const sessionEntries = [...attached.entries()];
+    await Promise.allSettled(
+      sessionEntries.map(async ([id, session]) => {
+        if (!liveIds.has(id) || !session.client.isOpen()) {
+          session.client.close();
+          attached.delete(id);
+          return;
+        }
+        const urlCid = targetUrlById.get(id)?.match(/\/c\/([0-9a-f-]{36})/i)?.[1] || '';
+        const stateRes = await session.client.send('Runtime.evaluate', {
+          expression:
+            '({ v: window.__aq_version || "", h: Boolean(window.__aqHydrated), cid: window.__aqGetWatchedCascadeId ? window.__aqGetWatchedCascadeId() : "" })',
+          returnByValue: true,
+        });
+        if (!stateRes) {
+          return;
+        }
+        const pageState = stateRes?.result?.result?.value;
+        const watchedCid = UUID_RE.test(String(pageState?.cid || '')) ? String(pageState.cid) : '';
+        const resolvedCid = watchedCid || (pageState?.v ? '' : urlCid);
+        if (resolvedCid && resolvedCid !== session.activeCascadeId) {
+          session.activeCascadeId = resolvedCid;
+          session.lastPushedKey = '';
+        }
+        if (!pageState || pageState.v !== version) {
+          session.lastPushedRawTurns = null;
+          await session.client.send('Runtime.evaluate', { expression: script, returnByValue: false });
+          await hydrateSession(session);
+        } else if (!pageState.h) {
+          session.lastPushedRawTurns = null;
+          await hydrateSession(session);
+        } else {
+          await syncTurnsForSession(session, false, { skipCidProbe: Boolean(pageState?.v) });
+        }
+      })
+    );
     return { liveCount: liveIds.size, attachedCount: attached.size };
   };
 

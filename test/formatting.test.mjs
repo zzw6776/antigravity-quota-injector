@@ -470,3 +470,9 @@ test('resolveComposerChipMode switches cleanly from pill -> dual rings -> single
   );
   assert.equal(resolveComposerChipMode({ footerWidth: 0, nativeRightWidth: 90 }), 'pill');
 });
+
+test('translateUiText ignores Object.prototype keys and preserves surrounding whitespace', () => {
+  assert.equal(translateUiText('constructor'), null);
+  assert.equal(translateUiText('toString'), null);
+  assert.equal(translateUiText('  Settings  '), '  设置  ');
+});

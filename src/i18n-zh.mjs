@@ -885,19 +885,22 @@ const ZH_UI_RULES = [
   },
 ];
 
+const ZH_UI_EXACT_MAP = new Map(Object.entries(ZH_UI_EXACT));
+
 /**
  * Translate a UI chrome string using exact dictionary first, then safe UI rules.
  * Returns null if no translation applies (so DOM writes stay minimal and idempotent).
  */
 export function translateUiText(raw, allowRules = true) {
   if (typeof raw !== 'string' || raw.length === 0) return null;
-  const lead = raw.match(/^\s*/)?.[0] || '';
-  const trail = raw.match(/\s*$/)?.[0] || '';
-  const core = raw.slice(lead.length, raw.length - trail.length);
-  if (!core) return null;
-
-  const normalized = core.replace(/\r\n/g, '\n');
-  const exact = ZH_UI_EXACT[normalized];
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const leadLen = raw.indexOf(trimmed[0]);
+  const endIdx = raw.lastIndexOf(trimmed[trimmed.length - 1]) + 1;
+  const lead = leadLen > 0 ? raw.slice(0, leadLen) : '';
+  const trail = endIdx < raw.length ? raw.slice(endIdx) : '';
+  const normalized = trimmed.includes('\r') ? trimmed.replace(/\r\n/g, '\n') : trimmed;
+  const exact = ZH_UI_EXACT_MAP.get(normalized);
   if (exact) {
     return `${lead}${exact}${trail}`;
   }
