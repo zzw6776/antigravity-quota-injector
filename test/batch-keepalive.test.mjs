@@ -103,3 +103,35 @@ test('createBatchKeepAliveStore tracks progress, stop-in-place cancellation, and
   assert.equal(dismissed.visible, false);
   assert.equal(dismissed.phase, 'idle');
 });
+
+test('createBatchKeepAliveStore marks completion metadata for all-success and partial-failure runs', () => {
+  const store = createBatchKeepAliveStore();
+  store.start({
+    originAccount: { id: 'pro-1', email: 'a@example.com' },
+    targets: [
+      { accountId: 'pro-1', email: 'a@example.com', isOrigin: true },
+      { accountId: 'pro-2', email: 'b@example.com', isOrigin: false },
+    ],
+    nowMs: 1000,
+  });
+  const raw = store.getRaw();
+  raw.items[0].status = 'done';
+  raw.items[0].detail = '已唤醒 1 组';
+  raw.items[1].status = 'skipped';
+  raw.items[1].detail = '已在计时中';
+
+  const done = store.markFinished();
+  assert.equal(done.active, false);
+  assert.equal(done.visible, true);
+  assert.equal(done.phase, 'done');
+  assert.equal(done.allSucceeded, true);
+  assert.equal(done.finishedAt > 0, true);
+  assert.equal(done.summaryText, '已唤醒 1 个 · 跳过 1 个');
+  assert.match(done.statusText, /已全部完成并切回起始账号 a@example\.com/);
+
+  raw.items[1].status = 'failed';
+  const partialFail = store.markFinished();
+  assert.equal(partialFail.phase, 'done');
+  assert.equal(partialFail.allSucceeded, false);
+  assert.match(partialFail.statusText, /1 个失败/);
+});

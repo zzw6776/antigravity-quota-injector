@@ -135,6 +135,8 @@ export function createBatchKeepAliveStore() {
     assignedStepToken: '',
     cancelRequested: false,
     switchedAwayOnce: false,
+    finishedAt: 0,
+    allSucceeded: false,
     activePoolLabel: '',
     statusText: '',
     summaryText: '',
@@ -154,6 +156,8 @@ export function createBatchKeepAliveStore() {
       originEmail: state.originEmail,
       currentIndex: state.currentIndex,
       stepSeq: state.stepSeq,
+      finishedAt: state.finishedAt,
+      allSucceeded: state.allSucceeded,
       currentTargetEmail: currentItem?.email || '',
       assignedStepToken: state.assignedStepToken,
       isAssignedExecutor: Boolean(
@@ -185,6 +189,8 @@ export function createBatchKeepAliveStore() {
       assignedStepToken: '',
       cancelRequested: false,
       switchedAwayOnce: false,
+      finishedAt: 0,
+      allSucceeded: false,
       activePoolLabel: '',
       statusText: targets[0]?.isOrigin
         ? `准备原地唤醒 ${targets[0].email}…`
@@ -205,6 +211,8 @@ export function createBatchKeepAliveStore() {
   const markCancelled = () => {
     state.active = false;
     state.phase = 'cancelled';
+    state.finishedAt = Date.now();
+    state.allSucceeded = false;
     state.assignedSessionId = '';
     state.assignedStepToken = '';
     state.activePoolLabel = '';
@@ -223,20 +231,28 @@ export function createBatchKeepAliveStore() {
 
   const markFinished = ({ failedReturnError = '', skippedReturn = false } = {}) => {
     state.active = false;
+    state.finishedAt = Date.now();
     state.assignedSessionId = '';
     state.assignedStepToken = '';
     state.activePoolLabel = '';
     const doneCount = state.items.filter((it) => it.status === 'done').length;
     const failCount = state.items.filter((it) => it.status === 'failed').length;
     const skipCount = state.items.filter((it) => it.status === 'skipped').length;
+    state.allSucceeded = !failedReturnError && failCount === 0;
     if (failedReturnError) {
       state.phase = 'failed';
       state.statusText = `唤醒结束，但切回原账号失败：${failedReturnError}`;
     } else {
       state.phase = 'done';
-      state.statusText = skippedReturn
-        ? `已完成，当前处于原账号 ${state.originEmail}`
-        : `已全部完成并切回起始账号 ${state.originEmail}`;
+      if (failCount > 0) {
+        state.statusText = skippedReturn
+          ? `已完成（${failCount} 个失败），当前处于原账号 ${state.originEmail}`
+          : `已切回起始账号 ${state.originEmail}（${failCount} 个失败）`;
+      } else {
+        state.statusText = skippedReturn
+          ? `已完成，当前处于原账号 ${state.originEmail}`
+          : `已全部完成并切回起始账号 ${state.originEmail}`;
+      }
     }
     const parts = [`已唤醒 ${doneCount} 个`];
     if (skipCount > 0) parts.push(`跳过 ${skipCount} 个`);

@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -47,6 +48,26 @@ import {
 } from './proto-metrics.mjs';
 import { TokenPricingManager } from './token-pricing.mjs';
 import { readUiPrefsStore, updateConversationWidthPref } from './ui-prefs.mjs';
+
+function sendSystemNotification({ title = '', message = '' } = {}) {
+  if (process.platform !== 'darwin' || process.env.NODE_TEST_CONTEXT) return;
+  const cleanTitle = String(title || '').trim();
+  const cleanMsg = String(message || '').trim();
+  if (!cleanTitle || !cleanMsg) return;
+  try {
+    execFile(
+      'osascript',
+      [
+        '-e',
+        'on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv)\nend run',
+        cleanTitle,
+        cleanMsg,
+      ],
+      { timeout: 3000 },
+      () => {}
+    );
+  } catch {}
+}
 
 function resolveSrcDir() {
   if (typeof __dirname === 'string') return __dirname;
@@ -730,9 +751,14 @@ export async function runDaemon({
           Boolean(raw.items[0]?.isOrigin));
 
       if (alreadyOnOrigin) {
-        batchStore.markFinished({ skippedReturn: true });
+        const finished = batchStore.markFinished({ skippedReturn: true });
+        log(`[batch-keepalive] finished (${finished.phase}): ${finished.statusText} | ${finished.summaryText}`);
+        sendSystemNotification({
+          title: finished.allSucceeded ? 'Antigravity 一键唤醒已完成' : 'Antigravity 一键唤醒结束',
+          message: `${finished.summaryText}，${finished.statusText}`,
+        });
         await pushBatchKeepAliveToAllSessions();
-        await pushAccountsToAllSessions({ busy: false });
+        await pushAccountsToAllSessions({ busy: false, status: finished.statusText });
         return;
       }
 
@@ -761,9 +787,23 @@ export async function runDaemon({
         switchInFlight = false;
       }
 
-      batchStore.markFinished({ failedReturnError });
+      const finished = batchStore.markFinished({ failedReturnError });
+      log(`[batch-keepalive] finished (${finished.phase}): ${finished.statusText} | ${finished.summaryText}`);
+      sendSystemNotification({
+        title:
+          finished.phase === 'failed'
+            ? 'Antigravity 一键唤醒结束（切回失败）'
+            : finished.allSucceeded
+              ? 'Antigravity 一键唤醒已完成'
+              : 'Antigravity 一键唤醒结束',
+        message: `${finished.summaryText}，${finished.statusText}`,
+      });
       await pushBatchKeepAliveToAllSessions();
-      await pushAccountsToAllSessions({ busy: false, error: failedReturnError });
+      await pushAccountsToAllSessions({
+        busy: false,
+        error: failedReturnError,
+        status: failedReturnError ? '' : finished.statusText,
+      });
       void tick();
     } finally {
       batchDriverInFlight = false;

@@ -158,6 +158,8 @@
     keepAliveLoaded: false,
     batchKeepAlive: null,
     batchSummary: null,
+    shownBatchToastRunId: '',
+    batchToastTimer: null,
     batchWakeRunningToken: '',
     batchFreshQuotaStepSeq: 0,
     batchFreshQuotaAttemptAt: 0,
@@ -883,7 +885,7 @@
       }
       .aq-qp-title-wrap {
         display: inline-flex;
-        align-items: center;
+        align-items: baseline;
         gap: 6px;
         min-width: 0;
         flex: 1;
@@ -901,19 +903,19 @@
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        height: 16px;
-        font-size: 9.5px;
-        font-weight: 550;
+        height: 14px;
+        font-size: 9px;
+        font-weight: 500;
         line-height: 1;
-        padding: 0 6px;
+        padding: 0 5px;
         border-radius: 9999px;
-        background: rgba(15, 23, 42, 0.055);
-        color: #52525b;
+        background: rgba(15, 23, 42, 0.045);
+        color: #71717a;
         flex-shrink: 0;
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qp-badge {
-        background: rgba(255, 255, 255, 0.08);
-        color: #b4b5c0;
+        background: rgba(255, 255, 255, 0.065);
+        color: #9697a3;
       }
       .aq-qp-status {
         font-size: 10px;
@@ -932,7 +934,6 @@
         gap: 10px;
         padding: 0 2px 7px;
         margin-bottom: 0;
-        border-bottom: 1px solid rgba(127, 127, 127, 0.12);
         font-size: 10.5px;
       }
       .aq-qp-ctx-lbl {
@@ -975,6 +976,7 @@
       .aq-qp-groups {
         display: grid;
         gap: 0;
+        border-top: 1px solid rgba(127, 127, 127, 0.12);
       }
       .aq-qp-card {
         padding: 7.5px 2px;
@@ -1610,6 +1612,9 @@
         color: #71717a;
         padding: 1px 0 0;
       }
+      .aq-q-acct-note.is-success {
+        color: #059669;
+      }
       .aq-q-acct-err {
         font-size: 10px;
         color: #dc2626;
@@ -1617,6 +1622,9 @@
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-note {
         color: #8e8e98;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-note.is-success {
+        color: #34d399;
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-err {
         color: #f87171;
@@ -1723,6 +1731,90 @@
         border-color: rgba(255, 255, 255, 0.09);
         box-shadow: 0 22px 48px -10px rgba(0, 0, 0, 0.65), 0 4px 14px rgba(0, 0, 0, 0.34);
       }
+      #aq-batch-wake-panel.is-done {
+        border-color: rgba(5, 150, 105, 0.3);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-batch-wake-panel.is-done {
+        border-color: rgba(52, 211, 153, 0.3);
+      }
+      #aq-batch-wake-panel.is-failed {
+        border-color: rgba(220, 38, 38, 0.3);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-batch-wake-panel.is-failed {
+        border-color: rgba(248, 113, 113, 0.3);
+      }
+      .aq-bw-check {
+        width: 12px;
+        height: 12px;
+        color: #059669;
+        flex-shrink: 0;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-bw-check {
+        color: #34d399;
+      }
+      #aq-batch-toast {
+        position: fixed;
+        top: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 2147483647;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        max-width: min(560px, calc(100vw - 32px));
+        padding: 8px 12px;
+        border-radius: 9999px;
+        background: #ffffff;
+        color: #18181b;
+        border: 1px solid rgba(5, 150, 105, 0.28);
+        box-shadow: 0 14px 34px -8px rgba(15, 23, 42, 0.2), 0 3px 10px rgba(15, 23, 42, 0.08);
+        font: 500 11.5px/1.35 var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+        font-variant-numeric: tabular-nums;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-batch-toast {
+        background: #191a20;
+        color: #f4f4f6;
+        border-color: rgba(52, 211, 153, 0.32);
+        box-shadow: 0 18px 42px -10px rgba(0, 0, 0, 0.72), 0 4px 14px rgba(0, 0, 0, 0.4);
+      }
+      #aq-batch-toast.is-failed {
+        border-color: rgba(220, 38, 38, 0.34);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-batch-toast.is-failed {
+        border-color: rgba(248, 113, 113, 0.34);
+      }
+      .aq-bt-text {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
+      }
+      .aq-bt-close {
+        appearance: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 18px;
+        height: 18px;
+        padding: 0;
+        border: 0;
+        border-radius: 9999px;
+        background: transparent;
+        color: #71717a;
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+      .aq-bt-close:hover {
+        background: rgba(15, 23, 42, 0.06);
+        color: #18181b;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-bt-close {
+        color: #9a9aa6;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-bt-close:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: #f4f4f6;
+      }
       .aq-bw-hdr {
         display: flex;
         align-items: center;
@@ -1812,8 +1904,20 @@
         overflow: hidden;
         text-overflow: ellipsis;
       }
+      .aq-bw-status.is-finished {
+        white-space: normal;
+        overflow-wrap: anywhere;
+        line-height: 1.4;
+      }
+      .aq-bw-status.is-done {
+        color: #059669;
+        font-weight: 500;
+      }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-bw-status {
         color: #9a9aa6;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-bw-status.is-done {
+        color: #34d399;
       }
       .aq-bw-list {
         margin-top: 7px;
@@ -4167,13 +4271,22 @@
           })
           .join('')
       : '';
+    const batchFinishNote =
+      !state.accountsError &&
+      state.batchKeepAlive?.visible &&
+      !state.batchKeepAlive?.active &&
+      (state.batchKeepAlive.phase === 'done' || state.batchKeepAlive.phase === 'failed')
+        ? state.batchKeepAlive.statusText || ''
+        : '';
     const statusHtml = !accountsSupported
       ? ''
       : state.accountsError
         ? `<div class="aq-q-acct-err">${escapeHtml(state.accountsError)}</div>`
-        : state.accountsStatus
-          ? `<div class="aq-q-acct-note">${escapeHtml(state.accountsStatus)}</div>`
-          : '';
+        : batchFinishNote
+          ? `<div class="${state.batchKeepAlive.phase === 'failed' ? 'aq-q-acct-err' : 'aq-q-acct-note is-success'}">${escapeHtml(batchFinishNote)}</div>`
+          : state.accountsStatus
+            ? `<div class="aq-q-acct-note">${escapeHtml(state.accountsStatus)}</div>`
+            : '';
     const accountsBodyHtml = !accountsSupported
       ? `<div class="aq-q-acct-note">${escapeHtml(unsupportedReason)}</div>`
       : acctRows
@@ -4660,7 +4773,67 @@
     return { ok, error: errMsg };
   }
 
+  function dismissBatchCompletionToast() {
+    if (state.batchToastTimer) {
+      clearTimeout(state.batchToastTimer);
+      state.batchToastTimer = null;
+    }
+    document.getElementById('aq-batch-toast')?.remove();
+  }
+
+  function maybeShowBatchCompletionToast(b) {
+    if (typeof document === 'undefined' || !document.body) return;
+    if (!b || !b.visible || b.active || (b.phase !== 'done' && b.phase !== 'failed')) return;
+    const runId = String(b.runId || '');
+    if (!runId || state.shownBatchToastRunId === runId) return;
+    try {
+      if (localStorage.getItem('aq_batch_done_toast_run_id_v1') === runId) {
+        state.shownBatchToastRunId = runId;
+        return;
+      }
+      localStorage.setItem('aq_batch_done_toast_run_id_v1', runId);
+    } catch {}
+    state.shownBatchToastRunId = runId;
+
+    dismissBatchCompletionToast();
+    const toast = document.createElement('div');
+    toast.id = 'aq-batch-toast';
+    if (b.phase === 'failed') {
+      toast.className = 'is-failed';
+    }
+    const leadIcon =
+      b.phase === 'done'
+        ? '<svg class="aq-bw-check" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.5"/><path d="M5.2 8.2l1.9 1.9 3.7-3.9"/></svg>'
+        : '<span class="aq-bw-pulse is-failed" aria-hidden="true"></span>';
+    const summarySeg = b.summaryText ? `（${b.summaryText}）` : '';
+    const originSeg = b.originEmail ? `，已切回 ${b.originEmail}` : b.statusText ? ` · ${b.statusText}` : '';
+    const msg =
+      b.phase === 'done'
+        ? `${b.allSucceeded !== false ? '一键唤醒全部完成' : '一键唤醒已完成'}${summarySeg}${originSeg}`
+        : b.statusText || '一键唤醒结束，切回原账号失败';
+    toast.innerHTML = `
+      ${leadIcon}
+      <span class="aq-bt-text" title="${escapeHtml(msg)}">${escapeHtml(msg)}</span>
+      <button type="button" class="aq-bt-close" aria-label="关闭提示" title="关闭提示">
+        <svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M3.2 3.2l5.6 5.6M8.8 3.2l-5.6 5.6"/></svg>
+      </button>
+    `;
+    toast.addEventListener('click', (ev) => {
+      if (ev.target?.closest?.('.aq-bt-close')) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        dismissBatchCompletionToast();
+      }
+    });
+    document.body.appendChild(toast);
+    state.batchToastTimer = setTimeout(() => {
+      state.batchToastTimer = null;
+      document.getElementById('aq-batch-toast')?.remove();
+    }, 9000);
+  }
+
   function renderBatchWakePanel() {
+    if (typeof document === 'undefined' || !document.body) return;
     const b = state.batchKeepAlive;
     let panel = document.getElementById('aq-batch-wake-panel');
     if (!b || !b.visible || b.phase === 'idle') {
@@ -4682,30 +4855,47 @@
         if (closeBtn) {
           ev.preventDefault();
           ev.stopPropagation();
+          dismissBatchCompletionToast();
           sendBatchKeepAliveAction({ type: 'dismiss' });
         }
       });
       document.body.appendChild(panel);
     }
 
+    panel.classList.toggle('is-done', !b.active && b.phase === 'done');
+    panel.classList.toggle('is-failed', !b.active && b.phase === 'failed');
+
     const items = Array.isArray(b.items) ? b.items : [];
     const total = items.length;
-    const stepText =
-      b.phase === 'returning'
+    const stepText = b.active
+      ? b.phase === 'returning'
         ? '切回起始号'
         : total > 0 && b.currentIndex >= 0
           ? `${Math.min(b.currentIndex + 1, total)}/${total}`
-          : '';
-    const pulseCls = b.active
-      ? ''
+          : ''
+      : total > 0
+        ? `${total}/${total}`
+        : '';
+    const titleLabel = b.active
+      ? `批量唤醒${stepText ? ` · ${escapeHtml(stepText)}` : ''}`
       : b.phase === 'done'
-        ? ' is-done'
+        ? `${b.allSucceeded !== false ? '一键唤醒已完成' : '一键唤醒已结束'}${stepText ? ` · ${escapeHtml(stepText)}` : ''}`
         : b.phase === 'cancelled'
-          ? ' is-cancelled'
-          : ' is-failed';
+          ? '一键唤醒已停止'
+          : '一键唤醒结束（异常）';
+    const leadBadgeHtml =
+      !b.active && b.phase === 'done'
+        ? '<svg class="aq-bw-check" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.5"/><path d="M5.2 8.2l1.9 1.9 3.7-3.9"/></svg>'
+        : `<span class="aq-bw-pulse${
+            b.active
+              ? ''
+              : b.phase === 'cancelled'
+                ? ' is-cancelled'
+                : ' is-failed'
+          }" aria-hidden="true"></span>`;
     const actionBtnHtml = b.active
       ? '<button type="button" class="aq-bw-action is-stop" data-aq-bw-stop="1" title="停止批量唤醒并保留在当前账号">停止</button>'
-      : '<button type="button" class="aq-bw-action" data-aq-bw-close="1" title="关闭进度面板">关闭</button>';
+      : '<button type="button" class="aq-bw-action" data-aq-bw-close="1" title="关闭完成提示面板">关闭</button>';
     const rowsHtml = items
       .map((it) => {
         const dotCls =
@@ -4729,22 +4919,32 @@
         `;
       })
       .join('');
-    const subText = b.active ? b.statusText : b.summaryText || b.statusText;
+    const subText = b.active
+      ? b.statusText
+      : [b.statusText, b.summaryText].filter(Boolean).join(' · ');
+    const statusCls = [
+      'aq-bw-status',
+      !b.active ? 'is-finished' : '',
+      !b.active && b.phase === 'done' ? 'is-done' : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
     const nextHtml = `
       <div class="aq-bw-hdr">
         <span class="aq-bw-title-wrap">
-          <span class="aq-bw-pulse${pulseCls}" aria-hidden="true"></span>
-          <span>批量唤醒${stepText ? ` · ${escapeHtml(stepText)}` : ''}</span>
+          ${leadBadgeHtml}
+          <span>${titleLabel}</span>
         </span>
         ${actionBtnHtml}
       </div>
-      <div class="aq-bw-status" title="${escapeHtml(subText || '')}">${escapeHtml(subText || '')}</div>
+      <div class="${statusCls}" title="${escapeHtml(subText || '')}">${escapeHtml(subText || '')}</div>
       ${rowsHtml ? `<div class="aq-bw-list">${rowsHtml}</div>` : ''}
     `;
     if (panel.__aqLastHtml !== nextHtml) {
       panel.__aqLastHtml = nextHtml;
       panel.innerHTML = nextHtml;
     }
+    maybeShowBatchCompletionToast(b);
   }
 
   function scheduleBatchReadyRetry() {
@@ -5833,7 +6033,7 @@
   }
 
   const TRANSLATE_SKIP_SELECTOR =
-    '[data-markdown-root], [data-testid="user-message"], [data-testid="user-message-content"], [data-lexical-editor], [data-testid="model-selector-trigger"], [data-aq-turn-usage], [data-aq-native-menu-ext], .aq-conv-width-resizer, #aq-turn-tooltip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-batch-wake-panel, #aq-context-chip, #aq-quota-chip, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost, code, pre, script, style, .codicon, .google-symbols, .agy-sidebar-row';
+    '[data-markdown-root], [data-testid="user-message"], [data-testid="user-message-content"], [data-lexical-editor], [data-testid="model-selector-trigger"], [data-aq-turn-usage], [data-aq-native-menu-ext], .aq-conv-width-resizer, #aq-turn-tooltip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-batch-wake-panel, #aq-batch-toast, #aq-context-chip, #aq-quota-chip, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost, code, pre, script, style, .codicon, .google-symbols, .agy-sidebar-row';
 
   const CHROME_ROOT_SELECTOR = [
     '.settings-modal-container',
@@ -10002,7 +10202,7 @@
   injectStyles();
 
   const SELF_MUTATION_IGNORE_SELECTOR =
-    '[data-aq-turn-usage], [data-aq-native-menu-ext], [data-aq-proj-card], [data-aq-row-grp-btn], .aq-conv-width-resizer, #aq-context-chip, #aq-quota-chip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-batch-wake-panel, #aq-turn-tooltip, #aq-sidebar-tabs, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost';
+    '[data-aq-turn-usage], [data-aq-native-menu-ext], [data-aq-proj-card], [data-aq-row-grp-btn], .aq-conv-width-resizer, #aq-context-chip, #aq-quota-chip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-batch-wake-panel, #aq-batch-toast, #aq-turn-tooltip, #aq-sidebar-tabs, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost';
 
   const POPUP_CHROME_SELECTOR = [
     '.settings-modal-container',
@@ -10701,6 +10901,7 @@
     if (state.pendingSwitchTimer) clearTimeout(state.pendingSwitchTimer);
     if (state.pendingBatchConfirmTimer) clearTimeout(state.pendingBatchConfirmTimer);
     if (state.batchReadyRetryTimer) clearTimeout(state.batchReadyRetryTimer);
+    if (state.batchToastTimer) clearTimeout(state.batchToastTimer);
     if (state.groupDeleteConfirmTimer) clearTimeout(state.groupDeleteConfirmTimer);
     if (state.smartGraceTimer) clearTimeout(state.smartGraceTimer);
     if (state.groupResizeSnapTimer) clearTimeout(state.groupResizeSnapTimer);
@@ -10785,6 +10986,7 @@
     document.getElementById('aq-quota-tooltip')?.remove();
     document.getElementById('aq-acct-quota-tooltip')?.remove();
     document.getElementById('aq-batch-wake-panel')?.remove();
+    document.getElementById('aq-batch-toast')?.remove();
     document.getElementById('aq-turn-tooltip')?.remove();
     document.getElementById('aq-sidebar-tabs-row')?.remove();
     document.getElementById('aq-sidebar-tabs')?.remove();
