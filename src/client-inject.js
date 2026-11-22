@@ -132,6 +132,9 @@
     turnTooltipAnchor: null,
     turnTooltipShowTimer: null,
     turnTooltipHideTimer: null,
+    ctxTooltipAnchor: null,
+    ctxTooltipShowTimer: null,
+    ctxTooltipHideTimer: null,
     quotaTooltipAnchor: null,
     quotaTooltipShowTimer: null,
     quotaTooltipHideTimer: null,
@@ -607,6 +610,31 @@
       #aq-turn-tooltip {
         min-width: min(340px, calc(100vw - 24px));
         max-width: min(460px, calc(100vw - 24px));
+      }
+      #aq-context-tooltip {
+        width: auto;
+        min-width: 0;
+        max-width: min(280px, calc(100vw - 24px));
+        padding: 6px 10px;
+        border-radius: 8px;
+        background: #ffffff;
+        color: #18181b;
+        border: 1px solid rgba(15, 23, 42, 0.085);
+        box-shadow: 0 10px 24px -6px rgba(15, 23, 42, 0.14), 0 2px 8px rgba(15, 23, 42, 0.05);
+        font-size: 11px;
+        line-height: 16px;
+        white-space: nowrap;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-context-tooltip {
+        background: #191a20;
+        color: #f4f4f6;
+        border-color: rgba(255, 255, 255, 0.09);
+        box-shadow: 0 14px 32px -8px rgba(0, 0, 0, 0.65), 0 4px 12px rgba(0, 0, 0, 0.34);
+      }
+      .aq-ctx-tt-row {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 6px;
       }
       :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-floating-tooltip {
         background: #24242d;
@@ -3627,6 +3655,7 @@
     const cid = extractCascadeId();
     if (!cid || chipMode === 'single') {
       if (ctxChip.style.display !== 'none') ctxChip.style.display = 'none';
+      refreshContextTooltipIfVisible();
       return;
     }
     if (ctxChip.style.display !== 'inline-flex') ctxChip.style.display = 'inline-flex';
@@ -3647,6 +3676,7 @@
       ctxChip.__aqLastHtml = nextHtml;
       ctxChip.innerHTML = nextHtml;
     }
+    refreshContextTooltipIfVisible();
   }
 
   function renderQuotaChipContent(partsArg = null) {
@@ -4872,6 +4902,66 @@
     hideAccountQuotaTooltip();
   }
 
+  function showContextTooltip(chipEl) {
+    if (state.ctxTooltipShowTimer) {
+      clearTimeout(state.ctxTooltipShowTimer);
+      state.ctxTooltipShowTimer = null;
+    }
+    if (state.ctxTooltipHideTimer) {
+      clearTimeout(state.ctxTooltipHideTimer);
+      state.ctxTooltipHideTimer = null;
+    }
+    state.ctxTooltipAnchor = chipEl;
+    const tt = ensureTooltipEl('aq-context-tooltip');
+    const ctx = getActiveContext();
+    const nextHtml = ctx
+      ? (() => {
+          const pct = Math.min(100, Math.max(0, Math.round((ctx.usedTokens / ctx.maxTokens) * 100)));
+          const lvl = contextLevelClass(ctx.usedTokens, ctx.maxTokens);
+          return `<div class="aq-ctx-tt-row"><span class="aq-qp-ctx-lbl">上下文</span><span class="aq-qp-ctx-val"><span class="aq-qp-ctx-strong ${lvl}">${formatContextK(ctx.usedTokens)}</span> / ${formatContextK(ctx.maxTokens)} · ${pct}%</span></div>`;
+        })()
+      : '<div class="aq-ctx-tt-row"><span class="aq-qp-ctx-lbl">上下文</span><span class="aq-qp-ctx-val">暂无数据</span></div>';
+
+    if (tt.__aqLastHtml !== nextHtml) {
+      tt.__aqLastHtml = nextHtml;
+      tt.innerHTML = nextHtml;
+    }
+    const rect = chipEl.getBoundingClientRect();
+    const ttW = tt.offsetWidth || 160;
+    const ttH = tt.offsetHeight || 28;
+    const left = Math.max(10, Math.min(rect.left + rect.width / 2 - ttW / 2, window.innerWidth - ttW - 12));
+    const preferTop = rect.top - ttH - 8;
+    const top = preferTop >= 10 ? preferTop : Math.min(window.innerHeight - ttH - 10, rect.bottom + 8);
+    tt.style.left = `${Math.round(left)}px`;
+    tt.style.top = `${Math.round(Math.max(8, top))}px`;
+    tt.setAttribute('data-visible', '1');
+  }
+
+  function scheduleHideContextTooltip() {
+    if (state.ctxTooltipHideTimer) clearTimeout(state.ctxTooltipHideTimer);
+    state.ctxTooltipHideTimer = setTimeout(() => {
+      state.ctxTooltipHideTimer = null;
+      if (document.querySelector('#aq-context-tooltip:hover')) return;
+      const tt = document.getElementById('aq-context-tooltip');
+      if (tt) tt.removeAttribute('data-visible');
+      state.ctxTooltipAnchor = null;
+    }, 140);
+  }
+
+  function refreshContextTooltipIfVisible() {
+    const tt = document.getElementById('aq-context-tooltip');
+    if (!tt || tt.getAttribute('data-visible') !== '1') return;
+    const anchor = state.ctxTooltipAnchor?.isConnected
+      ? state.ctxTooltipAnchor
+      : document.getElementById('aq-context-chip');
+    if (!anchor || anchor.style.display === 'none') {
+      tt.removeAttribute('data-visible');
+      state.ctxTooltipAnchor = null;
+      return;
+    }
+    showContextTooltip(anchor);
+  }
+
   function scheduleHideQuotaTooltip() {
     if (state.quotaTooltipPinned) return;
     if (state.quotaTooltipHideTimer) clearTimeout(state.quotaTooltipHideTimer);
@@ -4925,15 +5015,22 @@
     if (!ctxChip) {
       ctxChip = document.createElement('div');
       ctxChip.id = 'aq-context-chip';
-      ctxChip.setAttribute('role', 'button');
+      ctxChip.setAttribute('role', 'status');
       ctxChip.setAttribute('tabindex', '0');
-      ctxChip.setAttribute('aria-label', '当前会话上下文占用，点击立即刷新配额');
-      bindTooltipTrigger(ctxChip, quotaTriggerOpts);
-      ctxChip.addEventListener('click', (ev) => handleQuotaChipClick(ctxChip, ev));
-      ctxChip.addEventListener('keydown', (ev) => {
-        if (ev.key === 'Enter' || ev.key === ' ') {
-          handleQuotaChipClick(ctxChip, ev);
-        }
+      ctxChip.setAttribute('aria-label', '当前会话上下文占用');
+      bindTooltipTrigger(ctxChip, {
+        tooltipId: 'aq-context-tooltip',
+        delayMs: QUOTA_TOOLTIP_DELAY_MS,
+        showTimerKey: 'ctxTooltipShowTimer',
+        hideTimerKey: 'ctxTooltipHideTimer',
+        anchorKey: 'ctxTooltipAnchor',
+        showFn: showContextTooltip,
+        hideFn: scheduleHideContextTooltip,
+      });
+      ctxChip.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        showContextTooltip(ctxChip);
       });
     }
 
@@ -5147,7 +5244,7 @@
   }
 
   const TRANSLATE_SKIP_SELECTOR =
-    '[data-markdown-root], [data-testid="user-message"], [data-testid="user-message-content"], [data-lexical-editor], [data-testid="model-selector-trigger"], [data-aq-turn-usage], [data-aq-native-menu-ext], .aq-conv-width-resizer, #aq-turn-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-context-chip, #aq-quota-chip, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost, code, pre, script, style, .codicon, .google-symbols, .agy-sidebar-row';
+    '[data-markdown-root], [data-testid="user-message"], [data-testid="user-message-content"], [data-lexical-editor], [data-testid="model-selector-trigger"], [data-aq-turn-usage], [data-aq-native-menu-ext], .aq-conv-width-resizer, #aq-turn-tooltip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-context-chip, #aq-quota-chip, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost, code, pre, script, style, .codicon, .google-symbols, .agy-sidebar-row';
 
   const CHROME_ROOT_SELECTOR = [
     '.settings-modal-container',
@@ -9277,6 +9374,7 @@
   // Setup tooltip hover keep-alive
   for (const [ttId, hideFn] of [
     ['aq-turn-tooltip', scheduleHideTurnTooltip],
+    ['aq-context-tooltip', scheduleHideContextTooltip],
     ['aq-quota-tooltip', scheduleHideQuotaTooltip],
   ]) {
     const tt = ensureTooltipEl(ttId);
@@ -9284,6 +9382,10 @@
       if (ttId === 'aq-turn-tooltip' && state.turnTooltipHideTimer) {
         clearTimeout(state.turnTooltipHideTimer);
         state.turnTooltipHideTimer = null;
+      }
+      if (ttId === 'aq-context-tooltip' && state.ctxTooltipHideTimer) {
+        clearTimeout(state.ctxTooltipHideTimer);
+        state.ctxTooltipHideTimer = null;
       }
       if (ttId === 'aq-quota-tooltip' && state.quotaTooltipHideTimer) {
         clearTimeout(state.quotaTooltipHideTimer);
@@ -9296,7 +9398,7 @@
   injectStyles();
 
   const SELF_MUTATION_IGNORE_SELECTOR =
-    '[data-aq-turn-usage], [data-aq-native-menu-ext], [data-aq-proj-card], [data-aq-row-grp-btn], .aq-conv-width-resizer, #aq-context-chip, #aq-quota-chip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-turn-tooltip, #aq-sidebar-tabs, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost';
+    '[data-aq-turn-usage], [data-aq-native-menu-ext], [data-aq-proj-card], [data-aq-row-grp-btn], .aq-conv-width-resizer, #aq-context-chip, #aq-quota-chip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-turn-tooltip, #aq-sidebar-tabs, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost';
 
   const POPUP_CHROME_SELECTOR = [
     '.settings-modal-container',
@@ -9483,7 +9585,7 @@
   const onDocPointerDown = (ev) => {
     recordNativeMenuTargetFromEvent(ev);
     const t = ev.target;
-    if (state.quotaTooltipPinned && !t?.closest?.('#aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-quota-chip, #aq-context-chip')) {
+    if (state.quotaTooltipPinned && !t?.closest?.('#aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-quota-chip')) {
       closeQuotaTooltip();
     }
     if (state.groupMenuTarget && !t?.closest?.('#aq-group-menu, [data-aq-grp-item-menu], [data-aq-row-grp-btn]')) {
@@ -9986,6 +10088,8 @@
     if (state.quotaDebounceTimer) clearTimeout(state.quotaDebounceTimer);
     if (state.turnTooltipShowTimer) clearTimeout(state.turnTooltipShowTimer);
     if (state.turnTooltipHideTimer) clearTimeout(state.turnTooltipHideTimer);
+    if (state.ctxTooltipShowTimer) clearTimeout(state.ctxTooltipShowTimer);
+    if (state.ctxTooltipHideTimer) clearTimeout(state.ctxTooltipHideTimer);
     if (state.quotaTooltipShowTimer) clearTimeout(state.quotaTooltipShowTimer);
     if (state.quotaTooltipHideTimer) clearTimeout(state.quotaTooltipHideTimer);
     if (state.acctQuotaTooltipShowTimer) clearTimeout(state.acctQuotaTooltipShowTimer);
@@ -10062,6 +10166,7 @@
     state.observedFooterBox = null;
     state.observedResizeFooter = null;
     state.turnTooltipAnchor = null;
+    state.ctxTooltipAnchor = null;
     state.quotaTooltipAnchor = null;
     state.i18nTextCache = null;
     state.i18nAttrCache = null;
@@ -10070,6 +10175,7 @@
     document.getElementById('aq-style')?.remove();
     document.getElementById('aq-context-chip')?.remove();
     document.getElementById('aq-quota-chip')?.remove();
+    document.getElementById('aq-context-tooltip')?.remove();
     document.getElementById('aq-quota-tooltip')?.remove();
     document.getElementById('aq-acct-quota-tooltip')?.remove();
     document.getElementById('aq-turn-tooltip')?.remove();
