@@ -332,6 +332,27 @@ export function contextLevelClass(usedTokens, maxTokens) {
 }
 
 /**
+ * Choose quota/context chip presentation based on available footer width:
+ * wide -> quota pill + context ring, squeezed -> dual progress rings, cramped -> single merged ring.
+ */
+export function resolveComposerChipMode({
+  footerWidth = 0,
+  nativeRightWidth = 0,
+  hasContextChip = true,
+} = {}) {
+  const totalW = Number(footerWidth);
+  if (!Number.isFinite(totalW) || totalW <= 0) return 'pill';
+  const rightW = Number.isFinite(nativeRightWidth) && nativeRightWidth > 0 ? nativeRightWidth : 0;
+  const available = totalW - rightW;
+  if (!hasContextChip) {
+    return available >= 255 ? 'pill' : 'single';
+  }
+  if (available >= 280) return 'pill';
+  if (available >= 200) return 'rings';
+  return 'single';
+}
+
+/**
  * Resolve a concise subscription label from Antigravity GetUserStatus payload.
  * Prefers `userTier` over legacy `planStatus.planInfo.planName`, which frequently stays "Pro".
  */

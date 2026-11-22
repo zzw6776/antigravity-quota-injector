@@ -18,6 +18,7 @@ import {
   matchQuotaGroup,
   normalizeModelLabel,
   orderQuotaBuckets,
+  resolveComposerChipMode,
   resolveGeminiQuotaAvailability,
   resolveUserPlanLabel,
 } from '../src/formatting.mjs';
@@ -451,4 +452,21 @@ test('resolveGeminiQuotaAvailability identifies available, depleted, inferred-re
     { isCurrent: false, nowMs }
   );
   assert.equal(twoPctAvailable.state, 'available');
+});
+
+test('resolveComposerChipMode switches cleanly from pill -> dual rings -> single ring on squeeze', () => {
+  assert.equal(resolveComposerChipMode({ footerWidth: 600, nativeRightWidth: 141 }), 'pill');
+  assert.equal(resolveComposerChipMode({ footerWidth: 426, nativeRightWidth: 141 }), 'pill');
+  assert.equal(resolveComposerChipMode({ footerWidth: 380, nativeRightWidth: 141 }), 'rings');
+  assert.equal(resolveComposerChipMode({ footerWidth: 340, nativeRightWidth: 90 }), 'rings');
+  assert.equal(resolveComposerChipMode({ footerWidth: 270, nativeRightWidth: 90 }), 'single');
+  assert.equal(
+    resolveComposerChipMode({ footerWidth: 360, nativeRightWidth: 90, hasContextChip: false }),
+    'pill'
+  );
+  assert.equal(
+    resolveComposerChipMode({ footerWidth: 270, nativeRightWidth: 90, hasContextChip: false }),
+    'single'
+  );
+  assert.equal(resolveComposerChipMode({ footerWidth: 0, nativeRightWidth: 90 }), 'pill');
 });

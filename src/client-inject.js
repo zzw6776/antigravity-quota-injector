@@ -119,6 +119,9 @@
     domObserver: null,
     footerObserver: null,
     observedFooterBox: null,
+    footerResizeObserver: null,
+    observedResizeFooter: null,
+    chipResizeRaf: 0,
     turnTooltipAnchor: null,
     turnTooltipShowTimer: null,
     turnTooltipHideTimer: null,
@@ -487,14 +490,14 @@
         display: inline-flex;
         align-items: center;
         gap: 4px;
-        height: 26px;
-        padding: 0 8px;
-        margin-right: 4px;
+        height: 28px;
+        padding: 0 9px;
+        margin-right: 2px;
         border-radius: 9999px;
         border: 1px solid var(--border, rgba(127, 127, 127, 0.22));
         background: transparent;
         color: var(--secondary-foreground, var(--foreground, #3f3f46));
-        font: 500 11.5px/1 var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+        font: 500 12px/1 var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
         cursor: pointer;
@@ -515,6 +518,41 @@
       #aq-quota-chip .aq-chip-sep {
         margin: 0 1px;
         opacity: 0.45;
+      }
+      #aq-context-chip[data-mode="ring"],
+      #aq-quota-chip[data-mode="ring"],
+      #aq-quota-chip[data-mode="single"] {
+        position: relative;
+        width: 28px;
+        min-width: 28px;
+        height: 28px;
+        padding: 0;
+        margin-right: 2px;
+        border-color: transparent;
+        background: transparent;
+        justify-content: center;
+        gap: 0;
+      }
+      #aq-context-chip[data-mode="ring"]:hover,
+      #aq-context-chip[data-mode="ring"]:focus-visible,
+      #aq-quota-chip[data-mode="ring"]:hover,
+      #aq-quota-chip[data-mode="ring"]:focus-visible,
+      #aq-quota-chip[data-mode="single"]:hover,
+      #aq-quota-chip[data-mode="single"]:focus-visible {
+        border-color: transparent;
+        background: var(--secondary, rgba(127, 127, 127, 0.1));
+      }
+      #aq-quota-chip[data-mode="ring"] .aq-update-dot,
+      #aq-quota-chip[data-mode="single"] .aq-update-dot {
+        position: absolute;
+        top: 3px;
+        right: 3px;
+      }
+      .aq-chip-ring {
+        display: block;
+        width: 16px;
+        height: 16px;
+        flex-shrink: 0;
       }
       .aq-lvl-ok {
         color: #15803d;
@@ -3501,19 +3539,89 @@
     }
   }
 
-  function renderContextChipContent() {
+  function clampRatio(val) {
+    const n = Number(val);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    if (n >= 1) return 1;
+    return n;
+  }
+
+  function renderRingArcGroup({ r, strokeWidth, ratio, colorClass, minVisible = false }) {
+    const c = 2 * Math.PI * r;
+    const raw = clampRatio(ratio);
+    const effective = minVisible && raw > 0 && raw < 0.04 ? 0.04 : raw;
+    const filled = (effective * c).toFixed(2);
+    const circ = c.toFixed(2);
+    const track = `<circle cx="9" cy="9" r="${r}" fill="none" stroke="currentColor" stroke-width="${strokeWidth}" opacity="0.16" />`;
+    const arc =
+      effective > 0
+        ? `<circle class="${colorClass || ''}" cx="9" cy="9" r="${r}" fill="none" stroke="currentColor" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-dasharray="${filled} ${circ}" transform="rotate(-90 9 9)" />`
+        : '';
+    return `${track}${arc}`;
+  }
+
+  function buildProgressRingSvg(rings) {
+    const list = Array.isArray(rings) ? rings.filter(Boolean) : [];
+    const inner =
+      list.length >= 2
+        ? [
+            renderRingArcGroup({ r: 6.8, strokeWidth: 2.0, ...list[0] }),
+            renderRingArcGroup({ r: 3.7, strokeWidth: 1.9, ...list[1] }),
+          ].join('')
+        : renderRingArcGroup({ r: 6.2, strokeWidth: 2.1, ...(list[0] || { ratio: 0, colorClass: 'aq-lvl-muted' }) });
+    return `<svg class="aq-chip-ring" viewBox="0 0 18 18" width="16" height="16" aria-hidden="true">${inner}</svg>`;
+  }
+
+  function computeComposerChipMode(parts) {
+    const footer = parts?.footer;
+    if (!footer) return 'pill';
+    const footerWidth = footer.clientWidth || footer.getBoundingClientRect?.().width || 0;
+    if (footerWidth <= 0) return 'pill';
+    let nativeRightWidth = 0;
+    const rightGroup = parts.rightGroup;
+    if (rightGroup) {
+      const children = rightGroup.children || [];
+      let nativeCount = 0;
+      for (let i = 0; i < children.length; i++) {
+        const ch = children[i];
+        if (ch.id === 'aq-context-chip' || ch.id === 'aq-quota-chip') continue;
+        const w = ch.getBoundingClientRect?.().width || 0;
+        if (w > 0) {
+          nativeRightWidth += w;
+          nativeCount += 1;
+        }
+      }
+      if (nativeCount > 1) nativeRightWidth += (nativeCount - 1) * 2;
+    }
+    return resolveComposerChipMode({
+      footerWidth,
+      nativeRightWidth,
+      hasContextChip: Boolean(extractCascadeId()),
+    });
+  }
+
+  function renderContextChipContent(chipMode = 'pill') {
     const ctxChip = document.getElementById('aq-context-chip');
     if (!ctxChip) return;
     const cid = extractCascadeId();
-    if (!cid) {
+    if (!cid || chipMode === 'single') {
       if (ctxChip.style.display !== 'none') ctxChip.style.display = 'none';
       return;
     }
     if (ctxChip.style.display !== 'inline-flex') ctxChip.style.display = 'inline-flex';
+    if (ctxChip.getAttribute('data-mode') !== 'ring') {
+      ctxChip.setAttribute('data-mode', 'ring');
+    }
     const ctx = getActiveContext();
-    const nextHtml = ctx
-      ? `<span class="${contextLevelClass(ctx.usedTokens, ctx.maxTokens)}">${formatContextK(ctx.usedTokens)}</span><span class="aq-lvl-muted">/${formatContextK(ctx.maxTokens)}</span>`
-      : '<span class="aq-lvl-muted">--</span>';
+    const nextHtml = buildProgressRingSvg([
+      ctx
+        ? {
+            ratio: ctx.usedTokens / ctx.maxTokens,
+            colorClass: contextLevelClass(ctx.usedTokens, ctx.maxTokens),
+            minVisible: true,
+          }
+        : { ratio: 0, colorClass: 'aq-lvl-muted' },
+    ]);
     if (ctxChip.__aqLastHtml !== nextHtml) {
       ctxChip.__aqLastHtml = nextHtml;
       ctxChip.innerHTML = nextHtml;
@@ -3521,15 +3629,20 @@
   }
 
   function renderQuotaChipContent() {
-    renderContextChipContent();
+    const parts = findComposerParts();
+    const chipMode = computeComposerChipMode(parts);
+    renderContextChipContent(chipMode);
     const chip = document.getElementById('aq-quota-chip');
     if (!chip) return;
+    const nextModeAttr = chipMode === 'single' ? 'single' : chipMode === 'rings' ? 'ring' : 'pill';
+    if (chip.getAttribute('data-mode') !== nextModeAttr) {
+      chip.setAttribute('data-mode', nextModeAttr);
+    }
     const loadVal = state.quotaFetching ? '1' : '0';
     if (chip.getAttribute('data-loading') !== loadVal) {
       chip.setAttribute('data-loading', loadVal);
     }
 
-    const parts = findComposerParts();
     const modelLabel = detectSelectedModelLabel(parts?.leftGroup);
     if (modelLabel) state.selectedModelLabel = modelLabel;
 
@@ -3544,30 +3657,53 @@
       : '';
 
     const groups = state.quotaData?.groups || [];
-    let nextHtml;
-    if (groups.length === 0) {
-      nextHtml =
-        (state.quotaError ? '<span class="aq-lvl-muted">--</span>' : '<span class="aq-lvl-muted">…</span>') +
-        updateDotHtml;
-    } else {
-      const activeGroup = matchQuotaGroup(groups, state.selectedModelLabel);
-      const { fiveHour, weekly } = extractQuotaBuckets(activeGroup);
+    const activeGroup = groups.length > 0 ? matchQuotaGroup(groups, state.selectedModelLabel) : null;
+    const { fiveHour, weekly } = activeGroup ? extractQuotaBuckets(activeGroup) : { fiveHour: null, weekly: null };
+    const ctx = getActiveContext();
 
-      const quotaParts = [];
-      if (fiveHour) {
-        quotaParts.push(
-          `<span class="${quotaLevelClass(fiveHour.remainingFraction)}">${formatRemainingPercent(fiveHour.remainingFraction)}</span>`
-        );
+    let nextHtml;
+    if (nextModeAttr === 'pill') {
+      if (groups.length === 0) {
+        nextHtml =
+          (state.quotaError ? '<span class="aq-lvl-muted">--</span>' : '<span class="aq-lvl-muted">…</span>') +
+          updateDotHtml;
+      } else {
+        const quotaParts = [];
+        if (fiveHour) {
+          quotaParts.push(
+            `<span class="${quotaLevelClass(fiveHour.remainingFraction)}">${formatRemainingPercent(fiveHour.remainingFraction)}</span>`
+          );
+        }
+        if (weekly) {
+          quotaParts.push(
+            `<span class="${quotaLevelClass(weekly.remainingFraction)}">${formatRemainingPercent(weekly.remainingFraction)}</span>`
+          );
+        }
+        if (quotaParts.length === 0) {
+          quotaParts.push('<span class="aq-lvl-muted">--</span>');
+        }
+        nextHtml = quotaParts.join('<span class="aq-chip-sep">/</span>') + updateDotHtml;
       }
-      if (weekly) {
-        quotaParts.push(
-          `<span class="${quotaLevelClass(weekly.remainingFraction)}">${formatRemainingPercent(weekly.remainingFraction)}</span>`
-        );
+    } else {
+      const toQuotaRing = (b) =>
+        b
+          ? {
+              ratio: b.remainingFraction,
+              colorClass: quotaLevelClass(b.remainingFraction),
+              minVisible: true,
+            }
+          : null;
+      const primaryRing = toQuotaRing(fiveHour || weekly);
+      if (nextModeAttr === 'single' && ctx) {
+        const ctxRing = {
+          ratio: ctx.usedTokens / ctx.maxTokens,
+          colorClass: contextLevelClass(ctx.usedTokens, ctx.maxTokens),
+          minVisible: true,
+        };
+        nextHtml = buildProgressRingSvg(primaryRing ? [ctxRing, primaryRing] : [ctxRing]) + updateDotHtml;
+      } else {
+        nextHtml = buildProgressRingSvg(primaryRing ? [primaryRing] : []) + updateDotHtml;
       }
-      if (quotaParts.length === 0) {
-        quotaParts.push('<span class="aq-lvl-muted">--</span>');
-      }
-      nextHtml = quotaParts.join('<span class="aq-chip-sep">/</span>') + updateDotHtml;
     }
     if (chip.__aqLastHtml !== nextHtml) {
       chip.__aqLastHtml = nextHtml;
@@ -4770,18 +4906,18 @@
     }
 
     if (parts.turboBtn && parts.turboBtn.parentElement === parts.rightGroup) {
-      if (chip.parentElement !== parts.rightGroup || chip.nextElementSibling !== parts.turboBtn) {
-        parts.rightGroup.insertBefore(chip, parts.turboBtn);
+      if (ctxChip.parentElement !== parts.rightGroup || ctxChip.nextElementSibling !== parts.turboBtn) {
+        parts.rightGroup.insertBefore(ctxChip, parts.turboBtn);
       }
-      if (ctxChip.parentElement !== parts.rightGroup || ctxChip.nextElementSibling !== chip) {
-        parts.rightGroup.insertBefore(ctxChip, chip);
+      if (chip.parentElement !== parts.rightGroup || chip.nextElementSibling !== ctxChip) {
+        parts.rightGroup.insertBefore(chip, ctxChip);
       }
     } else {
-      if (chip.parentElement !== parts.rightGroup) {
-        parts.rightGroup.prepend(chip);
+      if (ctxChip.parentElement !== parts.rightGroup) {
+        parts.rightGroup.prepend(ctxChip);
       }
-      if (ctxChip.parentElement !== parts.rightGroup || ctxChip.nextElementSibling !== chip) {
-        parts.rightGroup.insertBefore(ctxChip, chip);
+      if (chip.parentElement !== parts.rightGroup || chip.nextElementSibling !== ctxChip) {
+        parts.rightGroup.insertBefore(chip, ctxChip);
       }
     }
 
@@ -4796,6 +4932,23 @@
         renderQuotaChipContent();
       });
       state.footerObserver.observe(parts.leftGroup, { childList: true, subtree: true, characterData: true });
+    }
+
+    if (typeof ResizeObserver === 'function' && parts.footer && state.observedResizeFooter !== parts.footer) {
+      if (state.footerResizeObserver) {
+        try {
+          state.footerResizeObserver.disconnect();
+        } catch {}
+      }
+      state.observedResizeFooter = parts.footer;
+      state.footerResizeObserver = new ResizeObserver(() => {
+        if (state.chipResizeRaf) return;
+        state.chipResizeRaf = requestAnimationFrame(() => {
+          state.chipResizeRaf = 0;
+          renderQuotaChipContent();
+        });
+      });
+      state.footerResizeObserver.observe(parts.footer);
     }
 
     renderQuotaChipContent();
@@ -9628,10 +9781,13 @@
     state.disposed = true;
     state.domObserver?.disconnect();
     state.footerObserver?.disconnect();
+    state.footerResizeObserver?.disconnect();
     state.convResizeObserver?.disconnect();
     state.convObservedNodes.clear();
     if (state.renderRaf) cancelAnimationFrame(state.renderRaf);
     state.renderRaf = 0;
+    if (state.chipResizeRaf) cancelAnimationFrame(state.chipResizeRaf);
+    state.chipResizeRaf = 0;
     if (state.routeTimer) clearInterval(state.routeTimer);
     if (state.trajStatusTimer) clearInterval(state.trajStatusTimer);
     if (state.quotaTimer) clearInterval(state.quotaTimer);
