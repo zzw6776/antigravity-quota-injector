@@ -288,6 +288,35 @@
     convDragExpandTimer: null,
     convDragHoverGroupTimer: null,
     convDragHoverGroupId: '',
+    convScrollMemory: (() => {
+      const map = new Map();
+      try {
+        const raw =
+          typeof sessionStorage !== 'undefined'
+            ? sessionStorage.getItem('aq_conv_scroll_v1')
+            : null;
+        const parsed = raw ? JSON.parse(raw) : null;
+        if (Array.isArray(parsed)) {
+          for (let i = 0; i < parsed.length; i++) {
+            const pair = parsed[i];
+            if (
+              Array.isArray(pair) &&
+              typeof pair[0] === 'string' &&
+              pair[0] &&
+              pair[1] &&
+              typeof pair[1] === 'object'
+            ) {
+              map.set(pair[0], pair[1]);
+            }
+          }
+        }
+      } catch {}
+      return map;
+    })(),
+    convScrollPersistTimer: null,
+    activeScrollRestore: null,
+    routeEnterNewReply: null,
+    initialScrollBootstrapped: false,
     autoUnpinnedCids: (() => {
       try {
         const raw = localStorage.getItem('aq_auto_unpinned_cids_v1');
@@ -8495,6 +8524,98 @@
     renderSidebarGroupsPanel(false);
   }
 
+  function applyOptimisticConversationDrop({
+    fromGroupId = '',
+    toGroupId = '',
+    item = null,
+    mode = '',
+    anchorToken = '',
+  }) {
+    const cidRaw = String(item?.cascadeId || '').trim();
+    const cidLower = cidRaw.toLowerCase();
+    if (!toGroupId || !cidLower) return;
+    const toIdx = state.groups.findIndex((g) => g.id === toGroupId);
+    if (toIdx < 0) return;
+
+    const byId = new Map(state.groups.map((g) => [g.id, g]));
+    const expandIds = new Set();
+    let cur = byId.get(toGroupId);
+    while (cur && !expandIds.has(cur.id)) {
+      expandIds.add(cur.id);
+      cur = cur.parentId ? byId.get(cur.parentId) : null;
+    }
+
+    const movingToken = `c:${cidLower}`;
+    const targetGrp = state.groups[toIdx];
+    const targetChildGroups = state.groups.filter((cg) => cg.parentId === toGroupId);
+    const curOrder = getNormalizedGroupChildTokens(targetGrp, targetChildGroups);
+    const isExisting = curOrder.includes(movingToken);
+    let nextOrder = curOrder;
+    if (
+      (mode === 'before' || mode === 'after') &&
+      anchorToken &&
+      anchorToken !== movingToken &&
+      curOrder.includes(anchorToken)
+    ) {
+      const without = curOrder.filter((tok) => tok !== movingToken);
+      const tIdx = without.indexOf(anchorToken);
+      if (tIdx >= 0) {
+        without.splice(mode === 'before' ? tIdx : tIdx + 1, 0, movingToken);
+        nextOrder = without;
+      }
+    } else if (!isExisting) {
+      nextOrder = [...curOrder, movingToken];
+    }
+
+    const itemByKey = new Map(
+      (Array.isArray(targetGrp.items) ? targetGrp.items : []).map((it) => [
+        String(it.cascadeId || '').toLowerCase(),
+        it,
+      ])
+    );
+    const prevItem = itemByKey.get(cidLower);
+    itemByKey.set(cidLower, {
+      ...(prevItem || {}),
+      cascadeId: prevItem?.cascadeId || cidRaw,
+      title: item?.title || prevItem?.title || '未命名对话',
+      project: item?.project ?? prevItem?.project ?? '',
+    });
+    const nextTargetItems = nextOrder
+      .filter((tok) => tok.startsWith('c:'))
+      .map((tok) => itemByKey.get(tok.slice(2)))
+      .filter(Boolean);
+
+    const nextGroups = state.groups.map((g) => {
+      if (fromGroupId && fromGroupId !== toGroupId && g.id === fromGroupId) {
+        const filteredItems = (Array.isArray(g.items) ? g.items : []).filter(
+          (it) => String(it.cascadeId || '').toLowerCase() !== cidLower
+        );
+        const filteredOrder = Array.isArray(g.childOrder)
+          ? g.childOrder.filter((tok) => tok !== movingToken)
+          : [];
+        return { ...g, items: filteredItems, childOrder: filteredOrder };
+      }
+      if (g.id === toGroupId) {
+        return {
+          ...g,
+          collapsed: false,
+          items: nextTargetItems,
+          childOrder: nextOrder,
+        };
+      }
+      if (expandIds.has(g.id) && g.collapsed) {
+        return { ...g, collapsed: false };
+      }
+      return g;
+    });
+
+    state.groupsCollapsedSection = false;
+    state.groups = nextGroups;
+    state.cachedGroupsRef = null;
+    state.cachedGroupedCids = null;
+    renderSidebarGroupsPanel(false);
+  }
+
   function isGroupDescendant(groups, ancestorId, targetId) {
     if (!ancestorId || !targetId) return false;
     if (ancestorId === targetId) return true;
@@ -9124,6 +9245,9 @@
       return;
     }
     state.pendingNewChatSendAt = 0;
+    if (state.activeScrollRestore?.cidLower === cidLower) {
+      cancelActiveScrollRestore({ markReady: true });
+    }
     state.optimisticRunningById.set(cidLower, {
       cascadeId: rawCid,
       startedAt: now,
@@ -10231,6 +10355,7 @@
       folderDragMode: '',
       folderTargetId: '',
       folderTargetCid: '',
+      folderTargetParentId: '',
       itemDropMode: '',
       itemTargetCid: '',
       itemTargetGroupId: '',
@@ -10283,15 +10408,16 @@
   }
 
   function resolvePeerInsertHit(peers, fromIdx, clientY) {
-    if (!Array.isArray(peers) || peers.length < 2 || fromIdx < 0) return null;
+    if (!Array.isArray(peers) || peers.length === 0) return null;
+    if (fromIdx >= 0 && peers.length < 2) return null;
     const rects = peers.map((p) => p.el.getBoundingClientRect());
     const fRect = rects[0];
     const lRect = rects[rects.length - 1];
     if (fRect.height > 0 && clientY < fRect.top) {
-      return fromIdx > 0 ? { peer: peers[0], mode: 'before' } : null;
+      return fromIdx !== 0 ? { peer: peers[0], mode: 'before' } : null;
     }
     if (lRect.height > 0 && clientY > lRect.bottom) {
-      return fromIdx < peers.length - 1 ? { peer: peers[peers.length - 1], mode: 'after' } : null;
+      return fromIdx !== peers.length - 1 ? { peer: peers[peers.length - 1], mode: 'after' } : null;
     }
     let hitIdx = -1;
     for (let i = 0; i < rects.length; i++) {
@@ -10303,10 +10429,10 @@
     }
     if (hitIdx < 0 || hitIdx === fromIdx) return null;
     const r = rects[hitIdx];
-    if (hitIdx === fromIdx + 1) {
+    if (fromIdx >= 0 && hitIdx === fromIdx + 1) {
       return clientY >= r.top + r.height * 0.2 ? { peer: peers[hitIdx], mode: 'after' } : null;
     }
-    if (hitIdx === fromIdx - 1) {
+    if (fromIdx >= 0 && hitIdx === fromIdx - 1) {
       return clientY <= r.bottom - r.height * 0.2 ? { peer: peers[hitIdx], mode: 'before' } : null;
     }
     return {
@@ -10315,11 +10441,41 @@
     };
   }
 
+  function syncHoverExpandCollapsedGroup(candidateGroupId) {
+    const targetGrp = candidateGroupId
+      ? state.groups.find((g) => g.id === candidateGroupId)
+      : null;
+    if (targetGrp && targetGrp.collapsed) {
+      if (state.convDragHoverGroupId !== targetGrp.id) {
+        if (state.convDragHoverGroupTimer) clearTimeout(state.convDragHoverGroupTimer);
+        state.convDragHoverGroupId = targetGrp.id;
+        state.convDragHoverGroupTimer = setTimeout(() => {
+          state.convDragHoverGroupTimer = null;
+          const gid = state.convDragHoverGroupId;
+          state.convDragHoverGroupId = '';
+          if (state.convDrag?.started && gid) {
+            const latest = state.groups.find((g) => g.id === gid);
+            if (latest?.collapsed) {
+              sendGroupAction({ type: 'toggle-collapse', groupId: gid });
+            }
+          }
+        }, 350);
+      }
+    } else if (state.convDragHoverGroupTimer) {
+      clearTimeout(state.convDragHoverGroupTimer);
+      state.convDragHoverGroupTimer = null;
+      state.convDragHoverGroupId = '';
+    } else {
+      state.convDragHoverGroupId = '';
+    }
+  }
+
   function updateFolderDragTarget(d, panel, clientX, clientY) {
     const dragId = d.sourceGroupId;
     const dragGrp = state.groups.find((g) => g.id === dragId);
     const ghost = ensureConvDragGhostEl();
     if (!dragGrp || !panel || !panel.isConnected) {
+      syncHoverExpandCollapsedGroup('');
       if (panel) {
         panel
           .querySelectorAll(
@@ -10339,6 +10495,7 @@
       d.folderDragMode = '';
       d.folderTargetId = '';
       d.folderTargetCid = '';
+      d.folderTargetParentId = '';
       ghost.classList.remove('is-visible');
       return;
     }
@@ -10348,6 +10505,7 @@
     let nextMode = '';
     let nextTargetId = '';
     let nextTargetCid = '';
+    let nextParentId = '';
     let highlightEl = null;
     let highlightClass = '';
 
@@ -10422,11 +10580,13 @@
             if (rel <= 0.5 && canPullBeforeParent) {
               nextMode = 'before';
               nextTargetId = targetId;
+              nextParentId = outerParentId;
               highlightEl = bestBlock;
               highlightClass = 'aq-grp-drag-before';
             } else if (rel > 0.5 && ownPeers.length >= 2 && fromPeerIdx > 0) {
               const firstPeer = ownPeers[0];
               nextMode = 'before';
+              nextParentId = targetId;
               highlightEl = firstPeer.el;
               if (firstPeer.kind === 'group') {
                 nextTargetId = firstPeer.id;
@@ -10440,6 +10600,7 @@
             const peerHit = resolvePeerInsertHit(ownPeers, fromPeerIdx, clientY);
             if (peerHit) {
               nextMode = peerHit.mode;
+              nextParentId = targetId;
               highlightEl = peerHit.peer.el;
               if (peerHit.peer.kind === 'group') {
                 nextTargetId = peerHit.peer.id;
@@ -10483,10 +10644,55 @@
 
           const hdr = bestBlock.querySelector(':scope > [data-aq-grp-hdr]');
           const hRect = hdr?.getBoundingClientRect?.();
-          let mode = '';
-          if (hRect && hRect.height > 0 && clientY <= hRect.bottom) {
-            const rel = (clientY - hRect.top) / hRect.height;
-            if (!canNestInside) {
+          const onHeader = Boolean(
+            targetGrp?.collapsed || (hRect && hRect.height > 0 && clientY <= hRect.bottom)
+          );
+
+          if (!onHeader) {
+            if (canNestInside) {
+              const targetPeers = getDirectPeerDescriptors(bestBlock);
+              const peerHit =
+                targetPeers.length >= 1 ? resolvePeerInsertHit(targetPeers, -1, clientY) : null;
+              if (peerHit) {
+                nextMode = peerHit.mode;
+                nextParentId = targetId;
+                highlightEl = peerHit.peer.el;
+                if (peerHit.peer.kind === 'group') {
+                  nextTargetId = peerHit.peer.id;
+                  highlightClass =
+                    peerHit.mode === 'before' ? 'aq-grp-drag-before' : 'aq-grp-drag-after';
+                } else {
+                  nextTargetCid = peerHit.peer.id;
+                  highlightClass =
+                    peerHit.mode === 'before'
+                      ? 'aq-grp-item-drag-before'
+                      : 'aq-grp-item-drag-after';
+                }
+              } else {
+                nextMode = 'inside';
+                nextTargetId = targetId;
+                highlightEl = bestBlock;
+                highlightClass = 'aq-grp-drag-inside';
+              }
+            } else if (!isAfterNoop && canBeSibling) {
+              nextMode = 'after';
+              nextTargetId = targetId;
+              nextParentId = targetParentId;
+              highlightEl = bestBlock;
+              highlightClass = 'aq-grp-drag-after';
+            }
+          } else {
+            const rel = hRect && hRect.height > 0 ? (clientY - hRect.top) / hRect.height : 0.5;
+            let mode = '';
+            if (!targetGrp?.collapsed && canNestInside) {
+              if (isBeforeNoop) {
+                if (rel >= 0.18) mode = 'inside';
+              } else if (rel <= 0.32 && canBeSibling) {
+                mode = 'before';
+              } else {
+                mode = 'inside';
+              }
+            } else if (!canNestInside) {
               if (isBeforeNoop) {
                 mode = rel >= 0.22 ? 'after' : '';
               } else if (isAfterNoop) {
@@ -10507,23 +10713,22 @@
             } else {
               mode = 'after';
             }
-          } else if (!isAfterNoop) {
-            mode = 'after';
-          }
 
-          if ((mode === 'before' || mode === 'after') && !canBeSibling) {
-            mode = canNestInside ? 'inside' : '';
-          }
-          if (mode) {
-            nextMode = mode;
-            nextTargetId = targetId;
-            highlightEl = bestBlock;
-            highlightClass =
-              mode === 'inside'
-                ? 'aq-grp-drag-inside'
-                : mode === 'before'
-                  ? 'aq-grp-drag-before'
-                  : 'aq-grp-drag-after';
+            if ((mode === 'before' || mode === 'after') && !canBeSibling) {
+              mode = canNestInside ? 'inside' : '';
+            }
+            if (mode) {
+              nextMode = mode;
+              nextTargetId = targetId;
+              nextParentId = mode === 'inside' ? '' : targetParentId;
+              highlightEl = bestBlock;
+              highlightClass =
+                mode === 'inside'
+                  ? 'aq-grp-drag-inside'
+                  : mode === 'before'
+                    ? 'aq-grp-drag-before'
+                    : 'aq-grp-drag-after';
+            }
           }
         }
       } else if (
@@ -10556,6 +10761,8 @@
       }
     }
 
+    syncHoverExpandCollapsedGroup(nextMode === 'inside' && nextTargetId ? nextTargetId : '');
+
     // 2. Write DOM classes in one batch
     panel
       .querySelectorAll(
@@ -10578,12 +10785,14 @@
     d.folderDragMode = nextMode;
     d.folderTargetId = nextTargetId;
     d.folderTargetCid = nextTargetCid;
+    d.folderTargetParentId = nextParentId;
 
+    const anchorParentId = nextParentId || dragGrp.parentId || '';
     let badgeText = '';
     if (nextMode === 'root') {
       badgeText = '移至顶层';
-    } else if (nextTargetCid && dragGrp.parentId) {
-      const pGrp = state.groups.find((g) => g.id === dragGrp.parentId);
+    } else if (nextTargetCid && anchorParentId) {
+      const pGrp = state.groups.find((g) => g.id === anchorParentId);
       const tItem = pGrp?.items?.find(
         (it) => String(it.cascadeId || '').toLowerCase() === nextTargetCid.toLowerCase()
       );
@@ -10635,6 +10844,7 @@
       return;
     }
     if (!panel || !panel.isConnected) {
+      syncHoverExpandCollapsedGroup('');
       d.overPanel = false;
       d.overGroupId = '';
       d.overEmptyPanel = false;
@@ -10677,6 +10887,7 @@
 
     const allBlocks = panel.querySelectorAll('[data-aq-grp-block]');
     let rawHitGroupId = '';
+    let rawHitBlock = null;
     if (inGroupsBody) {
       let bestDepth = -1;
       for (let i = 0; i < allBlocks.length; i++) {
@@ -10688,6 +10899,7 @@
           if (depth >= bestDepth) {
             bestDepth = depth;
             rawHitGroupId = b.getAttribute('data-aq-grp-block') || '';
+            rawHitBlock = b;
           }
         }
       }
@@ -10700,49 +10912,56 @@
     let pickedEl = null;
     let pickedClass = '';
 
-    if (d.mode === 'group-item' && d.sourceGroupId && inGroupsBody) {
-      let sourceBlock = null;
-      for (let i = 0; i < allBlocks.length; i++) {
-        if (allBlocks[i].getAttribute('data-aq-grp-block') === d.sourceGroupId) {
-          sourceBlock = allBlocks[i];
-          break;
-        }
-      }
-      const ownPeers = getDirectPeerDescriptors(sourceBlock);
+    if (inGroupsBody && rawHitBlock && rawHitGroupId) {
+      const rawHitGrp = state.groups.find((g) => g.id === rawHitGroupId);
+      const hdr = rawHitBlock.querySelector(':scope > [data-aq-grp-hdr]');
+      const hRect = hdr?.getBoundingClientRect?.();
+      const onHeader = Boolean(
+        rawHitGrp?.collapsed || (hRect && hRect.height > 0 && clientY <= hRect.bottom)
+      );
       const dragCidLower = String(d.item?.cascadeId || '').toLowerCase();
-      const fromPeerIdx = ownPeers.findIndex((p) => p.token === `c:${dragCidLower}`);
+      const isSameGroupDrag = d.mode === 'group-item' && d.sourceGroupId === rawHitGroupId;
 
-      if (rawHitGroupId === d.sourceGroupId) {
-        hitGroupId = '';
-        const peerHit = resolvePeerInsertHit(ownPeers, fromPeerIdx, clientY);
-        if (peerHit) {
-          nextItemDropMode = peerHit.mode;
-          pickedEl = peerHit.peer.el;
-          if (peerHit.peer.kind === 'group') {
-            nextItemTargetGroupId = peerHit.peer.id;
-            pickedClass =
-              peerHit.mode === 'before' ? 'aq-grp-drag-before' : 'aq-grp-drag-after';
-          } else {
-            nextItemTargetCid = peerHit.peer.id;
-            pickedClass =
-              peerHit.mode === 'before' ? 'aq-grp-item-drag-before' : 'aq-grp-item-drag-after';
-          }
+      const assignFirstPeerBefore = (peers, containerGroupId) => {
+        const firstPeer = peers[0];
+        if (!firstPeer) return false;
+        hitGroupId = containerGroupId;
+        nextItemDropMode = 'before';
+        pickedEl = firstPeer.el;
+        if (firstPeer.kind === 'group') {
+          nextItemTargetGroupId = firstPeer.id;
+          pickedClass = 'aq-grp-drag-before';
+        } else {
+          nextItemTargetCid = firstPeer.id;
+          pickedClass = 'aq-grp-item-drag-before';
         }
-      } else if (rawHitGroupId) {
-        const subPeerIdx = ownPeers.findIndex(
-          (p) => p.kind === 'group' && p.id === rawHitGroupId
-        );
-        if (subPeerIdx >= 0) {
-          const subBlock = ownPeers[subPeerIdx].el;
-          const subHdr = subBlock.querySelector(':scope > [data-aq-grp-hdr]');
-          const shRect = subHdr?.getBoundingClientRect?.();
-          const sbRect = subBlock.getBoundingClientRect();
-          const isBeforeNoop = fromPeerIdx >= 0 && subPeerIdx === fromPeerIdx + 1;
-          const isAfterNoop = fromPeerIdx >= 0 && subPeerIdx === fromPeerIdx - 1;
-          let subMode = 'inside';
+        return true;
+      };
 
-          if (shRect && shRect.height > 0 && clientY <= shRect.bottom) {
-            const rel = (clientY - shRect.top) / shRect.height;
+      if (onHeader) {
+        const parentGrpId = rawHitGrp?.parentId || '';
+        const rel = hRect && hRect.height > 0 ? (clientY - hRect.top) / hRect.height : 0.5;
+        if (parentGrpId) {
+          let parentBlock = null;
+          for (let i = 0; i < allBlocks.length; i++) {
+            if (allBlocks[i].getAttribute('data-aq-grp-block') === parentGrpId) {
+              parentBlock = allBlocks[i];
+              break;
+            }
+          }
+          const parentPeers = getDirectPeerDescriptors(parentBlock);
+          const fromInParentIdx = parentPeers.findIndex((p) => p.token === `c:${dragCidLower}`);
+          const subPeerIdx = parentPeers.findIndex(
+            (p) => p.kind === 'group' && p.id === rawHitGroupId
+          );
+          const checkNoop =
+            (d.mode === 'group-item' && d.sourceGroupId === parentGrpId) ||
+            (d.mode === 'native-row' && fromInParentIdx >= 0);
+          const isBeforeNoop = checkNoop && fromInParentIdx >= 0 && subPeerIdx === fromInParentIdx + 1;
+          const isAfterNoop = checkNoop && fromInParentIdx >= 0 && subPeerIdx === fromInParentIdx - 1;
+
+          let subMode = 'inside';
+          if (rawHitGrp?.collapsed) {
             if (isBeforeNoop) {
               if (rel >= 0.62) subMode = 'after';
               else if (rel >= 0.18) subMode = 'inside';
@@ -10758,48 +10977,89 @@
             } else {
               subMode = 'after';
             }
-          } else if (!isAfterNoop && sbRect.height > 0 && clientY >= sbRect.bottom - 8) {
-            subMode = 'after';
+          } else if (isBeforeNoop) {
+            subMode = rel >= 0.18 ? 'inside' : '';
+          } else if (rel <= 0.32) {
+            subMode = 'before';
+          } else {
+            subMode = 'inside';
           }
 
           if (subMode === 'before' || subMode === 'after') {
-            hitGroupId = '';
+            hitGroupId = parentGrpId;
             nextItemDropMode = subMode;
             nextItemTargetGroupId = rawHitGroupId;
-            pickedEl = subBlock;
+            pickedEl = rawHitBlock;
             pickedClass = subMode === 'before' ? 'aq-grp-drag-before' : 'aq-grp-drag-after';
-          } else if (subMode !== 'inside') {
+          } else if (subMode === 'inside') {
+            if (isSameGroupDrag) {
+              const ownPeers = getDirectPeerDescriptors(rawHitBlock);
+              const ownIdx = ownPeers.findIndex((p) => p.token === `c:${dragCidLower}`);
+              if (!(ownPeers.length >= 2 && ownIdx > 0 && assignFirstPeerBefore(ownPeers, rawHitGroupId))) {
+                hitGroupId = '';
+              }
+            } else {
+              hitGroupId = rawHitGroupId;
+            }
+          } else {
             hitGroupId = '';
+          }
+        } else if (isSameGroupDrag) {
+          const ownPeers = getDirectPeerDescriptors(rawHitBlock);
+          const ownIdx = ownPeers.findIndex((p) => p.token === `c:${dragCidLower}`);
+          if (
+            !rawHitGrp?.collapsed &&
+            ownPeers.length >= 2 &&
+            ownIdx > 0 &&
+            assignFirstPeerBefore(ownPeers, rawHitGroupId)
+          ) {
+            // handled
+          } else {
+            hitGroupId = '';
+          }
+        } else {
+          hitGroupId = rawHitGroupId;
+        }
+      } else {
+        const targetPeers = getDirectPeerDescriptors(rawHitBlock);
+        if (targetPeers.length === 0) {
+          hitGroupId = isSameGroupDrag ? '' : rawHitGroupId;
+        } else {
+          const fromPeerIdx =
+            isSameGroupDrag || d.mode === 'native-row'
+              ? targetPeers.findIndex((p) => p.token === `c:${dragCidLower}`)
+              : -1;
+          const peerHit = resolvePeerInsertHit(targetPeers, fromPeerIdx, clientY);
+          if (peerHit) {
+            if (
+              !isSameGroupDrag &&
+              d.mode === 'group-item' &&
+              peerHit.peer.token === `c:${dragCidLower}`
+            ) {
+              hitGroupId = rawHitGroupId;
+            } else {
+              hitGroupId = rawHitGroupId;
+              nextItemDropMode = peerHit.mode;
+              pickedEl = peerHit.peer.el;
+              if (peerHit.peer.kind === 'group') {
+                nextItemTargetGroupId = peerHit.peer.id;
+                pickedClass =
+                  peerHit.mode === 'before' ? 'aq-grp-drag-before' : 'aq-grp-drag-after';
+              } else {
+                nextItemTargetCid = peerHit.peer.id;
+                pickedClass =
+                  peerHit.mode === 'before' ? 'aq-grp-item-drag-before' : 'aq-grp-item-drag-after';
+              }
+            }
+          } else {
+            hitGroupId = isSameGroupDrag || fromPeerIdx >= 0 ? '' : rawHitGroupId;
           }
         }
       }
     }
 
     // Hovering over any collapsed target folder auto-expands it so users can inspect or drop inside
-    const hitGrp = hitGroupId ? state.groups.find((g) => g.id === hitGroupId) : null;
-    if (inGroupsBody && hitGrp && hitGrp.collapsed) {
-      if (state.convDragHoverGroupId !== hitGrp.id) {
-        if (state.convDragHoverGroupTimer) clearTimeout(state.convDragHoverGroupTimer);
-        state.convDragHoverGroupId = hitGrp.id;
-        state.convDragHoverGroupTimer = setTimeout(() => {
-          state.convDragHoverGroupTimer = null;
-          const gid = state.convDragHoverGroupId;
-          state.convDragHoverGroupId = '';
-          if (state.convDrag?.started && gid) {
-            const latest = state.groups.find((g) => g.id === gid);
-            if (latest?.collapsed) {
-              sendGroupAction({ type: 'toggle-collapse', groupId: gid });
-            }
-          }
-        }, 350);
-      }
-    } else if (state.convDragHoverGroupTimer) {
-      clearTimeout(state.convDragHoverGroupTimer);
-      state.convDragHoverGroupTimer = null;
-      state.convDragHoverGroupId = '';
-    } else {
-      state.convDragHoverGroupId = '';
-    }
+    syncHoverExpandCollapsedGroup(inGroupsBody && hitGroupId && !nextItemDropMode ? hitGroupId : '');
 
     // 2. Write DOM classes in one batch
     if (d.mode === 'native-row' && document.body.classList.contains('aq-dragging-to-group') !== inPanel) {
@@ -10823,7 +11083,10 @@
     for (let i = 0; i < allBlocks.length; i++) {
       const b = allBlocks[i];
       const gid = b.getAttribute('data-aq-grp-block') || '';
-      b.classList.toggle('aq-grp-drop-target', Boolean(hitGroupId && gid === hitGroupId));
+      b.classList.toggle(
+        'aq-grp-drop-target',
+        Boolean(hitGroupId && !nextItemDropMode && gid === hitGroupId)
+      );
     }
 
     const overEmptyPanel = Boolean(inTopArea && state.groups.length === 0 && !state.groupCreating);
@@ -10844,25 +11107,26 @@
       return;
     }
 
+    const verb = d.mode === 'native-row' ? '插到' : '移到';
     let badgeText = '';
     if (nextItemDropMode && nextItemTargetGroupId) {
       const tGrp = state.groups.find((g) => g.id === nextItemTargetGroupId);
       const rawName = String(tGrp?.name || '').trim();
       const shortName = rawName.length > 6 ? `${rawName.slice(0, 5)}…` : rawName;
       badgeText = shortName
-        ? `移到 ${shortName} ${nextItemDropMode === 'before' ? '前' : '后'}`
+        ? `${verb} ${shortName} ${nextItemDropMode === 'before' ? '前' : '后'}`
         : nextItemDropMode === 'before'
           ? '移至上方'
           : '移至下方';
     } else if (nextItemDropMode && nextItemTargetCid) {
-      const sourceGrp = state.groups.find((g) => g.id === d.sourceGroupId);
-      const tItem = sourceGrp?.items?.find(
+      const containerGrp = state.groups.find((g) => g.id === hitGroupId);
+      const tItem = containerGrp?.items?.find(
         (it) => String(it.cascadeId || '').toLowerCase() === nextItemTargetCid.toLowerCase()
       );
       const rawTitle = String(tItem?.title || '').trim();
       const shortTitle = rawTitle.length > 5 ? `${rawTitle.slice(0, 4)}…` : rawTitle;
       badgeText = shortTitle
-        ? `移到 ${shortTitle} ${nextItemDropMode === 'before' ? '前' : '后'}`
+        ? `${verb} ${shortTitle} ${nextItemDropMode === 'before' ? '前' : '后'}`
         : nextItemDropMode === 'before'
           ? '移至上方'
           : '移至下方';
@@ -12273,12 +12537,527 @@
     state.latestSidebarDomInfo = null;
   }
 
+  const MAX_CONV_SCROLL_MEMORY = 100;
+  const SCROLL_AT_BOTTOM_EPSILON_PX = 48;
+  const SCROLL_RESTORE_STABILIZE_MS = 600;
+
+  function computeTurnsReplySig(payload, cidLower) {
+    if (!payload || !cidLower) return '';
+    if (String(payload.cascadeId || '').trim().toLowerCase() !== cidLower) return '';
+    const turns = Array.isArray(payload.turns) ? payload.turns : [];
+    if (turns.length === 0) return '0';
+    const last = turns[turns.length - 1] || {};
+    return `${turns.length}|${last.startStepIdx ?? 0}|${last.calls ?? 0}|${last.outputTokens ?? 0}|${last.responseTokens ?? 0}|${last.totalTokens ?? 0}|${last.completed ? 1 : 0}`;
+  }
+
+  function extractDomTailMarker(viewEl, precomputedTurnEls = null) {
+    let rows = Array.isArray(precomputedTurnEls) ? precomputedTurnEls : null;
+    if (!rows) {
+      const scope = viewEl || document;
+      const quotableRoot = scope.querySelector?.('[data-quotable-root]');
+      if (quotableRoot) {
+        for (const child of quotableRoot.children) {
+          if (child.tagName === 'DIV') {
+            const matched = [];
+            for (let i = 0; i < child.children.length; i++) {
+              if (isTurnRowElement(child.children[i])) matched.push(child.children[i]);
+            }
+            if (matched.length > 0) {
+              rows = matched;
+              break;
+            }
+          }
+        }
+      }
+      if (!rows) {
+        rows = scope.querySelectorAll ? [...scope.querySelectorAll('[data-turn-content]')] : [];
+      }
+    }
+    const domTurnCount = rows.length;
+    if (domTurnCount === 0) return { domTurnCount: 0, lastTurnTextLen: 0 };
+    const lastRow = rows[domTurnCount - 1];
+    const contentNode =
+      lastRow?.querySelector?.(
+        '[data-testid="agent-response"], [data-turn-content], [data-testid="user-message"]'
+      ) || lastRow;
+    const lastTurnTextLen = contentNode?.textContent ? contentNode.textContent.length : 0;
+    return { domTurnCount, lastTurnTextLen };
+  }
+
+  function hasTurnsPayloadNewReply(payload, cidLower, saved) {
+    if (!payload || !cidLower || !saved) return false;
+    if (String(payload.cascadeId || '').trim().toLowerCase() !== cidLower) return false;
+    const turns = Array.isArray(payload.turns) ? payload.turns : [];
+    if (turns.length === 0) return false;
+    const lastTurn = turns[turns.length - 1] || {};
+    const leftAt = Number(saved.leftAt) || 0;
+    if (leftAt > 0 && Number(lastTurn.startTsMs) > leftAt + 500) {
+      return true;
+    }
+    if (!saved.wasRunning && saved.turnCount > 0 && turns.length > saved.turnCount) {
+      return true;
+    }
+    if (saved.wasRunning && saved.turnsSig) {
+      const curSig = computeTurnsReplySig(payload, cidLower);
+      if (curSig && curSig !== saved.turnsSig) return true;
+    }
+    return false;
+  }
+
+  function findConversationScrollViewport(viewEl) {
+    const root =
+      viewEl ||
+      document.querySelector('[data-testid="conversation-view"][data-cascade-id]') ||
+      document.querySelector('[data-testid="conversation-view"]');
+    if (!root) return { viewEl: null, viewport: null, cidLower: '' };
+    const viewport = root.querySelector('[data-testid="autoscroll-viewport"]');
+    const cidRaw = root.getAttribute('data-cascade-id')?.trim() || extractCascadeId();
+    const cidLower = /^[0-9a-f-]{36}$/i.test(cidRaw) ? cidRaw.toLowerCase() : '';
+    return { viewEl: root, viewport, cidLower };
+  }
+
+  function isConversationCurrentlyRunning(cidLower) {
+    if (!cidLower) return false;
+    const meta = state.trajMetaById[cidLower];
+    if (
+      meta &&
+      !meta.killed &&
+      (meta.running || meta.waiting || meta.subagentRunning || meta.subagentWaiting)
+    ) {
+      return true;
+    }
+    const opt = state.optimisticRunningById.get(cidLower);
+    if (opt && Date.now() < opt.until) return true;
+    if (extractCascadeId().toLowerCase() === cidLower && isActiveComposerBusy()) return true;
+    const row = findConversationSidebarRow(cidLower);
+    if (
+      row?.querySelector?.(
+        '[data-testid="status-loading-spinner"], [data-testid="status-task-running"], [data-testid="attention-dot"]'
+      )
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  function didConversationReceiveNewReply(cidLower, saved, viewEl = null) {
+    if (!cidLower || !saved) return false;
+    if (
+      state.routeEnterNewReply &&
+      state.routeEnterNewReply.cidLower === cidLower &&
+      Date.now() - state.routeEnterNewReply.at < 2_500 &&
+      state.routeEnterNewReply.hasNewReply
+    ) {
+      return true;
+    }
+    const row = findConversationSidebarRow(cidLower);
+    if (row) {
+      if (row.querySelector('[data-testid="status-unread-dot"], [data-testid="attention-dot"]')) {
+        return true;
+      }
+      if (
+        !saved.wasRunning &&
+        row.querySelector('[data-testid="status-loading-spinner"], [data-testid="status-task-running"]')
+      ) {
+        return true;
+      }
+    }
+    const meta = state.trajMetaById[cidLower];
+    if (meta) {
+      if (meta.markedAsUnread || (!meta.killed && (meta.waiting || meta.subagentWaiting))) {
+        return true;
+      }
+      if (!saved.wasRunning && !meta.killed && (meta.running || meta.subagentRunning)) {
+        return true;
+      }
+      const baselineMs = Math.max(Number(saved.leftAt) || 0, Number(meta.lastUserViewMs) || 0);
+      if (baselineMs > 0 && meta.lastModifiedMs > baselineMs + 500) {
+        return true;
+      }
+    }
+    if (saved.domTurnCount > 0 && viewEl) {
+      const { domTurnCount, lastTurnTextLen } = extractDomTailMarker(viewEl);
+      if (domTurnCount > saved.domTurnCount) return true;
+      if (
+        domTurnCount === saved.domTurnCount &&
+        saved.lastTurnTextLen > 0 &&
+        lastTurnTextLen > saved.lastTurnTextLen
+      ) {
+        return true;
+      }
+    }
+    if (hasTurnsPayloadNewReply(state.turnsPayload, cidLower, saved)) {
+      return true;
+    }
+    return false;
+  }
+
+  function persistConvScrollMemoryNow() {
+    if (state.convScrollPersistTimer) {
+      clearTimeout(state.convScrollPersistTimer);
+      state.convScrollPersistTimer = null;
+    }
+    try {
+      if (typeof sessionStorage === 'undefined') return;
+      const entries = [...state.convScrollMemory.entries()].slice(-MAX_CONV_SCROLL_MEMORY);
+      sessionStorage.setItem('aq_conv_scroll_v1', JSON.stringify(entries));
+    } catch {}
+  }
+
+  function schedulePersistConvScrollMemory() {
+    if (state.convScrollPersistTimer || state.disposed) return;
+    state.convScrollPersistTimer = setTimeout(() => {
+      state.convScrollPersistTimer = null;
+      if (!state.disposed) persistConvScrollMemoryNow();
+    }, 300);
+  }
+
+  function setConvScrollMemoryEntry(cidLower, entry) {
+    if (!cidLower || !entry) return;
+    if (state.convScrollMemory.has(cidLower)) {
+      state.convScrollMemory.delete(cidLower);
+    }
+    state.convScrollMemory.set(cidLower, entry);
+    while (state.convScrollMemory.size > MAX_CONV_SCROLL_MEMORY) {
+      const oldestKey = state.convScrollMemory.keys().next().value;
+      if (!oldestKey) break;
+      state.convScrollMemory.delete(oldestKey);
+    }
+    schedulePersistConvScrollMemory();
+  }
+
+  function getAutoScrollHandle(viewport) {
+    if (!viewport || typeof viewport !== 'object') return null;
+    try {
+      const keys = Object.keys(viewport);
+      let fiberKey = '';
+      for (let i = 0; i < keys.length; i++) {
+        if (keys[i].startsWith('__reactFiber$')) {
+          fiberKey = keys[i];
+          break;
+        }
+      }
+      let f = fiberKey ? viewport[fiberKey] : null;
+      let guard = 0;
+      while (f && guard++ < 10) {
+        const handle = f.ref && typeof f.ref === 'object' ? f.ref.current : null;
+        if (
+          handle &&
+          typeof handle.stopAutoScroll === 'function' &&
+          typeof handle.forceScrollToBottom === 'function'
+        ) {
+          return handle;
+        }
+        f = f.return;
+      }
+    } catch {}
+    return null;
+  }
+
+  function stopNativeAutoScroll(viewport) {
+    if (!viewport) return;
+    const handle = getAutoScrollHandle(viewport);
+    try {
+      handle?.stopAutoScroll?.();
+    } catch {}
+    try {
+      if (viewport.style) viewport.style.overflowAnchor = 'auto';
+    } catch {}
+  }
+
+  function forceNativeScrollToBottom(viewport) {
+    if (!viewport) return;
+    const handle = getAutoScrollHandle(viewport);
+    if (handle?.forceScrollToBottom) {
+      try {
+        handle.forceScrollToBottom();
+        return;
+      } catch {}
+    }
+    try {
+      viewport.scrollTop = viewport.scrollHeight;
+    } catch {}
+  }
+
+  function cancelActiveScrollRestore({ markReady = true } = {}) {
+    const r = state.activeScrollRestore;
+    if (!r) return;
+    state.activeScrollRestore = null;
+    if (r.timer) clearTimeout(r.timer);
+    if (r.resizeObserver) {
+      try {
+        r.resizeObserver.disconnect();
+      } catch {}
+    }
+    if (markReady && r.viewport) {
+      r.viewport.__aqReadyToRecord = true;
+    }
+  }
+
+  function recordViewportScrollPositionOnly(cidLower, viewport) {
+    if (!cidLower || !viewport || !viewport.isConnected) return;
+    const scrollTop = Math.max(0, Number(viewport.scrollTop) || 0);
+    const scrollHeight = Math.max(0, Number(viewport.scrollHeight) || 0);
+    const clientHeight = Math.max(0, Number(viewport.clientHeight) || 0);
+    if (clientHeight <= 0 && scrollHeight <= 0) return;
+    const maxScroll = Math.max(0, scrollHeight - clientHeight);
+    const atBottom = maxScroll - scrollTop <= SCROLL_AT_BOTTOM_EPSILON_PX;
+    const roundedTop = Math.round(scrollTop);
+    const roundedMax = Math.round(maxScroll);
+    const existing = state.convScrollMemory.get(cidLower);
+    if (existing) {
+      existing.scrollTop = roundedTop;
+      existing.maxScroll = roundedMax;
+      existing.atBottom = atBottom;
+      existing.leftAt = Date.now();
+      schedulePersistConvScrollMemory();
+      return;
+    }
+    setConvScrollMemoryEntry(cidLower, {
+      scrollTop: roundedTop,
+      maxScroll: roundedMax,
+      atBottom,
+      leftAt: Date.now(),
+      domTurnCount: 0,
+      lastTurnTextLen: 0,
+      turnCount: 0,
+      turnsSig: '',
+      wasRunning: false,
+    });
+  }
+
+  function recordConversationScrollState(cidLower, viewport, viewEl = null, precomputedTurnEls = null) {
+    if (!cidLower || !viewport || !viewport.isConnected) return;
+    const scrollTop = Math.max(0, Number(viewport.scrollTop) || 0);
+    const scrollHeight = Math.max(0, Number(viewport.scrollHeight) || 0);
+    const clientHeight = Math.max(0, Number(viewport.clientHeight) || 0);
+    if (clientHeight <= 0 && scrollHeight <= 0) return;
+    const maxScroll = Math.max(0, scrollHeight - clientHeight);
+    const atBottom = maxScroll - scrollTop <= SCROLL_AT_BOTTOM_EPSILON_PX;
+    const prev = state.convScrollMemory.get(cidLower) || null;
+    const payloadMatches =
+      String(state.turnsPayload?.cascadeId || '').trim().toLowerCase() === cidLower;
+    const turnCount = payloadMatches
+      ? Array.isArray(state.turnsPayload?.turns)
+        ? state.turnsPayload.turns.length
+        : 0
+      : prev?.turnCount || 0;
+    const turnsSig = computeTurnsReplySig(state.turnsPayload, cidLower) || prev?.turnsSig || '';
+    const hostView =
+      viewEl || viewport.closest?.('[data-testid="conversation-view"]') || null;
+    const marker = extractDomTailMarker(hostView, precomputedTurnEls);
+    setConvScrollMemoryEntry(cidLower, {
+      scrollTop: Math.round(scrollTop),
+      maxScroll: Math.round(maxScroll),
+      atBottom,
+      leftAt: Date.now(),
+      domTurnCount: marker.domTurnCount || prev?.domTurnCount || 0,
+      lastTurnTextLen:
+        marker.domTurnCount > 0 ? marker.lastTurnTextLen : prev?.lastTurnTextLen || 0,
+      turnCount,
+      turnsSig,
+      wasRunning: isConversationCurrentlyRunning(cidLower),
+    });
+  }
+
+  function refreshSavedConversationReplyMarkers(cidLower, precomputedTurnEls = null) {
+    if (!cidLower) return;
+    const prev = state.convScrollMemory.get(cidLower);
+    if (!prev) return;
+    const payloadMatches =
+      String(state.turnsPayload?.cascadeId || '').trim().toLowerCase() === cidLower;
+    const turnCount = payloadMatches
+      ? Array.isArray(state.turnsPayload?.turns)
+        ? state.turnsPayload.turns.length
+        : 0
+      : prev.turnCount || 0;
+    const turnsSig = computeTurnsReplySig(state.turnsPayload, cidLower) || prev.turnsSig || '';
+    const wasRunning = isConversationCurrentlyRunning(cidLower);
+    let domTurnCount = prev.domTurnCount || 0;
+    let lastTurnTextLen = prev.lastTurnTextLen || 0;
+    if (Array.isArray(precomputedTurnEls)) {
+      const marker = extractDomTailMarker(null, precomputedTurnEls);
+      if (marker.domTurnCount > 0) {
+        domTurnCount = marker.domTurnCount;
+        lastTurnTextLen = marker.lastTurnTextLen;
+      }
+    }
+    if (
+      turnsSig !== prev.turnsSig ||
+      turnCount !== prev.turnCount ||
+      wasRunning !== prev.wasRunning ||
+      domTurnCount !== prev.domTurnCount ||
+      lastTurnTextLen !== prev.lastTurnTextLen
+    ) {
+      setConvScrollMemoryEntry(cidLower, {
+        ...prev,
+        turnCount,
+        turnsSig,
+        domTurnCount,
+        lastTurnTextLen,
+        wasRunning,
+        leftAt: Date.now(),
+      });
+    }
+  }
+
+  function snapshotActiveConversationScrollBeforeLeave() {
+    const { viewEl, viewport, cidLower } = findConversationScrollViewport(null);
+    if (!cidLower) return;
+    if (
+      viewport &&
+      viewport.isConnected &&
+      viewport.__aqReadyToRecord &&
+      viewport.__aqCid === cidLower &&
+      state.activeScrollRestore?.viewport !== viewport
+    ) {
+      recordConversationScrollState(cidLower, viewport, viewEl);
+    } else {
+      refreshSavedConversationReplyMarkers(cidLower);
+    }
+  }
+
+  function computeRestoredScrollTop(saved, currentMaxScroll) {
+    const savedMax = Math.max(0, Number(saved?.maxScroll) || 0);
+    const savedTop = Math.max(0, Number(saved?.scrollTop) || 0);
+    if (savedMax > 0 && currentMaxScroll + 400 < savedMax) {
+      const distFromBottom = Math.max(0, savedMax - savedTop);
+      return Math.max(0, Math.round(currentMaxScroll - distFromBottom));
+    }
+    return Math.min(currentMaxScroll, Math.round(savedTop));
+  }
+
+  function applyPendingScrollRestore() {
+    const r = state.activeScrollRestore;
+    if (!r) return;
+    const vp = r.viewport;
+    const vpOwnerCid =
+      vp?.closest?.('[data-testid="conversation-view"]')?.getAttribute('data-cascade-id')?.trim().toLowerCase() ||
+      extractCascadeId().toLowerCase();
+    if (!vp || !vp.isConnected || vpOwnerCid !== r.cidLower) {
+      cancelActiveScrollRestore({ markReady: true });
+      return;
+    }
+    if (Date.now() >= r.until || r.userInteracted) {
+      cancelActiveScrollRestore({ markReady: true });
+      recordConversationScrollState(r.cidLower, vp);
+      return;
+    }
+    stopNativeAutoScroll(vp);
+    const clientH = Number(vp.clientHeight) || 0;
+    const scrollH = Number(vp.scrollHeight) || 0;
+    if (clientH <= 0 && scrollH <= 0) return;
+    const currentMaxScroll = Math.max(0, scrollH - clientH);
+    const targetTop = computeRestoredScrollTop(r.saved, currentMaxScroll);
+    if (Math.abs((Number(vp.scrollTop) || 0) - targetTop) >= 1) {
+      vp.scrollTop = targetTop;
+    }
+  }
+
+  function syncConversationViewportScroll() {
+    const { viewEl, viewport, cidLower } = findConversationScrollViewport(null);
+    if (!viewport || !cidLower) {
+      if (!state.initialScrollBootstrapped) {
+        state.initialScrollBootstrapped = true;
+      }
+      return;
+    }
+
+    if (viewport.__aqScrollChecked === cidLower) {
+      if (state.activeScrollRestore?.viewport === viewport) {
+        applyPendingScrollRestore();
+      }
+      return;
+    }
+
+    // First boot/hot-reload while a conversation is already open on screen: adopt its current scroll
+    if (!state.initialScrollBootstrapped) {
+      state.initialScrollBootstrapped = true;
+      viewport.__aqCid = cidLower;
+      viewport.__aqScrollChecked = cidLower;
+      viewport.__aqReadyToRecord = true;
+      recordConversationScrollState(cidLower, viewport, viewEl);
+      return;
+    }
+
+    if (state.activeScrollRestore && state.activeScrollRestore.viewport !== viewport) {
+      cancelActiveScrollRestore({ markReady: true });
+    }
+
+    viewport.__aqCid = cidLower;
+    viewport.__aqScrollChecked = cidLower;
+
+    const saved = state.convScrollMemory.get(cidLower) || null;
+    if (!saved || saved.atBottom || didConversationReceiveNewReply(cidLower, saved, viewEl)) {
+      viewport.__aqReadyToRecord = true;
+      recordConversationScrollState(cidLower, viewport, viewEl);
+      return;
+    }
+
+    viewport.__aqReadyToRecord = false;
+    const now = Date.now();
+    const restore = {
+      cidLower,
+      viewport,
+      saved: { ...saved },
+      startedAt: now,
+      until: now + SCROLL_RESTORE_STABILIZE_MS,
+      userInteracted: false,
+      resizeObserver: null,
+      timer: null,
+    };
+    if (typeof ResizeObserver === 'function') {
+      try {
+        const ro = new ResizeObserver(() => {
+          if (state.activeScrollRestore === restore) {
+            applyPendingScrollRestore();
+          }
+        });
+        ro.observe(viewport);
+        const contentWrap = viewport.firstElementChild;
+        if (contentWrap) {
+          ro.observe(contentWrap);
+          if (contentWrap.firstElementChild) {
+            ro.observe(contentWrap.firstElementChild);
+          }
+        }
+        restore.resizeObserver = ro;
+      } catch {}
+    }
+    restore.timer = setTimeout(() => {
+      if (state.activeScrollRestore === restore) {
+        applyPendingScrollRestore();
+        cancelActiveScrollRestore({ markReady: true });
+        recordConversationScrollState(cidLower, viewport, viewEl);
+      }
+    }, SCROLL_RESTORE_STABILIZE_MS + 16);
+
+    state.activeScrollRestore = restore;
+    applyPendingScrollRestore();
+  }
+
   function syncCascadeRoute() {
     const cid = extractCascadeId();
     if (cid !== state.cascadeId) {
+      const prevCid = state.cascadeId;
+      if (prevCid) {
+        refreshSavedConversationReplyMarkers(prevCid.toLowerCase());
+      }
+      if (cid) {
+        const incomingLower = cid.toLowerCase();
+        const savedIncoming = state.convScrollMemory.get(incomingLower) || null;
+        state.routeEnterNewReply = {
+          cidLower: incomingLower,
+          hasNewReply: savedIncoming ? didConversationReceiveNewReply(incomingLower, savedIncoming) : false,
+          at: Date.now(),
+        };
+      } else {
+        state.routeEnterNewReply = null;
+      }
       state.cascadeId = cid;
       stopLiveTurnTimer();
       if (!cid) {
+        cancelActiveScrollRestore({ markReady: true });
         state.turnsPayload = null;
       } else {
         const cidLower = cid.toLowerCase();
@@ -12302,6 +13081,7 @@
           markConversationSendStarted(cid);
         }
       }
+      syncConversationViewportScroll();
       return true;
     }
     return false;
@@ -12360,6 +13140,10 @@
       }
       if (needTurnRows) {
         renderRunningThinkingHelper(sharedCid, sharedTurnEls, sharedLiveCtx);
+      }
+      syncConversationViewportScroll();
+      if (needTurnRows && sharedCid && !state.activeScrollRestore) {
+        refreshSavedConversationReplyMarkers(sharedCid.toLowerCase(), sharedTurnEls);
       }
     }
     if (runMenus) {
@@ -12450,6 +13234,30 @@
       state.lastTurnCompleted = lastCompleted;
       state.turnsPayload = nextPayload;
       state.turnsRenderSeq += 1;
+      if (cid) {
+        const cidLowerForScroll = cid.toLowerCase();
+        const activeRestore = state.activeScrollRestore;
+        if (activeRestore && activeRestore.cidLower === cidLowerForScroll) {
+          if (hasTurnsPayloadNewReply(nextPayload, cidLowerForScroll, activeRestore.saved)) {
+            const vp = activeRestore.viewport;
+            cancelActiveScrollRestore({ markReady: true });
+            if (vp?.isConnected) {
+              forceNativeScrollToBottom(vp);
+              recordConversationScrollState(cidLowerForScroll, vp);
+            }
+          }
+        } else {
+          const { viewport: curVp, cidLower: curVpCid } = findConversationScrollViewport(null);
+          if (
+            curVp &&
+            curVpCid === cidLowerForScroll &&
+            curVp.__aqScrollChecked === cidLowerForScroll &&
+            curVp.__aqReadyToRecord
+          ) {
+            refreshSavedConversationReplyMarkers(cidLowerForScroll);
+          }
+        }
+      }
       let newTurnAdded = false;
       if (cid && activityChanged) {
         const cidLower = cid.toLowerCase();
@@ -12981,6 +13789,9 @@
     if (shouldFlushNow) {
       syncNativeConversationMenus();
     }
+    if (dirtyTurns || dirtyChip) {
+      syncConversationViewportScroll();
+    }
     if (dirtyChip || dirtySidebar || dirtyTurns || dirtyMenus || dirtyI18n) {
       scheduleRender({
         chip: dirtyChip,
@@ -13048,8 +13859,18 @@
     recordNativeMenuTargetFromEvent(ev);
   };
   const onDocPointerDown = (ev) => {
-    recordNativeMenuTargetFromEvent(ev);
     const t = ev.target;
+    if (t?.closest?.('.bg-sidebar, #aq-conv-groups')) {
+      snapshotActiveConversationScrollBeforeLeave();
+    }
+    recordNativeMenuTargetFromEvent(ev);
+    if (
+      state.activeScrollRestore &&
+      t?.closest?.('[data-testid="autoscroll-viewport"]') === state.activeScrollRestore.viewport
+    ) {
+      state.activeScrollRestore.userInteracted = true;
+      cancelActiveScrollRestore({ markReady: true });
+    }
     if (state.quotaTooltipPinned && !t?.closest?.('#aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-quota-chip')) {
       closeQuotaTooltip();
     }
@@ -13353,6 +14174,7 @@
     const folderMode = d.folderDragMode;
     const folderTargetId = d.folderTargetId;
     const folderTargetCid = d.folderTargetCid;
+    const folderTargetParentId = d.folderTargetParentId;
     const itemDropMode = d.itemDropMode;
     const itemTargetCid = d.itemTargetCid;
     const itemTargetGroupId = d.itemTargetGroupId;
@@ -13376,15 +14198,21 @@
         sendGroupAction({ type: 'move-group', groupId: d.sourceGroupId, parentId: '' });
       } else if ((folderMode === 'before' || folderMode === 'after') && folderTargetCid) {
         const srcGrp = state.groups.find((g) => g.id === d.sourceGroupId);
-        const parentId = srcGrp?.parentId || '';
-        if (parentId) {
+        const parentId = folderTargetParentId || srcGrp?.parentId || '';
+        if (
+          parentId &&
+          parentId !== d.sourceGroupId &&
+          !isGroupDescendant(state.groups, d.sourceGroupId, parentId)
+        ) {
           state.groupsError = '';
-          applyOptimisticChildReorder(
-            parentId,
-            `g:${d.sourceGroupId}`,
-            `c:${folderTargetCid.toLowerCase()}`,
-            folderMode
-          );
+          if ((srcGrp?.parentId || '') === parentId) {
+            applyOptimisticChildReorder(
+              parentId,
+              `g:${d.sourceGroupId}`,
+              `c:${folderTargetCid.toLowerCase()}`,
+              folderMode
+            );
+          }
           sendGroupAction({
             type: 'move-group',
             groupId: d.sourceGroupId,
@@ -13443,6 +14271,29 @@
       return;
     }
 
+    const buildItemAnchorFields = () => {
+      if (itemDropMode !== 'before' && itemDropMode !== 'after') return {};
+      if (itemTargetGroupId) {
+        return itemDropMode === 'before'
+          ? { beforeGroupId: itemTargetGroupId }
+          : { afterGroupId: itemTargetGroupId };
+      }
+      if (itemTargetCid) {
+        return itemDropMode === 'before'
+          ? { beforeCascadeId: itemTargetCid }
+          : { afterCascadeId: itemTargetCid };
+      }
+      return {};
+    };
+    const itemAnchorToken =
+      itemDropMode === 'before' || itemDropMode === 'after'
+        ? itemTargetGroupId
+          ? `g:${itemTargetGroupId}`
+          : itemTargetCid
+            ? `c:${itemTargetCid.toLowerCase()}`
+            : ''
+        : '';
+
     if (d.mode === 'native-row') {
       if (!overPanel) return;
       try {
@@ -13453,7 +14304,20 @@
       state.suppressGroupClickUntil = Date.now() + 200;
       if (targetGroupId) {
         state.groupsError = '';
-        sendGroupAction({ type: 'add-item', groupId: targetGroupId, item: d.item });
+        const anchorFields = buildItemAnchorFields();
+        applyOptimisticConversationDrop({
+          fromGroupId: '',
+          toGroupId: targetGroupId,
+          item: d.item,
+          mode: itemDropMode,
+          anchorToken: itemAnchorToken,
+        });
+        sendGroupAction({
+          type: 'add-item',
+          groupId: targetGroupId,
+          item: d.item,
+          ...anchorFields,
+        });
       } else if (dropOnEmptyPanel) {
         state.groupsError = '';
         state.groupRenamingId = '';
@@ -13470,37 +14334,38 @@
       state.suppressGroupClickUntil = Date.now() + 200;
       ev.preventDefault();
       ev.stopPropagation();
-      if (itemDropMode && (itemTargetCid || itemTargetGroupId) && d.sourceGroupId) {
-        state.groupsError = '';
-        const dragLower = String(d.item?.cascadeId || '').toLowerCase();
-        const anchorToken = itemTargetGroupId
-          ? `g:${itemTargetGroupId}`
-          : `c:${itemTargetCid.toLowerCase()}`;
-        applyOptimisticChildReorder(
-          d.sourceGroupId,
-          `c:${dragLower}`,
-          anchorToken,
-          itemDropMode
-        );
-        sendGroupAction({
-          type: 'reorder-items',
-          groupId: d.sourceGroupId,
-          cascadeId: d.item.cascadeId,
-          ...(itemTargetGroupId
-            ? itemDropMode === 'before'
-              ? { beforeGroupId: itemTargetGroupId }
-              : { afterGroupId: itemTargetGroupId }
-            : itemDropMode === 'before'
-              ? { beforeCascadeId: itemTargetCid }
-              : { afterCascadeId: itemTargetCid }),
-        });
+      if (targetGroupId && targetGroupId === d.sourceGroupId) {
+        if (itemDropMode && itemAnchorToken) {
+          state.groupsError = '';
+          const dragLower = String(d.item?.cascadeId || '').toLowerCase();
+          applyOptimisticChildReorder(
+            d.sourceGroupId,
+            `c:${dragLower}`,
+            itemAnchorToken,
+            itemDropMode
+          );
+          sendGroupAction({
+            type: 'reorder-items',
+            groupId: d.sourceGroupId,
+            cascadeId: d.item.cascadeId,
+            ...buildItemAnchorFields(),
+          });
+        }
       } else if (targetGroupId && targetGroupId !== d.sourceGroupId) {
         state.groupsError = '';
+        applyOptimisticConversationDrop({
+          fromGroupId: d.sourceGroupId,
+          toGroupId: targetGroupId,
+          item: d.item,
+          mode: itemDropMode,
+          anchorToken: itemAnchorToken,
+        });
         sendGroupAction({
           type: 'move-item',
           fromGroupId: d.sourceGroupId,
           toGroupId: targetGroupId,
           item: d.item,
+          ...buildItemAnchorFields(),
         });
       }
     }
@@ -13530,7 +14395,35 @@
       markConversationSendCanceled(extractCascadeId());
     }
   };
+  const onDocScrollCapture = (ev) => {
+    const t = ev.target;
+    if (!t || t.nodeType !== 1 || t.getAttribute?.('data-testid') !== 'autoscroll-viewport') return;
+    if (state.activeScrollRestore?.viewport === t && !state.activeScrollRestore.userInteracted) {
+      return;
+    }
+    if (t.__aqReadyToRecord && t.__aqCid) {
+      recordViewportScrollPositionOnly(t.__aqCid, t);
+    }
+  };
+  const onDocWheelOrTouchCapture = (ev) => {
+    if (!state.activeScrollRestore) return;
+    const vp = ev.target?.closest?.('[data-testid="autoscroll-viewport"]');
+    if (vp && vp === state.activeScrollRestore.viewport) {
+      state.activeScrollRestore.userInteracted = true;
+      cancelActiveScrollRestore({ markReady: true });
+    }
+  };
   const onDocKeyDown = (ev) => {
+    if (ev.metaKey || ev.ctrlKey || ev.altKey) {
+      snapshotActiveConversationScrollBeforeLeave();
+    } else if (
+      state.activeScrollRestore &&
+      ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(ev.key) &&
+      !ev.target?.closest?.('input, textarea, [contenteditable="true"], [data-lexical-editor]')
+    ) {
+      state.activeScrollRestore.userInteracted = true;
+      cancelActiveScrollRestore({ markReady: true });
+    }
     if (
       ev.key === 'Enter' &&
       !ev.isComposing &&
@@ -13585,6 +14478,9 @@
   document.addEventListener('visibilitychange', onVisChange);
   document.addEventListener('contextmenu', onDocContextMenuCapture, true);
   document.addEventListener('pointerdown', onDocPointerDown, true);
+  document.addEventListener('scroll', onDocScrollCapture, { capture: true, passive: true });
+  document.addEventListener('wheel', onDocWheelOrTouchCapture, { capture: true, passive: true });
+  document.addEventListener('touchstart', onDocWheelOrTouchCapture, { capture: true, passive: true });
   document.addEventListener('click', onDocClickCapture, true);
   document.addEventListener('keydown', onDocKeyDown, true);
 
@@ -13611,6 +14507,11 @@
 
   const cleanupInstance = function () {
     if (state.disposed) return;
+    try {
+      snapshotActiveConversationScrollBeforeLeave();
+      cancelActiveScrollRestore({ markReady: true });
+      persistConvScrollMemoryNow();
+    } catch {}
     state.disposed = true;
     state.domObserver?.disconnect();
     state.footerObserver?.disconnect();
@@ -13679,6 +14580,9 @@
     document.removeEventListener('visibilitychange', onVisChange);
     document.removeEventListener('contextmenu', onDocContextMenuCapture, true);
     document.removeEventListener('pointerdown', onDocPointerDown, true);
+    document.removeEventListener('scroll', onDocScrollCapture, true);
+    document.removeEventListener('wheel', onDocWheelOrTouchCapture, true);
+    document.removeEventListener('touchstart', onDocWheelOrTouchCapture, true);
     document.removeEventListener('click', onDocClickCapture, true);
     document.removeEventListener('keydown', onDocKeyDown, true);
     try {
