@@ -5,6 +5,31 @@ const STORE_VERSION = 1;
 export const MIN_CONV_WIDTH = 560;
 export const MAX_CONV_WIDTH = 8192;
 export const DEFAULT_CONV_WIDTH = 768;
+const LEGACY_THINKING_SOURCE_ALIASES = {
+  'easydict-ai-brief': 'ai-brief',
+  'easydict-builtin-ai': 'ai-translate',
+  'easydict-google': 'google',
+  'web-google': 'google',
+  'easydict-deepl': 'deepl',
+  'easydict-bing': 'bing',
+  'easydict-youdao': 'youdao',
+};
+
+export const VALID_THINKING_SOURCES = new Set([
+  'auto',
+  'ai-brief',
+  'ai-translate',
+  'google',
+  'deepl',
+  'bing',
+  'youdao',
+]);
+
+export function sanitizeThinkingSourcePref(raw) {
+  const clean = String(raw || '').trim().toLowerCase();
+  const mapped = LEGACY_THINKING_SOURCE_ALIASES[clean] || clean;
+  return VALID_THINKING_SOURCES.has(mapped) ? mapped : 'auto';
+}
 
 function atomicWriteJson(filePath, data) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -61,9 +86,11 @@ export function readUiPrefsStore(filePath) {
       mode: parsed.convWidthMode,
       width: parsed.convMaxWidth,
     });
+    const thinkingSource = sanitizeThinkingSourcePref(parsed.thinkingTranslateSource);
     return {
       version: STORE_VERSION,
       ...conv,
+      ...(thinkingSource !== 'auto' ? { thinkingTranslateSource: thinkingSource } : {}),
     };
   } catch {
     return emptyStore();
@@ -80,6 +107,24 @@ export function updateConversationWidthPref(filePath, { mode, width } = {}) {
     ...current,
     version: STORE_VERSION,
     ...conv,
+  };
+  if (filePath) {
+    atomicWriteJson(filePath, next);
+  }
+  return next;
+}
+
+/**
+ * 更新并原子落盘运行中 Thinking 翻译来源偏好。
+ */
+export function updateThinkingSourcePref(filePath, source) {
+  const current = readUiPrefsStore(filePath);
+  const cleanSource = sanitizeThinkingSourcePref(source);
+  const next = {
+    version: STORE_VERSION,
+    convWidthMode: current.convWidthMode,
+    convMaxWidth: current.convMaxWidth,
+    ...(cleanSource !== 'auto' ? { thinkingTranslateSource: cleanSource } : {}),
   };
   if (filePath) {
     atomicWriteJson(filePath, next);

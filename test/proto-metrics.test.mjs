@@ -5,7 +5,12 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
-import { parseConversationTurns, parseProto, readPackedVarints } from '../src/proto-metrics.mjs';
+import {
+  extractLatestTurnThinking,
+  parseConversationTurns,
+  parseProto,
+  readPackedVarints,
+} from '../src/proto-metrics.mjs';
 
 function encodeVarint(value) {
   const bytes = [];
@@ -371,6 +376,154 @@ test('parseConversationTurns incremental tail parse matches full parse and freez
   const incFallback = parseConversationTurns(dbPath, cid, { prevPayload: inc });
   const fullFallback = parseConversationTurns(dbPath, cid);
   assert.deepEqual(incFallback, fullFallback);
+
+  db.close();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test('extractLatestTurnThinking returns latest non-empty thinking in active turn only', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aq-proto-thinking-test-'));
+  const dbPath = path.join(tmpDir, 'conv.db');
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE steps (
+      idx INTEGER PRIMARY KEY,
+      step_type INTEGER NOT NULL,
+      status INTEGER NOT NULL DEFAULT 3,
+      step_payload BLOB
+    );
+  `);
+
+  const buildPlannerStepPayload = ({ response = '', thinking = '' } = {}) => {
+    const parts = [];
+    if (response) parts.push(fieldBytes(1, Buffer.from(response, 'utf8')));
+    if (thinking) parts.push(fieldBytes(3, Buffer.from(thinking, 'utf8')));
+    return fieldBytes(20, Buffer.concat(parts));
+  };
+
+  const ins = db.prepare('INSERT INTO steps (idx, step_type, status, step_payload) VALUES (?, ?, ?, ?)');
+  // Earlier turn thinking should never leak into the latest turn
+  ins.run(0, 14, 3, null);
+  ins.run(1, 15, 3, buildPlannerStepPayload({ thinking: 'Old turn thinking' }));
+
+  // Latest turn starts at step 2 with no thinking yet
+  ins.run(2, 14, 3, null);
+  ins.run(3, 15, 3, buildPlannerStepPayload({ response: 'Visible sync without thinking' }));
+
+  const emptyRes = extractLatestTurnThinking(dbPath);
+  assert.equal(emptyRes.found, false);
+  assert.equal(emptyRes.reason, 'empty-thinking');
+
+  // Add two thinking steps and a trailing empty-thinking tool call step
+  ins.run(4, 15, 3, buildPlannerStepPayload({ thinking: 'First step thought' }));
+  ins.run(5, 15, 1, buildPlannerStepPayload({ thinking: 'Latest deep thought on `daemon.mjs`' }));
+  ins.run(6, 15, 1, buildPlannerStepPayload({ response: '' }));
+
+  const foundRes = extractLatestTurnThinking(dbPath);
+  assert.equal(foundRes.found, true);
+  assert.equal(foundRes.turnStartStepIdx, 2);
+  assert.equal(foundRes.stepIdx, 5);
+  assert.equal(foundRes.thinkingCount, 2);
+  assert.equal(foundRes.text, 'Latest deep thought on `daemon.mjs`');
+
+  db.close();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test('parseConversationTurns tracks startTsMs, status 2/4 active steps, and step_type 101 wakeup bounds without checkpoint pollution', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aq-proto-live-bounds-'));
+  const dbPath = path.join(tmpDir, 'conv.db');
+  const cid = '33333333-3333-3333-3333-333333333333';
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE steps (
+      idx INTEGER PRIMARY KEY,
+      step_type INTEGER NOT NULL,
+      status INTEGER NOT NULL DEFAULT 3,
+      metadata BLOB,
+      step_payload BLOB
+    );
+    CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);
+  `);
+
+  const tsBlob = (sec, ns = 0) => Buffer.concat([fieldVarint(1, sec), fieldVarint(2, ns)]);
+  const stepTsMeta = (startSec, endSec = startSec) =>
+    Buffer.concat([
+      fieldBytes(1, tsBlob(startSec, 0)),
+      fieldBytes(8, tsBlob(endSec, 0)),
+    ]);
+  const toolMeta = (toolName, startSec, endSec) =>
+    Buffer.concat([
+      fieldBytes(4, fieldBytes(2, Buffer.from(toolName, 'utf8'))),
+      fieldBytes(7, tsBlob(startSec, 0)),
+      fieldBytes(8, tsBlob(endSec, 0)),
+    ]);
+
+  const insStep = db.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (?, ?, ?, ?)');
+  const insGen = db.prepare('INSERT INTO gen_metadata (idx, data) VALUES (?, ?)');
+
+  // Turn 0: finished at +50s, followed by a late checkpoint step (type 21) at +900s that must be ignored
+  const baseSec = 1_795_357_000;
+  insStep.run(0, 14, 3, stepTsMeta(baseSec));
+  insStep.run(1, 15, 3, stepTsMeta(baseSec + 1, baseSec + 50));
+  insStep.run(2, 21, 3, stepTsMeta(baseSec + 900, baseSec + 900));
+  insGen.run(
+    0,
+    buildGenMetadataBlob({
+      stepIds: [1],
+      inTok: 1000,
+      outTok: 200,
+      cacheRead: 4000,
+      thinkTok: 50,
+      respTok: 150,
+      ttftSec: 2,
+      streamSec: 4,
+      model: 'gemini-4-carbon',
+    })
+  );
+
+  // Turn 1: starts at +1000s, has subagent return (type 101) at +1600s, and a RUNNING (status 2) tool call
+  const t1Start = baseSec + 1000;
+  insStep.run(3, 14, 3, stepTsMeta(t1Start));
+  insStep.run(4, 15, 3, stepTsMeta(t1Start + 1, t1Start + 30));
+  insStep.run(5, 101, 3, stepTsMeta(t1Start + 600, t1Start + 600));
+  insStep.run(6, 132, 2, toolMeta('run_command', t1Start + 601, t1Start + 605));
+  insGen.run(
+    1,
+    buildGenMetadataBlob({
+      stepIds: [4, 6],
+      inTok: 1200,
+      outTok: 100,
+      cacheRead: 5000,
+      thinkTok: 20,
+      respTok: 80,
+      ttftSec: 1,
+      streamSec: 2,
+      model: 'gemini-4-carbon',
+    })
+  );
+
+  const res = parseConversationTurns(dbPath, cid);
+  assert.equal(res.turns.length, 2);
+  assert.equal(res.turns[0].completed, true);
+  assert.equal(res.turns[0].startTsMs, baseSec * 1000);
+  assert.equal(res.turns[0].wallDurationMs, 50_000);
+
+  assert.equal(res.turns[1].completed, false);
+  assert.equal(res.turns[1].startTsMs, t1Start * 1000);
+  assert.equal(res.turns[1].wallDurationMs, 605_000);
+  assert.deepEqual(res.turns[1].callDetails[0].toolCalls, [{ toolName: 'run_command', durationMs: null }]);
+
+  // Incremental tail parse after tool finishes (status 3) matches full parse
+  db.prepare('UPDATE steps SET status = 3, metadata = ? WHERE idx = 6').run(
+    toolMeta('run_command', t1Start + 601, t1Start + 612)
+  );
+  const incDone = parseConversationTurns(dbPath, cid, { prevPayload: res });
+  const fullDone = parseConversationTurns(dbPath, cid);
+  assert.deepEqual(incDone, fullDone);
+  assert.equal(incDone.turns[1].completed, true);
+  assert.equal(incDone.turns[1].wallDurationMs, 612_000);
+  assert.deepEqual(incDone.turns[1].callDetails[0].toolCalls, [{ toolName: 'run_command', durationMs: 11_000 }]);
 
   db.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });

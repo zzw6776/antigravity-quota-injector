@@ -21,6 +21,7 @@ import {
   orderQuotaBuckets,
   resolveComposerChipMode,
   resolveGeminiQuotaAvailability,
+  resolveTurnElapsedMs,
   resolveUserPlanLabel,
 } from '../src/formatting.mjs';
 import { translateUiText } from '../src/i18n-zh.mjs';
@@ -79,8 +80,10 @@ test('formatTurnSummary formats codex-style line with CNY price and fallback sta
     completed: true,
     cost: { available: false },
   });
-  assert.match(fallbackDurSummary, /^本轮耗时 26\.8s · Token /);
-  assert.equal(formatElapsedDuration(5400), '5.4s');
+  assert.match(fallbackDurSummary, /^本轮耗时 27秒 · Token /);
+  assert.equal(formatElapsedDuration(400), '1秒');
+  assert.equal(formatElapsedDuration(5400), '5秒');
+  assert.equal(formatElapsedDuration(59_600), '1分');
   assert.equal(formatElapsedDuration(120_000), '2分');
   assert.equal(formatElapsedDuration(3_725_000), '1小时2分5秒');
 
@@ -96,6 +99,38 @@ test('formatTurnSummary formats codex-style line with CNY price and fallback sta
 
   assert.equal(formatTurnSummary({ totalTokens: 0, completed: false }), '等待 Token 数据 · 价格待计算');
   assert.equal(formatTurnSummary({ totalTokens: 0, completed: true }), '本轮未获取到 Token 数据 · 价格无法计算');
+  assert.equal(
+    formatTurnSummary(
+      { totalTokens: 0, startTsMs: 1_000_000, completed: false },
+      { liveRunning: true, nowMs: 1_006_400 }
+    ),
+    '本轮耗时 6秒 · 等待 Token 数据 · 价格待计算'
+  );
+
+  // Live subagent/background wait keeps advancing past last settled step wallDurationMs until conversation ends
+  const startMs = 1_795_357_627_136;
+  const subagentWaitTurn = {
+    totalTokens: 666_274,
+    inputTokens: 658_855,
+    cachedInputTokens: 649_507,
+    firstTokenLatencyMs: 10_630,
+    outputSpeed: 52.0,
+    startTsMs: startMs,
+    wallDurationMs: 248_695,
+    completed: true,
+    cost: { available: true, totalCny: 1.06 },
+  };
+  assert.match(
+    formatTurnSummary(subagentWaitTurn, { liveRunning: true, nowMs: startMs + 1_334_000 }),
+    /^本轮耗时 22分14秒 · Token 0\.666M/
+  );
+  assert.equal(
+    resolveTurnElapsedMs(subagentWaitTurn, {
+      liveRunning: false,
+      minWallDurationMs: 600_000,
+    }),
+    600_000
+  );
 });
 
 test('formatCny, formatUnitPrice, and formatPricingSourceNote format pricing metadata cleanly', () => {

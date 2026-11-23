@@ -13,14 +13,17 @@ import {
   readConversationGroupsStore,
   removeConversationFromGroup,
   renameConversationGroup,
+  reorderConversationGroupItems,
   reorderConversationGroups,
   syncConversationMetadata,
   toggleConversationGroupCollapse,
+  writeConversationGroupsStore,
 } from '../src/conversation-groups.mjs';
 import { buildClientScript } from '../src/daemon.mjs';
 
 const CID_1 = '8866de7d-15be-40b5-9a89-ece7bdc73e24';
 const CID_2 = '6eca6d45-0e6c-4724-bf7a-867c2f82ca4a';
+const CID_3 = '3b12f9a4-7c01-4d8e-8912-15ab34cd56ef';
 
 test('conversation groups CRUD, collapse, reorder, and metadata sync work cleanly', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aq-groups-test-'));
@@ -50,7 +53,7 @@ test('conversation groups CRUD, collapse, reorder, and metadata sync work cleanl
 
     const { group: g2 } = createConversationGroup(filePath, { name: '待跟进' });
 
-    // Add duplicate updates metadata without duplicating item; new item prepends
+    // Add duplicate updates metadata without duplicating item; new item appends at bottom
     let store = addConversationToGroup(filePath, {
       groupId: g1.id,
       item: { cascadeId: CID_1, title: '订阅修复 v2', project: 'antigravity-quota-injector' },
@@ -64,8 +67,19 @@ test('conversation groups CRUD, collapse, reorder, and metadata sync work cleanl
     });
     assert.deepEqual(
       store.groups[0].items.map((it) => it.cascadeId),
-      [CID_2, CID_1]
+      [CID_1, CID_2]
     );
+
+    // Re-adding CID_1 updates metadata while keeping its sorted position at index 0
+    store = addConversationToGroup(filePath, {
+      groupId: g1.id,
+      item: { cascadeId: CID_1, title: '订阅修复 v3', project: 'antigravity-quota-injector' },
+    });
+    assert.deepEqual(
+      store.groups[0].items.map((it) => it.cascadeId),
+      [CID_1, CID_2]
+    );
+    assert.equal(store.groups[0].items[0].title, '订阅修复 v3');
 
     // Rename & collapse
     store = renameConversationGroup(filePath, { groupId: g2.id, name: '归档备忘' });
@@ -94,9 +108,9 @@ test('conversation groups CRUD, collapse, reorder, and metadata sync work cleanl
       [CID_2]: { title: '电脑磁盘空间清理建议', project: 'EcoPaste' },
     });
     assert.equal(syncHit.changed, true);
-    assert.equal(syncHit.store.groups[1].items[0].title, '电脑磁盘空间清理建议');
+    assert.equal(syncHit.store.groups[1].items[1].title, '电脑磁盘空间清理建议');
 
-    // Move item between groups (removes from source, unshifts into target, expands collapsed)
+    // Move item between groups (removes from source, appends to bottom of target, expands collapsed)
     store = toggleConversationGroupCollapse(filePath, { groupId: g2.id });
     assert.equal(store.groups[0].collapsed, true);
 
@@ -116,7 +130,7 @@ test('conversation groups CRUD, collapse, reorder, and metadata sync work cleanl
       [CID_1]
     );
 
-    // Move back to g1 so subsequent remove assertion exercises removeConversationFromGroup
+    // Move back to g1: newly moved-in item is placed at the bottom of g1 ([CID_1, CID_2])
     store = moveConversationBetweenGroups(filePath, {
       fromGroupId: g2.id,
       toGroupId: g1.id,
@@ -125,7 +139,7 @@ test('conversation groups CRUD, collapse, reorder, and metadata sync work cleanl
     assert.deepEqual(store.groups[0].items, []);
     assert.deepEqual(
       store.groups[1].items.map((it) => it.cascadeId),
-      [CID_2, CID_1]
+      [CID_1, CID_2]
     );
 
     // Remove item & delete group
@@ -249,5 +263,214 @@ test('sidebar conversation rows enforce uniform 42px height across groups and mi
     assert.match(script, /\[data-sidebar-section-id="standalone"\]\s+\.agy-sidebar-row/);
     assert.match(script, /is-no-project[\s\S]*?无项目/);
     assert.match(script, /\[data-subtext=""\]\[data-aq-no-project\]\s+\.flex-col::after/);
+    assert.match(script, /\.aq-grp-item\.aq-grp-item-drag-before::before/);
+    assert.match(script, /\.aq-grp-item\.aq-grp-item-drag-after::after/);
+    assert.match(script, /type:\s*'reorder-items'/);
+    assert.match(script, /data-aq-grp-count/);
+  }
+});
+
+test('mixed childOrder supports interleaving subfolders and conversations, bottom-append on new items/subfolders, and legacy store normalization', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aq-mixed-order-test-'));
+  const filePath = path.join(tmpDir, 'conversation-groups.json');
+
+  try {
+    const { group: root } = createConversationGroup(filePath, {
+      name: '工作台',
+      initialItem: { cascadeId: CID_1, title: '会话一', project: 'proj-a' },
+    });
+
+    // Newly created subfolder appends to bottom after CID_1
+    const { group: sub1, store: sAfterSub1 } = createConversationGroup(filePath, {
+      name: '子目录A',
+      parentId: root.id,
+    });
+    assert.deepEqual(
+      sAfterSub1.groups.find((g) => g.id === root.id)?.childOrder,
+      [`c:${CID_1}`, `g:${sub1.id}`]
+    );
+
+    // Newly added conversation appends to bottom after sub1
+    let store = addConversationToGroup(filePath, {
+      groupId: root.id,
+      item: { cascadeId: CID_2, title: '会话二', project: 'proj-b' },
+    });
+    assert.deepEqual(
+      store.groups.find((g) => g.id === root.id)?.childOrder,
+      [`c:${CID_1}`, `g:${sub1.id}`, `c:${CID_2}`]
+    );
+
+    // Drag conversation CID_2 before subfolder sub1 -> [CID_1, CID_2, sub1]
+    store = reorderConversationGroupItems(filePath, {
+      groupId: root.id,
+      cascadeId: CID_2,
+      beforeGroupId: sub1.id,
+    });
+    assert.deepEqual(
+      store.groups.find((g) => g.id === root.id)?.childOrder,
+      [`c:${CID_1}`, `c:${CID_2}`, `g:${sub1.id}`]
+    );
+
+    // Drag subfolder sub1 before conversation CID_1 -> [sub1, CID_1, CID_2]
+    store = moveConversationGroup(filePath, {
+      groupId: sub1.id,
+      parentId: root.id,
+      beforeCascadeId: CID_1,
+    });
+    assert.deepEqual(
+      store.groups.find((g) => g.id === root.id)?.childOrder,
+      [`g:${sub1.id}`, `c:${CID_1}`, `c:${CID_2}`]
+    );
+
+    // Drag external root folder into root: newly dragged-in subfolder lands at the very bottom
+    const { group: extFolder } = createConversationGroup(filePath, { name: '外部文件夹' });
+    store = moveConversationGroup(filePath, {
+      groupId: extFolder.id,
+      parentId: root.id,
+    });
+    assert.deepEqual(
+      store.groups.find((g) => g.id === root.id)?.childOrder,
+      [`g:${sub1.id}`, `c:${CID_1}`, `c:${CID_2}`, `g:${extFolder.id}`]
+    );
+
+    // Drag conversation CID_1 after extFolder -> [sub1, CID_2, extFolder, CID_1]
+    store = reorderConversationGroupItems(filePath, {
+      groupId: root.id,
+      cascadeId: CID_1,
+      afterGroupId: extFolder.id,
+    });
+    const updatedRoot = store.groups.find((g) => g.id === root.id);
+    assert.deepEqual(updatedRoot?.childOrder, [
+      `g:${sub1.id}`,
+      `c:${CID_2}`,
+      `g:${extFolder.id}`,
+      `c:${CID_1}`,
+    ]);
+    assert.deepEqual(
+      updatedRoot?.items.map((it) => it.cascadeId),
+      [CID_2, CID_1]
+    );
+
+    // Regression: when parent sits between its children in flat groups array ([subA, parent, subB]),
+    // normalizing must still sync grandchild order inside subB without skipping subB
+    const nestedRaw = {
+      version: 1,
+      collapsedSection: false,
+      groups: [
+        { id: 'grp_sub_a', name: '子A', parentId: 'grp_parent', collapsed: false, items: [] },
+        {
+          id: 'grp_parent',
+          name: '父目录',
+          parentId: '',
+          collapsed: false,
+          items: [],
+          childOrder: ['g:grp_sub_b', 'g:grp_sub_a'],
+        },
+        {
+          id: 'grp_sub_b',
+          name: '子B',
+          parentId: 'grp_parent',
+          collapsed: false,
+          items: [],
+          childOrder: ['g:grp_grand_2', 'g:grp_grand_1'],
+        },
+        { id: 'grp_grand_1', name: '孙1', parentId: 'grp_sub_b', collapsed: false, items: [] },
+        { id: 'grp_grand_2', name: '孙2', parentId: 'grp_sub_b', collapsed: false, items: [] },
+      ],
+    };
+    const normalizedNested = writeConversationGroupsStore(filePath, nestedRaw);
+    assert.deepEqual(
+      normalizedNested.groups.filter((g) => g.parentId === 'grp_parent').map((g) => g.id),
+      ['grp_sub_b', 'grp_sub_a']
+    );
+    assert.deepEqual(
+      normalizedNested.groups.filter((g) => g.parentId === 'grp_sub_b').map((g) => g.id),
+      ['grp_grand_2', 'grp_grand_1']
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('folder item drag-sort supports before/after anchors, orderedCascadeIds, and appends newly dragged-in items at bottom', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aq-item-sort-test-'));
+  const filePath = path.join(tmpDir, 'conversation-groups.json');
+
+  try {
+    const { group: folderA } = createConversationGroup(filePath, {
+      name: '常用会话',
+      initialItem: { cascadeId: CID_1, title: '会话一', project: 'proj-a' },
+    });
+    const { group: folderB } = createConversationGroup(filePath, {
+      name: '次要会话',
+    });
+
+    // Newly dragged-in items append to bottom in order: CID_1 -> CID_2 -> CID_3
+    addConversationToGroup(filePath, {
+      groupId: folderA.id,
+      item: { cascadeId: CID_2, title: '会话二', project: 'proj-b' },
+    });
+    let store = addConversationToGroup(filePath, {
+      groupId: folderA.id,
+      item: { cascadeId: CID_3, title: '会话三', project: 'proj-c' },
+    });
+    assert.deepEqual(
+      store.groups[0].items.map((it) => it.cascadeId),
+      [CID_1, CID_2, CID_3]
+    );
+
+    // Drag CID_3 before CID_1 -> [CID_3, CID_1, CID_2]
+    store = reorderConversationGroupItems(filePath, {
+      groupId: folderA.id,
+      cascadeId: CID_3,
+      beforeCascadeId: CID_1,
+    });
+    assert.deepEqual(
+      store.groups[0].items.map((it) => it.cascadeId),
+      [CID_3, CID_1, CID_2]
+    );
+
+    // Drag CID_3 after CID_1 -> [CID_1, CID_3, CID_2]
+    store = reorderConversationGroupItems(filePath, {
+      groupId: folderA.id,
+      cascadeId: CID_3,
+      afterCascadeId: CID_1,
+    });
+    assert.deepEqual(
+      store.groups[0].items.map((it) => it.cascadeId),
+      [CID_1, CID_3, CID_2]
+    );
+
+    // Explicit orderedCascadeIds -> [CID_2, CID_1, CID_3]
+    store = reorderConversationGroupItems(filePath, {
+      groupId: folderA.id,
+      orderedCascadeIds: [CID_2, CID_1, CID_3],
+    });
+    assert.deepEqual(
+      store.groups[0].items.map((it) => it.cascadeId),
+      [CID_2, CID_1, CID_3]
+    );
+
+    // Moving items into folderB places each newly dragged-in item at the bottom of folderB
+    moveConversationBetweenGroups(filePath, {
+      fromGroupId: folderA.id,
+      toGroupId: folderB.id,
+      item: { cascadeId: CID_2, title: '会话二', project: 'proj-b' },
+    });
+    store = moveConversationBetweenGroups(filePath, {
+      fromGroupId: folderA.id,
+      toGroupId: folderB.id,
+      item: { cascadeId: CID_3, title: '会话三', project: 'proj-c' },
+    });
+    assert.deepEqual(
+      store.groups[0].items.map((it) => it.cascadeId),
+      [CID_1]
+    );
+    assert.deepEqual(
+      store.groups[1].items.map((it) => it.cascadeId),
+      [CID_2, CID_3]
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

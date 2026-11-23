@@ -122,6 +122,13 @@
     lastTurnsCid: '',
     lastTurnActivitySig: '',
     lastTurnCompleted: true,
+    liveTurnTimer: null,
+    liveTurnKey: '',
+    turnConfirmedPeakMsByKey: new Map(),
+    liveTurnMainIdleSince: 0,
+    wasTurnLiveRunning: false,
+    nonDaemonBgTaskCids: new Set(),
+    postSendTurnsTimer: null,
     routeTimer: null,
     domObserver: null,
     footerObserver: null,
@@ -227,6 +234,7 @@
     keepAliveRunningPools: new Set(),
     hiddenKeepAliveCids: new Set(),
     localViewedAtById: Object.create(null),
+    localUserInputAtById: Object.create(null),
     sidebarTab: (() => {
       try {
         return localStorage.getItem('aq_sidebar_tab_v1') === 'projects' ? 'projects' : 'groups';
@@ -304,6 +312,65 @@
     contextMenuPatched: false,
     contextMenuProto: null,
     contextMenuProviderFiber: null,
+    thinkingReqSeq: 0,
+    thinkingAutoTimer: null,
+    thinkingSourcePref: (() => {
+      try {
+        const raw = String(localStorage.getItem('aq_thinking_source_v1') || '').trim().toLowerCase();
+        const legacyMap = {
+          'easydict-ai-brief': 'ai-brief',
+          'easydict-builtin-ai': 'ai-translate',
+          'easydict-google': 'google',
+          'web-google': 'google',
+          'easydict-deepl': 'deepl',
+          'easydict-bing': 'bing',
+          'easydict-youdao': 'youdao',
+        };
+        const mapped = legacyMap[raw] || raw;
+        return ['auto', 'ai-brief', 'ai-translate', 'google', 'deepl', 'bing', 'youdao'].includes(mapped)
+          ? mapped
+          : 'auto';
+      } catch {
+        return 'auto';
+      }
+    })(),
+    aiConfigMeta: {
+      configured: false,
+      apiKey: '',
+      hasEnvKey: false,
+      source: '',
+      endpoint: '',
+      model: '',
+    },
+    keySettingsOpen: false,
+    keySettingsSaving: false,
+    keySettingsRequestId: '',
+    keySettingsTimer: null,
+    thinkingTranslate: {
+      cascadeId: '',
+      turnKey: '',
+      requestId: '',
+      open: false,
+      loading: false,
+      switchingSource: false,
+      showOriginal: false,
+      stepIdx: -1,
+      thinkingCount: 0,
+      lastUploadedClientSig: '',
+      hasOriginal: false,
+      sourceText: '',
+      translatedText: '',
+      translatedSourceText: '',
+      activeSourcePref: '',
+      providerLabel: '',
+      error: '',
+      errorRetryAfter: 0,
+      empty: false,
+      btnEl: null,
+      cardEl: null,
+      cardParts: null,
+      hostEl: null,
+    },
   };
 
   window.__aqCleanupRegistry.push(() => {
@@ -319,9 +386,12 @@
     state.projScrollRaf = 0;
     if (state.convDragRaf) cancelAnimationFrame(state.convDragRaf);
     state.convDragRaf = 0;
+    stopLiveTurnTimer();
+    if (state.postSendTurnsTimer) clearTimeout(state.postSendTurnsTimer);
     if (state.routeTimer) clearInterval(state.routeTimer);
     if (state.trajStatusTimer) clearInterval(state.trajStatusTimer);
     if (state.quotaTimer) clearInterval(state.quotaTimer);
+    if (state.thinkingAutoTimer) clearInterval(state.thinkingAutoTimer);
   });
 
   function bindTooltipTrigger(triggerEl, { tooltipId, delayMs, showTimerKey, hideTimerKey, anchorKey, showFn, hideFn }) {
@@ -507,6 +577,262 @@
       }
       [data-aq-turn-usage]:focus-visible {
         outline: none;
+      }
+
+      @keyframes aq-think-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      [data-aq-thinking-host] {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        align-items: center !important;
+        column-gap: 2px !important;
+      }
+      [data-aq-thinking-host] > button[data-testid="tool-group-collapsible"],
+      [data-aq-thinking-host] > button[data-testid="thinking-collapsible-trigger"],
+      [data-aq-thinking-host] > button[data-testid="worked-for-collapsible"] {
+        width: auto !important;
+        max-width: calc(100% - 30px) !important;
+        flex: 0 1 auto !important;
+      }
+      [data-aq-thinking-host] > div {
+        flex: 0 0 100% !important;
+        width: 100% !important;
+        min-width: 0 !important;
+      }
+      [data-aq-thinking-inline] {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        align-items: center !important;
+        column-gap: 3px !important;
+        white-space: normal !important;
+      }
+      [data-aq-thinking-inline] > :first-child {
+        flex: 0 1 auto;
+        max-width: calc(100% - 30px);
+        min-width: 0;
+        overflow: hidden;
+      }
+      [data-aq-thinking-btn] {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        margin: 0;
+        border: none;
+        background: transparent !important;
+        box-shadow: none !important;
+        color: var(--muted-foreground, #71717a);
+        line-height: 0;
+        flex-shrink: 0;
+        cursor: pointer;
+        user-select: none;
+        opacity: 0.56;
+        transition: opacity 0.14s ease, color 0.14s ease;
+      }
+      [data-aq-thinking-btn]:hover,
+      [data-aq-thinking-btn]:focus-visible,
+      [data-aq-thinking-btn][data-active="1"],
+      [data-aq-thinking-btn][data-loading="1"] {
+        opacity: 1;
+        background: transparent !important;
+        border: none;
+        color: var(--foreground, #18181b);
+        outline: none;
+      }
+      [data-aq-thinking-btn][data-loading="1"] {
+        cursor: progress;
+      }
+      .aq-think-btn-icon {
+        display: block;
+        width: 14px;
+        height: 14px;
+        transform: translateY(1px);
+        flex-shrink: 0;
+      }
+      .aq-think-spinner {
+        display: block;
+        width: 12px;
+        height: 12px;
+        transform: translateY(1px);
+        border-radius: 9999px;
+        border: 1.5px solid currentColor;
+        border-right-color: transparent;
+        animation: aq-think-spin 0.68s linear infinite;
+        flex-shrink: 0;
+      }
+      .aq-think-hdr-spinner {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 9999px;
+        border: 1.5px solid #3b82f6;
+        border-right-color: transparent;
+        animation: aq-think-spin 0.68s linear infinite;
+        flex-shrink: 0;
+      }
+      [data-aq-thinking-card] {
+        display: block;
+        flex: 0 0 100%;
+        width: 100%;
+        box-sizing: border-box;
+        margin: 5px 0 6px 0;
+        padding: 8px 10px;
+        border-radius: 10px;
+        border: 1px solid var(--border, rgba(24, 24, 27, 0.085));
+        background: var(--muted, rgba(24, 24, 27, 0.032));
+        color: var(--secondary-foreground, #27272a);
+        white-space: normal;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) [data-aq-thinking-card] {
+        background: rgba(255, 255, 255, 0.042);
+        border-color: rgba(255, 255, 255, 0.095);
+        color: #e4e4ec;
+      }
+      .aq-think-card-hdr {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 5px;
+        font: 500 11px/16px var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+        color: var(--muted-foreground, #71717a);
+        user-select: none;
+      }
+      .aq-think-card-meta-wrap {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        min-width: 0;
+        overflow: hidden;
+      }
+      .aq-think-live-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 9999px;
+        background: #3b82f6;
+        opacity: 0.78;
+        flex-shrink: 0;
+      }
+      .aq-think-live-dot[data-syncing="1"] {
+        background: #2563eb;
+        box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+      }
+      .aq-think-card-meta {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .aq-think-card-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        flex-shrink: 0;
+      }
+      .aq-think-src-select {
+        height: 20px;
+        max-width: 126px;
+        padding: 0 16px 0 6px;
+        border-radius: 5px;
+        border: 1px solid var(--border, rgba(24, 24, 27, 0.12));
+        background-color: transparent;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 12 12' fill='none' stroke='%2371717a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5'/%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: right 4px center;
+        appearance: none;
+        -webkit-appearance: none;
+        color: var(--muted-foreground, #71717a);
+        font: 500 11px/18px var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+        cursor: pointer;
+        outline: none;
+        transition: border-color 0.12s ease, background-color 0.12s ease, color 0.12s ease;
+      }
+      .aq-think-src-select:hover,
+      .aq-think-src-select:focus-visible {
+        background-color: var(--secondary, rgba(127, 127, 127, 0.1));
+        border-color: var(--border, rgba(127, 127, 127, 0.28));
+        color: var(--foreground, #18181b);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-think-src-select {
+        border-color: rgba(255, 255, 255, 0.12);
+        color: #a1a1aa;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-think-src-select:hover,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-think-src-select:focus-visible {
+        color: #f4f4f7;
+      }
+      .aq-think-src-select option {
+        background: var(--card, #ffffff);
+        color: var(--foreground, #18181b);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-think-src-select option {
+        background: #1e1e28;
+        color: #f4f4f7;
+      }
+      .aq-think-card-act {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        height: 20px;
+        padding: 0 5px;
+        border: none;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--muted-foreground, #71717a);
+        font: 500 11px/1 var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+        cursor: pointer;
+        transition: background-color 0.12s ease, color 0.12s ease;
+      }
+      .aq-think-card-act:hover,
+      .aq-think-card-act:focus-visible {
+        background: var(--secondary, rgba(127, 127, 127, 0.12));
+        color: var(--foreground, #18181b);
+        outline: none;
+      }
+      .aq-think-card-body {
+        max-height: 210px;
+        overflow-y: auto;
+        font: 400 13px/1.52 var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+        color: var(--secondary-foreground, #27272a);
+        white-space: normal;
+        overflow-wrap: anywhere;
+        user-select: text;
+        transition: opacity 0.14s ease;
+      }
+      .aq-think-card-body[data-switching="1"] {
+        opacity: 0.56;
+      }
+      .aq-think-para {
+        margin: 0;
+      }
+      .aq-think-para + .aq-think-para {
+        margin-top: 3px;
+      }
+      .aq-think-card-body[data-muted="1"] {
+        color: var(--muted-foreground, #71717a);
+        font-size: 12px;
+      }
+      .aq-think-card-body[data-error="1"] {
+        color: #dc2626;
+        font-size: 12px;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-think-card-body[data-error="1"] {
+        color: #f87171;
+      }
+      .aq-think-code {
+        font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+        font-size: 11.5px;
+        padding: 1px 5px;
+        border-radius: 5px;
+        background: rgba(24, 24, 27, 0.06);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-think-code {
+        background: rgba(255, 255, 255, 0.09);
       }
 
       #aq-context-chip,
@@ -1643,9 +1969,211 @@
         display: flex;
         flex-wrap: wrap;
         align-items: center;
-        justify-content: flex-end;
+        justify-content: space-between;
         gap: 4px 10px;
         font-size: 10px;
+      }
+      .aq-key-settings-btn {
+        appearance: none;
+        border: 0;
+        padding: 2px 3px;
+        margin-right: auto;
+        border-radius: 4px;
+        background: transparent;
+        color: #a1a1aa;
+        line-height: 1;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition: color 0.14s ease, background-color 0.14s ease;
+      }
+      .aq-key-settings-btn:hover {
+        color: #52525b;
+        background: rgba(0, 0, 0, 0.045);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-key-settings-btn {
+        color: #52525b;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-key-settings-btn:hover {
+        color: #a1a1aa;
+        background: rgba(255, 255, 255, 0.06);
+      }
+      .aq-key-settings-ico {
+        width: 11px;
+        height: 11px;
+        flex-shrink: 0;
+      }
+      #aq-key-settings-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483646;
+        background: rgba(0, 0, 0, 0.32);
+        backdrop-filter: blur(2px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+      }
+      .aq-ks-dialog {
+        width: min(372px, calc(100vw - 32px));
+        border-radius: 12px;
+        padding: 14px 15px;
+        background: #ffffff;
+        color: #18181b;
+        border: 1px solid rgba(0, 0, 0, 0.1);
+        box-shadow: 0 18px 42px rgba(0, 0, 0, 0.18);
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        font-size: 12px;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-ks-dialog {
+        background: #1c1c1f;
+        color: #f4f4f5;
+        border-color: rgba(255, 255, 255, 0.12);
+        box-shadow: 0 18px 42px rgba(0, 0, 0, 0.48);
+      }
+      .aq-ks-hdr {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .aq-ks-title-wrap {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+      .aq-ks-title {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .aq-ks-close {
+        appearance: none;
+        border: 0;
+        background: transparent;
+        color: #71717a;
+        font-size: 16px;
+        line-height: 1;
+        padding: 2px 5px;
+        border-radius: 5px;
+        cursor: pointer;
+      }
+      .aq-ks-close:hover {
+        background: rgba(0, 0, 0, 0.06);
+        color: #18181b;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-ks-close:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: #f4f4f5;
+      }
+      .aq-ks-field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .aq-ks-row2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+      .aq-ks-lbl {
+        font-size: 11px;
+        font-weight: 500;
+        color: #52525b;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-ks-lbl {
+        color: #a1a1aa;
+      }
+      .aq-ks-input {
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+        padding: 6px 8px;
+        border-radius: 7px;
+        border: 1px solid rgba(0, 0, 0, 0.14);
+        background: #fafafa;
+        color: inherit;
+        font: inherit;
+        font-size: 11.5px;
+        outline: none;
+      }
+      .aq-ks-input:focus {
+        border-color: #10b981;
+        background: #ffffff;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-ks-input {
+        border-color: rgba(255, 255, 255, 0.14);
+        background: #27272a;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-ks-input:focus {
+        border-color: #34d399;
+        background: #222226;
+      }
+      .aq-ks-note {
+        font-size: 10.5px;
+        line-height: 1.45;
+        color: #71717a;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-ks-note {
+        color: #8e8e98;
+      }
+      .aq-ks-err {
+        font-size: 11px;
+        line-height: 1.4;
+        color: #dc2626;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-ks-err {
+        color: #f87171;
+      }
+      .aq-ks-ftr {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-top: 2px;
+      }
+      .aq-ks-ftr-right {
+        margin-left: auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .aq-ks-btn {
+        appearance: none;
+        border: 1px solid rgba(0, 0, 0, 0.12);
+        background: transparent;
+        color: inherit;
+        border-radius: 7px;
+        padding: 4.5px 11px;
+        font: inherit;
+        font-size: 11.5px;
+        font-weight: 500;
+        cursor: pointer;
+      }
+      .aq-ks-btn:hover:not(:disabled) {
+        background: rgba(0, 0, 0, 0.045);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-ks-btn {
+        border-color: rgba(255, 255, 255, 0.14);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-ks-btn:hover:not(:disabled) {
+        background: rgba(255, 255, 255, 0.07);
+      }
+      .aq-ks-btn.is-primary {
+        border-color: transparent;
+        background: #10b981;
+        color: #ffffff;
+      }
+      .aq-ks-btn.is-primary:hover:not(:disabled) {
+        background: #059669;
+      }
+      .aq-ks-btn:disabled {
+        opacity: 0.6;
+        cursor: default;
       }
       .aq-update-open {
         appearance: none;
@@ -2460,6 +2988,7 @@
         color: #93c5fd;
       }
       .aq-grp-block {
+        position: relative;
         display: flex;
         flex-direction: column;
         gap: 1px;
@@ -2469,17 +2998,27 @@
       .aq-grp-block.is-dragging > .aq-grp-hdr {
         opacity: 0.45;
       }
-      .aq-grp-block.aq-grp-drag-before > .aq-grp-hdr {
-        box-shadow: inset 0 2px 0 0 #2563eb;
+      .aq-grp-block.aq-grp-drag-before::before,
+      .aq-grp-block.aq-grp-drag-after::after {
+        content: '';
+        position: absolute;
+        left: 6px;
+        right: 6px;
+        height: 2px;
+        border-radius: 999px;
+        background: #2563eb;
+        pointer-events: none;
+        z-index: 3;
       }
-      .aq-grp-block.aq-grp-drag-after > .aq-grp-hdr {
-        box-shadow: inset 0 -2px 0 0 #2563eb;
+      .aq-grp-block.aq-grp-drag-before::before {
+        top: 0;
       }
-      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-block.aq-grp-drag-before > .aq-grp-hdr {
-        box-shadow: inset 0 2px 0 0 #60a5fa;
+      .aq-grp-block.aq-grp-drag-after::after {
+        bottom: 0;
       }
-      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-block.aq-grp-drag-after > .aq-grp-hdr {
-        box-shadow: inset 0 -2px 0 0 #60a5fa;
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-block.aq-grp-drag-before::before,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-block.aq-grp-drag-after::after {
+        background: #60a5fa;
       }
       .aq-grp-block.aq-grp-drop-target > .aq-grp-hdr,
       .aq-grp-block.aq-grp-drag-inside > .aq-grp-hdr {
@@ -2589,12 +3128,12 @@
         gap: 1px;
         flex-shrink: 0;
       }
-      .aq-grp-hdr:hover .aq-grp-actions,
+      body:not(.aq-conv-dragging) .aq-grp-hdr:hover .aq-grp-actions,
       .aq-grp-hdr.has-confirm .aq-grp-actions,
       .aq-grp-actions.is-always {
         display: inline-flex;
       }
-      .aq-grp-hdr:hover .aq-grp-count,
+      body:not(.aq-conv-dragging) .aq-grp-hdr:hover .aq-grp-count,
       .aq-grp-hdr.has-confirm .aq-grp-count {
         display: none;
       }
@@ -2702,6 +3241,28 @@
       .aq-grp-item.is-dragging {
         opacity: 0.45;
       }
+      .aq-grp-item.aq-grp-item-drag-before::before,
+      .aq-grp-item.aq-grp-item-drag-after::after {
+        content: '';
+        position: absolute;
+        left: 8px;
+        right: 8px;
+        height: 2px;
+        border-radius: 999px;
+        background: #2563eb;
+        pointer-events: none;
+        z-index: 3;
+      }
+      .aq-grp-item.aq-grp-item-drag-before::before {
+        top: 0;
+      }
+      .aq-grp-item.aq-grp-item-drag-after::after {
+        bottom: 0;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-item.aq-grp-item-drag-before::before,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-item.aq-grp-item-drag-after::after {
+        background: #60a5fa;
+      }
       .aq-grp-item:hover {
         background: var(--sidebar-muted, rgba(15, 23, 42, 0.048));
         color: var(--foreground, #0f172a);
@@ -2770,7 +3331,7 @@
         flex-shrink: 0;
         color: var(--muted-foreground, #71717a);
       }
-      .aq-grp-item:has(> .aq-grp-item-actions):hover > .aq-grp-item-status {
+      body:not(.aq-conv-dragging) .aq-grp-item:has(> .aq-grp-item-actions):hover > .aq-grp-item-status {
         display: none;
       }
       @keyframes aqAgentStateDot {
@@ -2872,7 +3433,7 @@
         gap: 1px;
         flex-shrink: 0;
       }
-      .aq-grp-item:hover .aq-grp-item-actions {
+      body:not(.aq-conv-dragging) .aq-grp-item:hover .aq-grp-item-actions {
         display: inline-flex;
       }
       .aq-grp-item-empty {
@@ -2995,7 +3556,7 @@
         color: #2563eb;
         font-size: 10.5px;
         font-weight: 600;
-        max-width: 96px;
+        max-width: 112px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -3475,7 +4036,8 @@
       turn.modelLabel ||
       turn.model ||
       'Token 费用明细';
-    const totalLabel = turn.completed ? cost.label || '本轮费用' : '实时估算';
+    const isLiveRunning = lineEl?.getAttribute('data-aq-turn-live') === '1';
+    const totalLabel = turn.completed && !isLiveRunning ? cost.label || '本轮费用' : '实时估算';
     const headerRightText = cost.available ? `${totalLabel} ${formatCny(cost.totalCny)}` : '费用暂不可算';
 
     const rawTiers =
@@ -3545,7 +4107,7 @@
       const visibleCalls = orderedCalls.slice(0, limit);
       const rows = visibleCalls
         .map((c, idx) => {
-          const title = formatCallDetailTitle(c, idx === 0 && Boolean(turn.completed));
+          const title = formatCallDetailTitle(c, idx === 0 && Boolean(turn.completed) && !isLiveRunning);
           const cTtft = formatDurationMs(c.ttftMs);
           const cStream = formatDurationMs(c.streamMs);
           const cSpeed = formatRate(c.speed);
@@ -3731,7 +4293,282 @@
     return line === host.lastElementChild;
   }
 
-  function mountTurnLine(turnEl, turnData) {
+  const ASYNC_CHILD_TOOL_NAMES = new Set([
+    'invoke_subagent',
+    'send_message',
+    'swarm',
+    'schedule',
+    'run_workflow',
+    'run_command',
+  ]);
+
+  function hasTurnAsyncChildCall(turnData) {
+    const details = Array.isArray(turnData?.callDetails) ? turnData.callDetails : [];
+    for (let i = 0; i < details.length; i++) {
+      const calls = Array.isArray(details[i]?.toolCalls) ? details[i].toolCalls : [];
+      for (let j = 0; j < calls.length; j++) {
+        if (ASYNC_CHILD_TOOL_NAMES.has(String(calls[j]?.toolName || '').trim())) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function hasActiveConversationAsyncWork(cidLower) {
+    if (!cidLower) return false;
+    if (state.nonDaemonBgTaskCids.has(cidLower)) return true;
+    const meta = state.trajMetaById[cidLower];
+    return Boolean(
+      meta &&
+        !meta.killed &&
+        (meta.subagentRunning || meta.subagentWaiting || meta.waiting || meta.bgTaskRunning)
+    );
+  }
+
+  function getTurnConfirmedPeakMs(cidLower, turnIndex) {
+    if (!cidLower || !Number.isInteger(turnIndex) || turnIndex < 0) return 0;
+    return state.turnConfirmedPeakMsByKey.get(`${cidLower}:${turnIndex}`) || 0;
+  }
+
+  function recordTurnConfirmedPeakMs(cidLower, turnIndex, elapsedMs) {
+    if (!cidLower || !Number.isInteger(turnIndex) || turnIndex < 0 || !(elapsedMs > 0)) return 0;
+    const key = `${cidLower}:${turnIndex}`;
+    const prev = state.turnConfirmedPeakMsByKey.get(key) || 0;
+    const next = Math.max(prev, Math.round(elapsedMs));
+    if (next !== prev) {
+      if (!state.turnConfirmedPeakMsByKey.has(key) && state.turnConfirmedPeakMsByKey.size >= 32) {
+        const oldestKey = state.turnConfirmedPeakMsByKey.keys().next().value;
+        if (oldestKey) state.turnConfirmedPeakMsByKey.delete(oldestKey);
+      }
+      state.turnConfirmedPeakMsByKey.set(key, next);
+    }
+    return next;
+  }
+
+  function evaluateConversationLiveTurnContext(cid, turnEls, now = Date.now()) {
+    const cleanCid = String(cid || '').trim();
+    if (!cleanCid) {
+      return {
+        running: false,
+        confirmed: false,
+        waitingAsyncOnly: false,
+        mountedTurnEl: null,
+        lastTurnData: null,
+      };
+    }
+    const cidLower = cleanCid.toLowerCase();
+    const payload = state.turnsPayload;
+    const hasSyncedTurns = Boolean(
+      payload && payload.cascadeId === cleanCid && Array.isArray(payload.turns) && payload.turns.length > 0
+    );
+    const turns = hasSyncedTurns ? payload.turns : [];
+    const lastTurnData = turns.length > 0 ? turns[turns.length - 1] : null;
+    const turnKey = lastTurnData ? `${cidLower}:${lastTurnData.turnIndex}` : `${cidLower}:pending`;
+    if (state.liveTurnKey !== turnKey) {
+      state.liveTurnKey = turnKey;
+      state.liveTurnMainIdleSince = 0;
+      state.wasTurnLiveRunning = false;
+    }
+
+    const composerBusy = isActiveComposerBusy();
+    const opt = state.optimisticRunningById.get(cidLower);
+    const hasOptimistic = Boolean(opt && !opt.sawBackendRunning && now < opt.until);
+
+    let mountedTurnEl = null;
+    let hasLiveTurnDom = false;
+    let hasToolbar = false;
+    if (Array.isArray(turnEls) && turnEls.length > 0) {
+      const candidateEl = turnEls[turnEls.length - 1];
+      if (candidateEl) {
+        const liveDom = Boolean(
+          candidateEl.querySelector(
+            '[data-testid="agent-loading"], [data-testid="ephemeral-tool-status"], [data-testid="tool-group-elapsed"]'
+          )
+        );
+        const toolbar = Boolean(
+          candidateEl.querySelector('[data-testid="cascade-system-message-toolbar"]')
+        );
+        const usageNode = candidateEl.querySelector('[data-aq-turn-usage]');
+        const renderedIdx = usageNode
+          ? Number.parseInt(usageNode.getAttribute('data-aq-turn-usage') || '', 10)
+          : -1;
+        let isStaleOrOffscreenDom = false;
+        if (!liveDom) {
+          if (toolbar && (!lastTurnData || Number(lastTurnData.calls || 0) === 0)) {
+            isStaleOrOffscreenDom = true;
+          } else if (hasSyncedTurns) {
+            const offset = computeTurnPairingOffset(turnEls.length, turns.length);
+            if (offset + turnEls.length - 1 !== turns.length - 1) {
+              isStaleOrOffscreenDom = true;
+            } else if (
+              Number.isInteger(renderedIdx) &&
+              renderedIdx >= 0 &&
+              renderedIdx < Number(lastTurnData.turnIndex)
+            ) {
+              isStaleOrOffscreenDom = true;
+            }
+          }
+        }
+        if (!isStaleOrOffscreenDom) {
+          mountedTurnEl = candidateEl;
+          hasLiveTurnDom = liveDom;
+          hasToolbar = toolbar;
+        }
+      }
+    }
+
+    const lastRecordedEndMs =
+      lastTurnData && Number(lastTurnData.startTsMs) > 0
+        ? Number(lastTurnData.startTsMs) + (Number(lastTurnData.wallDurationMs) || 0)
+        : 0;
+    const dbStepActive = Boolean(
+      lastTurnData &&
+        !lastTurnData.completed &&
+        (!hasToolbar || (lastRecordedEndMs > 0 && now - lastRecordedEndMs < 120_000))
+    );
+
+    if (
+      hasLiveTurnDom ||
+      (!hasToolbar && (composerBusy || hasOptimistic)) ||
+      dbStepActive
+    ) {
+      state.liveTurnMainIdleSince = 0;
+      return {
+        running: true,
+        confirmed: true,
+        waitingAsyncOnly: false,
+        mountedTurnEl,
+        lastTurnData,
+      };
+    }
+
+    if (hasActiveConversationAsyncWork(cidLower)) {
+      return {
+        running: true,
+        confirmed: true,
+        waitingAsyncOnly: true,
+        mountedTurnEl,
+        lastTurnData,
+      };
+    }
+
+    if (lastTurnData && hasTurnAsyncChildCall(lastTurnData)) {
+      if (!state.liveTurnMainIdleSince) {
+        if (state.wasTurnLiveRunning || (lastRecordedEndMs > 0 && now - lastRecordedEndMs < 5_000)) {
+          state.liveTurnMainIdleSince = now;
+          if (!document.hidden) {
+            void refreshTrajectoryMetadata(false, 150);
+          }
+        }
+      }
+      if (
+        state.liveTurnMainIdleSince > 0 &&
+        state.trajFetchedAt < state.liveTurnMainIdleSince &&
+        now - state.liveTurnMainIdleSince < 2_500
+      ) {
+        return {
+          running: true,
+          confirmed: false,
+          waitingAsyncOnly: true,
+          mountedTurnEl,
+          lastTurnData,
+        };
+      }
+    }
+
+    return {
+      running: false,
+      confirmed: false,
+      waitingAsyncOnly: false,
+      mountedTurnEl,
+      lastTurnData,
+    };
+  }
+
+  function stopLiveTurnTimer() {
+    if (state.liveTurnTimer) {
+      clearInterval(state.liveTurnTimer);
+      state.liveTurnTimer = null;
+    }
+  }
+
+  function tickLiveTurnUsageLine() {
+    const cid = extractCascadeId();
+    const payload = state.turnsPayload;
+    const turns = Array.isArray(payload?.turns) ? payload.turns : [];
+    if (!cid || !payload || payload.cascadeId !== cid || turns.length === 0) {
+      stopLiveTurnTimer();
+      return;
+    }
+    const turnEls = findTurnRows();
+    const now = Date.now();
+    const liveCtx = evaluateConversationLiveTurnContext(cid, turnEls, now);
+    if (liveCtx.waitingAsyncOnly && !document.hidden && now - state.trajFetchedAt >= 4_000) {
+      void refreshTrajectoryMetadata(false, 3_500);
+    }
+    if (!liveCtx.running) {
+      stopLiveTurnTimer();
+      scheduleRender({ turns: true });
+      return;
+    }
+    const cidLower = cid.toLowerCase();
+    const lastTurnData = liveCtx.lastTurnData;
+    let peakMs = lastTurnData ? getTurnConfirmedPeakMs(cidLower, lastTurnData.turnIndex) : 0;
+    if (
+      liveCtx.confirmed &&
+      lastTurnData &&
+      Number(lastTurnData.startTsMs) > 0 &&
+      now > Number(lastTurnData.startTsMs)
+    ) {
+      peakMs = recordTurnConfirmedPeakMs(
+        cidLower,
+        lastTurnData.turnIndex,
+        now - Number(lastTurnData.startTsMs)
+      );
+    }
+    if (!liveCtx.mountedTurnEl || !lastTurnData) {
+      stopLiveTurnTimer();
+      return;
+    }
+    const line = liveCtx.mountedTurnEl.querySelector('[data-aq-turn-usage]');
+    if (!line) {
+      scheduleRender({ turns: true });
+      return;
+    }
+    if (line.getAttribute('data-aq-turn-live') !== '1') {
+      line.setAttribute('data-aq-turn-live', '1');
+    }
+    const summary = formatTurnSummary(lastTurnData, {
+      liveRunning: true,
+      nowMs: now,
+      minWallDurationMs: peakMs,
+    });
+    if (line.textContent !== summary) {
+      line.textContent = summary;
+    }
+  }
+
+  function syncLiveTurnTimer(shouldRun) {
+    if (!shouldRun || document.hidden || state.disposed) {
+      stopLiveTurnTimer();
+      return;
+    }
+    if (state.liveTurnTimer) return;
+    state.liveTurnTimer = setInterval(() => {
+      if (state.disposed || document.hidden) {
+        stopLiveTurnTimer();
+        return;
+      }
+      tickLiveTurnUsageLine();
+    }, 1000);
+  }
+
+  function mountTurnLine(
+    turnEl,
+    turnData,
+    { liveRunning = false, nowMs = 0, minWallDurationMs = 0 } = {}
+  ) {
     const host = resolveTurnUsageHost(turnEl);
     if (!host) return null;
 
@@ -3761,6 +4598,12 @@
     if (line.getAttribute('data-aq-turn-usage') !== idxAttr) {
       line.setAttribute('data-aq-turn-usage', idxAttr);
     }
+    const wasLive = line.getAttribute('data-aq-turn-live') === '1';
+    if (liveRunning) {
+      if (!wasLive) line.setAttribute('data-aq-turn-live', '1');
+    } else if (wasLive) {
+      line.removeAttribute('data-aq-turn-live');
+    }
 
     const toolbarChild = resolveTurnToolbarChild(host);
     if (toolbarChild && toolbarChild === host.lastElementChild) {
@@ -3774,9 +4617,20 @@
 
     line.__aqTurnData = turnData;
     line.__aqRenderedTurnRef = turnData;
-    const summary = formatTurnSummary(turnData);
+    const summary = formatTurnSummary(turnData, {
+      liveRunning,
+      nowMs,
+      minWallDurationMs,
+    });
     if (line.textContent !== summary) {
       line.textContent = summary;
+    }
+    if (
+      wasLive !== liveRunning &&
+      state.turnTooltipAnchor === line &&
+      document.getElementById('aq-turn-tooltip')?.getAttribute('data-visible') === '1'
+    ) {
+      showTurnTooltip(line);
     }
     return line;
   }
@@ -3815,29 +4669,71 @@
     return [...document.querySelectorAll('[data-turn-content]')];
   }
 
-  function renderTurnUsageLines() {
+  function renderTurnUsageLines(sharedCid, sharedTurnEls, sharedLiveCtx) {
     const payload = state.turnsPayload;
-    const currentId = extractCascadeId();
-    if (!currentId || !payload || !payload.hasData || payload.cascadeId !== currentId) {
+    const currentId = sharedCid !== undefined ? sharedCid : extractCascadeId();
+    const turns = Array.isArray(payload?.turns) ? payload.turns : [];
+    if (!currentId || !payload || payload.cascadeId !== currentId || turns.length === 0) {
+      stopLiveTurnTimer();
       document.querySelectorAll('[data-aq-turn-usage]').forEach((el) => el.remove());
       return;
     }
 
-    const turns = Array.isArray(payload.turns) ? payload.turns : [];
-    const turnEls = findTurnRows();
-    if (turnEls.length === 0 || turns.length === 0) return;
+    const turnEls = Array.isArray(sharedTurnEls) ? sharedTurnEls : findTurnRows();
+    if (turnEls.length === 0) {
+      stopLiveTurnTimer();
+      return;
+    }
+
+    const now = Date.now();
+    const cidLower = currentId.toLowerCase();
+    const liveCtx = sharedLiveCtx || evaluateConversationLiveTurnContext(currentId, turnEls, now);
+    if (
+      liveCtx.running &&
+      liveCtx.confirmed &&
+      liveCtx.lastTurnData &&
+      Number(liveCtx.lastTurnData.startTsMs) > 0 &&
+      now > Number(liveCtx.lastTurnData.startTsMs)
+    ) {
+      recordTurnConfirmedPeakMs(
+        cidLower,
+        liveCtx.lastTurnData.turnIndex,
+        now - Number(liveCtx.lastTurnData.startTsMs)
+      );
+    }
+    if (state.wasTurnLiveRunning && !liveCtx.running && !document.hidden) {
+      scheduleQuotaForceRefresh(1500);
+    }
+    state.wasTurnLiveRunning = liveCtx.running;
 
     const offset = computeTurnPairingOffset(turnEls.length, turns.length);
     const activeLines = new Set();
+    let mountedLatestLive = false;
+
     for (let i = 0; i < turnEls.length; i++) {
       const turnEl = turnEls[i];
       const turnData = turns[offset + i] || null;
-      if (turnData && (turnData.totalTokens > 0 || !turnData.completed)) {
+      const isLatestTurn =
+        i === turnEls.length - 1 &&
+        offset + i === turns.length - 1 &&
+        turnEl === liveCtx.mountedTurnEl;
+      const liveRunning = Boolean(isLatestTurn && turnData && liveCtx.running);
+      if (liveRunning) mountedLatestLive = true;
+      const minWallDurationMs = turnData ? getTurnConfirmedPeakMs(cidLower, turnData.turnIndex) : 0;
+
+      const effectiveCompleted = liveRunning ? false : Boolean(turnData?.completed);
+      if (turnData && (turnData.totalTokens > 0 || !effectiveCompleted || payload.hasData)) {
+        if (!payload.hasData && effectiveCompleted && turnData.totalTokens <= 0) {
+          turnEl.querySelectorAll('[data-aq-turn-usage]').forEach((el) => el.remove());
+          continue;
+        }
         const fastExisting = turnEl.querySelector('[data-aq-turn-usage]');
         const fastHost = resolveTurnUsageHost(turnEl);
         if (
-          turnData.completed &&
+          effectiveCompleted &&
+          minWallDurationMs <= (Number(turnData.wallDurationMs) || 0) &&
           fastExisting &&
+          fastExisting.getAttribute('data-aq-turn-live') !== '1' &&
           fastExisting.__aqRenderedTurnRef === turnData &&
           fastExisting.getAttribute('data-aq-turn-usage') === String(turnData.turnIndex) &&
           fastHost &&
@@ -3846,7 +4742,13 @@
           activeLines.add(fastExisting);
           continue;
         }
-        activeLines.add(mountTurnLine(turnEl, turnData));
+        activeLines.add(
+          mountTurnLine(turnEl, turnData, {
+            liveRunning,
+            nowMs: now,
+            minWallDurationMs,
+          })
+        );
       } else {
         turnEl.querySelectorAll('[data-aq-turn-usage]').forEach((el) => el.remove());
       }
@@ -3854,6 +4756,772 @@
     document.querySelectorAll('[data-aq-turn-usage]').forEach((el) => {
       if (!activeLines.has(el)) el.remove();
     });
+    syncLiveTurnTimer(mountedLatestLive);
+  }
+
+  const THINKING_SOURCE_OPTIONS = [
+    { id: 'auto', label: 'auto' },
+    { id: 'ai-brief', label: 'AI 简述' },
+    { id: 'ai-translate', label: 'AI 翻译' },
+    { id: 'google', label: 'Google 翻译' },
+    { id: 'deepl', label: 'DeepL 翻译' },
+    { id: 'bing', label: 'Bing 翻译' },
+    { id: 'youdao', label: '有道翻译' },
+  ];
+  const LEGACY_CLIENT_THINKING_SOURCES = {
+    'easydict-ai-brief': 'ai-brief',
+    'easydict-builtin-ai': 'ai-translate',
+    'easydict-google': 'google',
+    'web-google': 'google',
+    'easydict-deepl': 'deepl',
+    'easydict-bing': 'bing',
+    'easydict-youdao': 'youdao',
+  };
+  const THINKING_SOURCE_IDS = new Set(THINKING_SOURCE_OPTIONS.map((o) => o.id));
+
+  function sanitizeClientThinkingSource(raw) {
+    const clean = String(raw || '').trim().toLowerCase();
+    const mapped = LEGACY_CLIENT_THINKING_SOURCES[clean] || clean;
+    return THINKING_SOURCE_IDS.has(mapped) ? mapped : 'auto';
+  }
+
+  // ---- Running Turn Native Thinking Translate Button & Card ----
+
+  const THINKING_AUTO_POLL_MS = 2200;
+
+  function fastTextSig(str) {
+    let h1 = 0x811c9dc5;
+    let h2 = 5381;
+    for (let i = 0; i < str.length; i++) {
+      const c = str.charCodeAt(i);
+      h1 = Math.imul(h1 ^ c, 0x01000193);
+      h2 = (Math.imul(h2, 33) ^ c) | 0;
+    }
+    return `${str.length}:${(h1 >>> 0).toString(36)}:${(h2 >>> 0).toString(36)}`;
+  }
+
+  function saveClientThinkingSourcePref(nextSource, { notifyDaemon = true } = {}) {
+    const clean = sanitizeClientThinkingSource(nextSource);
+    state.thinkingSourcePref = clean;
+    try {
+      if (clean === 'auto') {
+        localStorage.removeItem('aq_thinking_source_v1');
+      } else {
+        localStorage.setItem('aq_thinking_source_v1', clean);
+      }
+    } catch {}
+    if (notifyDaemon) {
+      sendUiPrefsAction({ type: 'set-thinking-source', source: clean });
+    }
+    return clean;
+  }
+
+  function stopThinkingAutoTimers() {
+    if (state.thinkingAutoTimer) {
+      clearInterval(state.thinkingAutoTimer);
+      state.thinkingAutoTimer = null;
+    }
+  }
+
+  function clearHostMarkOnElement(el) {
+    if (!el) return;
+    el.removeAttribute('data-aq-thinking-host');
+    el.removeAttribute('data-aq-thinking-inline');
+  }
+
+  function closeThinkingTranslateCard({ notifyDaemon = true } = {}) {
+    const ts = state.thinkingTranslate;
+    stopThinkingAutoTimers();
+    ts.open = false;
+    ts.loading = false;
+    ts.switchingSource = false;
+    ts.showOriginal = false;
+    ts.requestId = '';
+    ts.lastUploadedClientSig = '';
+    ts.hasOriginal = false;
+    ts.sourceText = '';
+    ts.translatedText = '';
+    ts.translatedSourceText = '';
+    ts.activeSourcePref = '';
+    ts.providerLabel = '';
+    ts.error = '';
+    ts.errorRetryAfter = 0;
+    ts.empty = false;
+    if (ts.cardEl) {
+      ts.cardEl.remove();
+      ts.cardEl = null;
+    }
+    ts.cardParts = null;
+    if (notifyDaemon && typeof window.__aqThinkingAction === 'function') {
+      try {
+        window.__aqThinkingAction(JSON.stringify({ type: 'close' }));
+      } catch {}
+    }
+    syncThinkingHelperDomContent();
+  }
+
+  function detachThinkingHelperDom() {
+    const ts = state.thinkingTranslate;
+    if (ts.btnEl) ts.btnEl.remove();
+    if (ts.cardEl) ts.cardEl.remove();
+    clearHostMarkOnElement(ts.hostEl);
+    ts.hostEl = null;
+  }
+
+  function resetThinkingTranslateState() {
+    const ts = state.thinkingTranslate;
+    const wasOpen = ts.open;
+    stopThinkingAutoTimers();
+    if (ts.btnEl) {
+      ts.btnEl.remove();
+      ts.btnEl = null;
+    }
+    if (ts.cardEl) {
+      ts.cardEl.remove();
+      ts.cardEl = null;
+    }
+    clearHostMarkOnElement(ts.hostEl);
+    ts.cardParts = null;
+    ts.hostEl = null;
+    ts.cascadeId = '';
+    ts.turnKey = '';
+    ts.requestId = '';
+    ts.open = false;
+    ts.loading = false;
+    ts.switchingSource = false;
+    ts.showOriginal = false;
+    ts.stepIdx = -1;
+    ts.thinkingCount = 0;
+    ts.lastUploadedClientSig = '';
+    ts.hasOriginal = false;
+    ts.sourceText = '';
+    ts.translatedText = '';
+    ts.translatedSourceText = '';
+    ts.activeSourcePref = '';
+    ts.providerLabel = '';
+    ts.error = '';
+    ts.errorRetryAfter = 0;
+    ts.empty = false;
+    if (wasOpen && typeof window.__aqThinkingAction === 'function') {
+      try {
+        window.__aqThinkingAction(JSON.stringify({ type: 'close' }));
+      } catch {}
+    }
+    document.querySelectorAll('[data-aq-thinking-btn], [data-aq-thinking-card]').forEach((el) => el.remove());
+    document
+      .querySelectorAll('[data-aq-thinking-host], [data-aq-thinking-inline]')
+      .forEach((el) => clearHostMarkOnElement(el));
+  }
+
+  function isCompactThinkingDiv(el) {
+    if (!el || el.tagName !== 'DIV' || el.hasAttribute('data-testid') || el.hasAttribute('data-step-index')) {
+      return false;
+    }
+    if (el.parentElement && !el.parentElement.hasAttribute('data-step-rows')) return false;
+    if (el.querySelector('button:not([data-aq-thinking-btn]):not(.aq-think-card-act)')) return false;
+    const cls = String(el.className || '');
+    if (!cls.includes('tabular-nums') || !cls.includes('select-none')) return false;
+    const firstChild = el.firstElementChild;
+    const text = String((firstChild && !firstChild.hasAttribute('data-aq-thinking-btn') ? firstChild.textContent : el.textContent) || '').trim();
+    return /^(?:Thinking|思考)/i.test(text);
+  }
+
+  function resolveButtonAnchor(btn) {
+    const parent = btn?.parentElement;
+    if (!parent) return null;
+    const pCls = String(parent.className || '');
+    if (pCls.includes('flex') && !pCls.includes('flex-col')) {
+      return { mode: 'inline', host: parent, triggerBtn: null };
+    }
+    return { mode: 'collapsible', host: parent, triggerBtn: btn };
+  }
+
+  function findRunningThinkingAnchor(turnEl) {
+    if (!turnEl) return null;
+    const candidates = turnEl.querySelectorAll(
+      'button[data-testid="thinking-collapsible-trigger"], button[data-testid="tool-group-collapsible"], [data-testid="ephemeral-tool-status"], [data-step-rows] > div'
+    );
+    let picked = null;
+    for (let i = 0; i < candidates.length; i++) {
+      const el = candidates[i];
+      if (el.tagName === 'BUTTON') {
+        if (el.classList.contains('hidden')) continue;
+        const resolved = resolveButtonAnchor(el);
+        if (resolved) picked = resolved;
+      } else if (el.getAttribute('data-testid') === 'ephemeral-tool-status' || isCompactThinkingDiv(el)) {
+        picked = { mode: 'inline', host: el, triggerBtn: null };
+      }
+    }
+    if (picked) return picked;
+
+    const workedBtns = turnEl.querySelectorAll('button[data-testid="worked-for-collapsible"]');
+    for (let i = workedBtns.length - 1; i >= 0; i--) {
+      const btn = workedBtns[i];
+      if (!btn.classList.contains('hidden')) {
+        const resolved = resolveButtonAnchor(btn);
+        if (resolved) return resolved;
+      }
+    }
+
+    const loadingEl = turnEl.querySelector('[data-testid="agent-loading"]');
+    if (loadingEl) {
+      return { mode: 'inline', host: loadingEl, triggerBtn: null };
+    }
+    return null;
+  }
+
+  function extractLiveTurnThinkingFromPage(turnEl) {
+    if (!turnEl) return null;
+    let latestText = '';
+    let latestStepIdx = -1;
+    const seenSteps = new Set();
+    const stepTexts = new Set();
+    const seenStepArrays = new Set();
+    const standaloneFibers = new Set();
+
+    const inspectStep = (s) => {
+      if (s?.step?.case !== 'plannerResponse') return;
+      const val = s.step.value;
+      const txt = String(val?.rawThinking || val?.thinking || '').trim();
+      if (!txt) return;
+      stepTexts.add(txt);
+      const rawIdx = Number(s?.metadata?.sourceTrajectoryStepInfo?.stepIndex);
+      const hasIdx = Number.isInteger(rawIdx) && rawIdx >= 0;
+      seenSteps.add(hasIdx ? `i:${rawIdx}` : s);
+      if (hasIdx) {
+        if (rawIdx >= latestStepIdx) {
+          latestStepIdx = rawIdx;
+          latestText = txt;
+        }
+      } else {
+        latestText = txt;
+        latestStepIdx = -1;
+      }
+    };
+
+    try {
+      const probeNodes = turnEl.querySelectorAll(
+        '[data-step-rows], [data-testid="thinking-collapsible-trigger"], [data-testid="tool-group-collapsible"], [data-testid="worked-for-collapsible"], [data-testid="ephemeral-tool-status"]'
+      );
+
+      for (let i = 0; i < probeNodes.length; i++) {
+        let cur = getReactFiberFromElement(probeNodes[i]);
+        let guard = 0;
+        let belongsToStepArray = false;
+        let standaloneMatch = null;
+
+        while (cur && guard++ < 28) {
+          if (cur.stateNode === turnEl) break;
+          const props = cur.memoizedProps;
+          if (props && typeof props === 'object') {
+            const stepArr = Array.isArray(props.segment?.steps)
+              ? props.segment.steps
+              : Array.isArray(props.steps)
+                ? props.steps
+                : null;
+            if (stepArr) {
+              belongsToStepArray = true;
+              if (!seenStepArrays.has(stepArr)) {
+                seenStepArrays.add(stepArr);
+                for (let j = 0; j < stepArr.length; j++) inspectStep(stepArr[j]);
+              }
+            } else if (!standaloneMatch && typeof props.thinking === 'string' && props.thinking.trim()) {
+              const rawIdx = Number(props.metadata?.sourceTrajectoryStepInfo?.stepIndex);
+              standaloneMatch = {
+                fiber: cur,
+                text: props.thinking.trim(),
+                stepIdx: Number.isInteger(rawIdx) && rawIdx >= 0 ? rawIdx : -1,
+              };
+            }
+          }
+          cur = cur.return;
+        }
+
+        if (standaloneMatch && (!belongsToStepArray || !stepTexts.has(standaloneMatch.text))) {
+          if (standaloneMatch.stepIdx >= 0) {
+            seenSteps.add(`i:${standaloneMatch.stepIdx}`);
+            if (standaloneMatch.stepIdx >= latestStepIdx) {
+              latestStepIdx = standaloneMatch.stepIdx;
+              latestText = standaloneMatch.text;
+            }
+          } else {
+            standaloneFibers.add(standaloneMatch.fiber);
+            latestText = standaloneMatch.text;
+            latestStepIdx = -1;
+          }
+        }
+      }
+    } catch {}
+
+    let totalCount = seenSteps.size + standaloneFibers.size;
+    if (!latestText) {
+      const domEditors = turnEl.querySelectorAll(
+        '[data-testid="thinking-collapsible-trigger"] ~ div .cursor-edit'
+      );
+      if (domEditors.length > 0) {
+        const txt = String(domEditors[domEditors.length - 1].textContent || '').trim();
+        if (txt) {
+          latestText = txt;
+          latestStepIdx = -1;
+          totalCount = Math.max(totalCount, domEditors.length);
+        }
+      }
+    }
+
+    if (!latestText) return null;
+    return {
+      text: latestText,
+      thinkingCount: Math.max(1, totalCount),
+      stepIdx: latestStepIdx,
+    };
+  }
+
+  function formatThinkingDisplayHtml(raw) {
+    const paragraphs = String(raw || '')
+      .replace(/\r\n?/g, '\n')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (paragraphs.length === 0) return '';
+    return paragraphs
+      .map((para) => {
+        const escaped = escapeHtml(para).replace(
+          /`([^`\n]{1,120})`/g,
+          '<code class="aq-think-code">$1</code>'
+        );
+        return `<div class="aq-think-para">${escaped}</div>`;
+      })
+      .join('');
+  }
+
+  function ensureThinkingCardParts() {
+    const ts = state.thinkingTranslate;
+    if (ts.cardEl && ts.cardParts) return ts.cardParts;
+
+    const card = document.createElement('div');
+    card.setAttribute('data-aq-thinking-card', '1');
+
+    const hdr = document.createElement('div');
+    hdr.className = 'aq-think-card-hdr';
+
+    const metaWrap = document.createElement('span');
+    metaWrap.className = 'aq-think-card-meta-wrap';
+    const liveDot = document.createElement('span');
+    liveDot.className = 'aq-think-live-dot';
+    liveDot.title = '展开期间自动同步最新思维链';
+    const hdrSpinner = document.createElement('span');
+    hdrSpinner.className = 'aq-think-hdr-spinner';
+    hdrSpinner.setAttribute('aria-hidden', 'true');
+    hdrSpinner.hidden = true;
+    const metaText = document.createElement('span');
+    metaText.className = 'aq-think-card-meta';
+    metaWrap.append(liveDot, hdrSpinner, metaText);
+
+    const actions = document.createElement('span');
+    actions.className = 'aq-think-card-actions';
+
+    const selectEl = document.createElement('select');
+    selectEl.className = 'aq-think-src-select';
+    selectEl.setAttribute('data-aq-think-src', '1');
+    selectEl.title = '选择翻译来源';
+    selectEl.setAttribute('aria-label', '选择翻译来源');
+    for (let i = 0; i < THINKING_SOURCE_OPTIONS.length; i++) {
+      const opt = document.createElement('option');
+      opt.value = THINKING_SOURCE_OPTIONS[i].id;
+      opt.textContent = THINKING_SOURCE_OPTIONS[i].label;
+      selectEl.appendChild(opt);
+    }
+    selectEl.addEventListener('click', (ev) => ev.stopPropagation());
+    selectEl.addEventListener('change', (ev) => {
+      ev.stopPropagation();
+      const nextSrc = saveClientThinkingSourcePref(selectEl.value, { notifyDaemon: true });
+      ts.showOriginal = false;
+      ts.translatedSourceText = '';
+      ts.switchingSource = true;
+      triggerLatestThinkingTranslate({ force: true, explicitSource: nextSrc });
+    });
+
+    const origBtn = document.createElement('button');
+    origBtn.type = 'button';
+    origBtn.className = 'aq-think-card-act';
+    origBtn.setAttribute('data-aq-think-act', 'toggle-orig');
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'aq-think-card-act';
+    closeBtn.setAttribute('data-aq-think-act', 'close');
+    closeBtn.title = '收起';
+    closeBtn.setAttribute('aria-label', '收起');
+    closeBtn.textContent = '×';
+
+    actions.append(selectEl, origBtn, closeBtn);
+    hdr.append(metaWrap, actions);
+
+    const bodyEl = document.createElement('div');
+    bodyEl.className = 'aq-think-card-body';
+
+    card.append(hdr, bodyEl);
+    card.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const actBtn = ev.target?.closest?.('[data-aq-think-act]');
+      if (!actBtn) return;
+      ev.preventDefault();
+      const act = actBtn.getAttribute('data-aq-think-act');
+      if (act === 'close') {
+        closeThinkingTranslateCard();
+      } else if (act === 'toggle-orig') {
+        ts.showOriginal = !ts.showOriginal;
+        if (ts.showOriginal) {
+          if (!ts.sourceText) {
+            triggerLatestThinkingTranslate({ force: true });
+          } else {
+            syncThinkingHelperDomContent();
+          }
+        } else {
+          const curPref = sanitizeClientThinkingSource(state.thinkingSourcePref);
+          const needsRetranslate =
+            !ts.translatedText ||
+            ts.translatedSourceText !== ts.sourceText ||
+            ts.activeSourcePref !== curPref;
+          if (needsRetranslate) {
+            if (ts.translatedText) ts.switchingSource = true;
+            triggerLatestThinkingTranslate({ force: true });
+          } else {
+            syncThinkingHelperDomContent();
+          }
+        }
+      }
+    });
+
+    ts.cardEl = card;
+    ts.cardParts = { card, liveDot, hdrSpinner, metaText, selectEl, origBtn, bodyEl };
+    return ts.cardParts;
+  }
+
+  function syncThinkingHelperDomContent() {
+    const ts = state.thinkingTranslate;
+    const btn = ts.btnEl;
+    const showPrimarySpinner =
+      ts.loading && (ts.showOriginal ? !ts.sourceText : !ts.translatedText || ts.switchingSource);
+    if (btn) {
+      if (showPrimarySpinner) {
+        btn.setAttribute('data-loading', '1');
+      } else {
+        btn.removeAttribute('data-loading');
+      }
+      if (ts.open) {
+        btn.setAttribute('data-active', '1');
+      } else {
+        btn.removeAttribute('data-active');
+      }
+      const tipLabel = ts.open ? '收起实时思维链' : '查看实时思维链';
+      btn.title = tipLabel;
+      btn.setAttribute('aria-label', tipLabel);
+      const nextBtnHtml = showPrimarySpinner
+        ? '<span class="aq-think-spinner" aria-hidden="true"></span>'
+        : '<svg class="aq-think-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.1 3.8l1.15 3.35 3.35 1.15-3.35 1.15L7.1 12.8 5.95 9.45 2.6 8.3l3.35-1.15L7.1 3.8Z"/><path d="M12.5 2.9l.45 1.35 1.35.45-1.35.45-.45 1.35-.45-1.35-1.35-.45 1.35-.45.45-1.35Z"/></svg>';
+      if (btn.__aqHtml !== nextBtnHtml) {
+        btn.innerHTML = nextBtnHtml;
+        btn.__aqHtml = nextBtnHtml;
+      }
+    }
+
+    if (!ts.open) {
+      if (ts.cardEl) {
+        ts.cardEl.remove();
+      }
+      return;
+    }
+
+    const parts = ensureThinkingCardParts();
+    const curSource = sanitizeClientThinkingSource(state.thinkingSourcePref);
+    if (document.activeElement !== parts.selectEl && parts.selectEl.value !== curSource) {
+      parts.selectEl.value = curSource;
+    }
+
+    const showHdrSpinner = showPrimarySpinner;
+    parts.liveDot.hidden = showHdrSpinner;
+    parts.hdrSpinner.hidden = !showHdrSpinner;
+    if (ts.loading && !showHdrSpinner) {
+      parts.liveDot.setAttribute('data-syncing', '1');
+    } else {
+      parts.liveDot.removeAttribute('data-syncing');
+    }
+
+    const metaParts = ['实时思维链'];
+    if (ts.thinkingCount > 0) metaParts.push(`第 ${ts.thinkingCount} 条`);
+    if (ts.switchingSource && ts.loading) {
+      metaParts.push('切换翻译中…');
+    } else if (ts.showOriginal) {
+      metaParts.push('原文');
+    } else if (ts.error && !ts.empty) {
+      metaParts.push('请求异常');
+    } else if (ts.providerLabel) {
+      metaParts.push(ts.providerLabel);
+    } else if (ts.loading) {
+      metaParts.push('同步中…');
+    }
+    const nextMeta = metaParts.join(' · ');
+    if (parts.metaText.textContent !== nextMeta) {
+      parts.metaText.textContent = nextMeta;
+    }
+
+    const canToggleOrig = Boolean(
+      ts.hasOriginal ||
+        (ts.sourceText && ts.sourceText !== ts.translatedText) ||
+        (ts.showOriginal && ts.sourceText)
+    );
+    parts.origBtn.hidden = !canToggleOrig;
+    if (canToggleOrig) {
+      const isBrief =
+        String(ts.providerLabel || '').startsWith('AI 简述') || curSource === 'ai-brief';
+      const nextOrigLabel = ts.showOriginal ? (isBrief ? '看简述' : '看译文') : '看原文';
+      if (parts.origBtn.textContent !== nextOrigLabel) {
+        parts.origBtn.textContent = nextOrigLabel;
+      }
+    }
+
+    let bodyText = '';
+    let isMuted = false;
+    let isError = false;
+    if (ts.showOriginal) {
+      bodyText = ts.sourceText || '正在获取实时思考原文…';
+      isMuted = !ts.sourceText;
+    } else if (ts.error && !ts.empty) {
+      bodyText = ts.error;
+      isError = true;
+    } else if (ts.translatedText) {
+      bodyText = ts.translatedText;
+    } else if (ts.empty) {
+      bodyText = ts.error || '当前轮次暂未生成思考内容，生成后将自动刷新显示';
+      isMuted = true;
+    } else {
+      bodyText = '正在获取实时思维链…';
+      isMuted = true;
+    }
+
+    if (isMuted) parts.bodyEl.setAttribute('data-muted', '1');
+    else parts.bodyEl.removeAttribute('data-muted');
+    if (isError) parts.bodyEl.setAttribute('data-error', '1');
+    else parts.bodyEl.removeAttribute('data-error');
+    if (ts.switchingSource && ts.loading) parts.bodyEl.setAttribute('data-switching', '1');
+    else parts.bodyEl.removeAttribute('data-switching');
+
+    const rawBodyKey = `${isMuted ? 1 : 0}|${isError ? 1 : 0}|${bodyText}`;
+    if (parts.bodyEl.__aqRawKey !== rawBodyKey) {
+      parts.bodyEl.__aqRawKey = rawBodyKey;
+      parts.bodyEl.innerHTML = formatThinkingDisplayHtml(bodyText);
+    }
+  }
+
+  function ensureThinkingAutoRefreshTimer() {
+    if (state.thinkingAutoTimer || state.disposed) return;
+    state.thinkingAutoTimer = setInterval(() => {
+      if (state.disposed || !state.thinkingTranslate.open) {
+        stopThinkingAutoTimers();
+        return;
+      }
+      if (!document.hidden) {
+        triggerLatestThinkingTranslate({ force: false });
+      }
+    }, THINKING_AUTO_POLL_MS);
+  }
+
+  function resolveActiveRunningTurnKey(cid) {
+    const payload = state.turnsPayload;
+    if (payload && payload.cascadeId === cid && Array.isArray(payload.turns) && payload.turns.length > 0) {
+      const last = payload.turns[payload.turns.length - 1];
+      return `${cid}:t${Number(last?.turnIndex ?? payload.turns.length - 1)}`;
+    }
+    return '';
+  }
+
+  function triggerLatestThinkingTranslate({ force = false, explicitSource = '' } = {}) {
+    const cid = extractCascadeId();
+    const turnEls = findTurnRows();
+    const liveCtx = evaluateConversationLiveTurnContext(cid, turnEls);
+    const mountedTurnEl = liveCtx.mountedTurnEl;
+    const ts = state.thinkingTranslate;
+    if (!liveCtx.running || (ts.cascadeId && ts.cascadeId !== cid)) {
+      if (ts.cascadeId && ts.cascadeId !== cid) {
+        resetThinkingTranslateState();
+      }
+      if (!liveCtx.running) {
+        resetThinkingTranslateState();
+        return;
+      }
+    }
+    if (!mountedTurnEl && !ts.open && !force) return;
+    if (typeof window.__aqThinkingAction !== 'function') return;
+    if (ts.loading && !force) return;
+    const onlyOriginal = Boolean(ts.showOriginal && !explicitSource);
+    if (!force && !onlyOriginal && ts.error && !ts.empty && Date.now() < ts.errorRetryAfter) return;
+
+    const sourcePref = sanitizeClientThinkingSource(explicitSource || state.thinkingSourcePref);
+    ts.cascadeId = cid;
+    ts.open = true;
+    ensureThinkingAutoRefreshTimer();
+
+    let clientPayload = null;
+    if (mountedTurnEl) {
+      const liveThinking = extractLiveTurnThinkingFromPage(mountedTurnEl);
+      if (liveThinking && liveThinking.text) {
+        const sig = fastTextSig(liveThinking.text);
+        if (sig === ts.lastUploadedClientSig) {
+          clientPayload = {
+            sameSig: sig,
+            stepIdx: liveThinking.stepIdx,
+            thinkingCount: liveThinking.thinkingCount,
+          };
+        } else {
+          ts.lastUploadedClientSig = sig;
+          clientPayload = {
+            sig,
+            text: liveThinking.text,
+            stepIdx: liveThinking.stepIdx,
+            thinkingCount: liveThinking.thinkingCount,
+          };
+        }
+      }
+    }
+
+    state.thinkingReqSeq += 1;
+    const reqId = `th-${Date.now()}-${state.thinkingReqSeq}`;
+    ts.requestId = reqId;
+    ts.loading = true;
+    if (force) {
+      ts.error = '';
+    }
+
+    renderRunningThinkingHelper(cid, turnEls, liveCtx);
+
+    try {
+      window.__aqThinkingAction(
+        JSON.stringify({
+          type: 'translate',
+          requestId: reqId,
+          cascadeId: cid,
+          source: sourcePref,
+          force: Boolean(force),
+          onlyOriginal,
+          clientThinking: clientPayload,
+        })
+      );
+    } catch (err) {
+      ts.loading = false;
+      ts.switchingSource = false;
+      ts.error = String(err?.message || '发送翻译请求失败');
+      syncThinkingHelperDomContent();
+    }
+  }
+
+  function renderRunningThinkingHelper(sharedCid, sharedTurnEls, sharedLiveCtx) {
+    const ts = state.thinkingTranslate;
+    const cid = sharedCid !== undefined ? sharedCid : extractCascadeId();
+    if (!cid) {
+      if (ts.btnEl || ts.cardEl || ts.open || ts.hostEl) {
+        resetThinkingTranslateState();
+      }
+      return;
+    }
+
+    if (ts.cascadeId && ts.cascadeId !== cid) {
+      resetThinkingTranslateState();
+    }
+
+    const turnEls = Array.isArray(sharedTurnEls) ? sharedTurnEls : findTurnRows();
+    const liveCtx = sharedLiveCtx || evaluateConversationLiveTurnContext(cid, turnEls);
+    const mountedTurnEl = liveCtx.mountedTurnEl;
+    if (!liveCtx.running) {
+      if (ts.btnEl || ts.cardEl || ts.open || ts.hostEl) {
+        resetThinkingTranslateState();
+      }
+      return;
+    }
+
+    const nextTurnKey = resolveActiveRunningTurnKey(cid);
+    if (ts.turnKey && nextTurnKey && ts.turnKey !== nextTurnKey) {
+      resetThinkingTranslateState();
+    }
+    ts.cascadeId = cid;
+    if (nextTurnKey) ts.turnKey = nextTurnKey;
+
+    if (!mountedTurnEl) {
+      if (ts.hostEl || ts.btnEl?.parentElement || ts.cardEl?.parentElement) {
+        detachThinkingHelperDom();
+      }
+      return;
+    }
+
+    const anchor = findRunningThinkingAnchor(mountedTurnEl);
+    if (!anchor || !anchor.host) {
+      if (ts.hostEl || ts.btnEl?.parentElement || ts.cardEl?.parentElement) {
+        detachThinkingHelperDom();
+      }
+      return;
+    }
+
+    const { mode, host, triggerBtn } = anchor;
+    const wasCardDetached = Boolean(ts.open && (!ts.cardEl || !ts.cardEl.parentElement));
+    if (ts.hostEl && ts.hostEl !== host) {
+      clearHostMarkOnElement(ts.hostEl);
+    }
+    if (mode === 'collapsible') {
+      host.removeAttribute('data-aq-thinking-inline');
+      if (host.getAttribute('data-aq-thinking-host') !== '1') {
+        host.setAttribute('data-aq-thinking-host', '1');
+      }
+    } else {
+      host.removeAttribute('data-aq-thinking-host');
+      if (host.getAttribute('data-aq-thinking-inline') !== '1') {
+        host.setAttribute('data-aq-thinking-inline', '1');
+      }
+    }
+    ts.hostEl = host;
+
+    let btn = ts.btnEl;
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.setAttribute('data-aq-thinking-btn', '1');
+      btn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (state.thinkingTranslate.open) {
+          closeThinkingTranslateCard();
+        } else {
+          triggerLatestThinkingTranslate({ force: true });
+        }
+      });
+      ts.btnEl = btn;
+    }
+
+    syncThinkingHelperDomContent();
+
+    if (mode === 'collapsible' && triggerBtn && triggerBtn.parentElement === host) {
+      if (btn.parentElement !== host || triggerBtn.nextSibling !== btn) {
+        host.insertBefore(btn, triggerBtn.nextSibling);
+      }
+      if (ts.open && ts.cardEl) {
+        if (ts.cardEl.parentElement !== host || btn.nextSibling !== ts.cardEl) {
+          host.insertBefore(ts.cardEl, btn.nextSibling);
+        }
+      }
+    } else {
+      const targetAfterBtn = ts.open && ts.cardEl ? ts.cardEl : null;
+      if (btn.parentElement !== host || (targetAfterBtn ? btn.nextSibling !== targetAfterBtn : btn !== host.lastElementChild)) {
+        host.appendChild(btn);
+      }
+      if (ts.open && ts.cardEl) {
+        if (ts.cardEl.parentElement !== host || ts.cardEl !== host.lastElementChild) {
+          host.appendChild(ts.cardEl);
+        }
+      }
+    }
+
+    if (wasCardDetached && !ts.loading && ts.translatedText) {
+      triggerLatestThinkingTranslate({ force: false });
+    }
   }
 
   // ---- Quota Chip & Hover Panel ----
@@ -4352,14 +6020,15 @@
         ? `<button type="button" class="aq-update-open${updAvailable || updInstalling ? '' : ' aq-panel-version-text'}" data-aq-update-open="1" ${updOpening || updInstalling ? 'disabled aria-busy="true"' : ''}>${versionLabel}</button>`
         : `<span class="aq-panel-version-text">${versionLabel}</span>`;
 
-    const updateHtml = upd.currentVersion
-      ? `
-        <div class="aq-q-update">
-          ${versionControlHtml}
-          ${upd.error ? `<div class="aq-update-error" role="alert">${escapeHtml(upd.error)}</div>` : ''}
-        </div>
-      `
-      : '';
+    const settingsBtnHtml = '<button type="button" class="aq-key-settings-btn" data-aq-key-settings-open="1" title="AI 简述 / 翻译设置" aria-label="AI 简述 / 翻译设置"><svg class="aq-key-settings-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M13.2 8a5.2 5.2 0 0 0-.08-.88l1.42-1.1-1.35-2.34-1.72.66a5.2 5.2 0 0 0-1.52-.88L9.68 1.6H6.32l-.27 1.86c-.55.21-1.06.51-1.52.88l-1.72-.66L1.46 6.02l1.42 1.1a5.3 5.3 0 0 0 0 1.76l-1.42 1.1 1.35 2.34 1.72-.66c.46.37.97.67 1.52.88l.27 1.86h3.36l.27-1.86c.55-.21 1.06-.51 1.52-.88l1.72.66 1.35-2.34-1.42-1.1c.05-.29.08-.58.08-.88Z"/></svg></button>';
+
+    const updateHtml = `
+      <div class="aq-q-update">
+        ${settingsBtnHtml}
+        ${upd.currentVersion ? versionControlHtml : ''}
+        ${upd.error ? `<div class="aq-update-error" role="alert">${escapeHtml(upd.error)}</div>` : ''}
+      </div>
+    `;
 
     const planBadgeHtml = curPlanName ? `<span class="aq-qp-badge">${escapeHtml(curPlanName)}</span>` : '';
 
@@ -5650,6 +7319,15 @@
         }
       });
     }
+    const openSettingsBtn = tt.querySelector('[data-aq-key-settings-open]');
+    if (openSettingsBtn) {
+      openSettingsBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        closeQuotaTooltip();
+        openKeySettingsModal();
+      });
+    }
     const openUpdateBtn = tt.querySelector('[data-aq-update-open]');
     if (openUpdateBtn) {
       openUpdateBtn.addEventListener('click', (ev) => {
@@ -5674,6 +7352,168 @@
         sendUpdateAction({ type: 'open', requestId });
       });
     }
+  }
+
+  function closeKeySettingsModal() {
+    if (state.keySettingsTimer) {
+      clearTimeout(state.keySettingsTimer);
+      state.keySettingsTimer = null;
+    }
+    state.keySettingsOpen = false;
+    state.keySettingsSaving = false;
+    state.keySettingsRequestId = '';
+    document.getElementById('aq-key-settings-modal')?.remove();
+  }
+
+  function openKeySettingsModal() {
+    closeKeySettingsModal();
+    state.keySettingsOpen = true;
+    sendUiPrefsAction({ type: 'get' });
+
+    const aiCfg = state.aiConfigMeta || {};
+    const overlay = document.createElement('div');
+    overlay.id = 'aq-key-settings-modal';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-label', 'AI Key 设置');
+
+    const keyPlaceholder =
+      !aiCfg.apiKey && aiCfg.hasEnvKey
+        ? '当前正使用环境变量 Key，填写后优先使用此处配置'
+        : '粘贴智谱 BigModel 或 OpenAI 兼容 API Key';
+
+    overlay.innerHTML = `
+      <div class="aq-ks-dialog">
+        <div class="aq-ks-hdr">
+          <span class="aq-ks-title-wrap">
+            <span class="aq-ks-title">AI 简述 / 翻译设置</span>
+          </span>
+          <button type="button" class="aq-ks-close" data-aq-ks-close="1" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <div class="aq-ks-field">
+          <label class="aq-ks-lbl">API Key（默认免费支持智谱 glm-4-flash-250414）</label>
+          <input type="text" class="aq-ks-input" data-aq-ks-key="1" autocomplete="off" spellcheck="false" placeholder="${escapeHtml(keyPlaceholder)}" value="${escapeHtml(aiCfg.apiKey || '')}" />
+        </div>
+        <div class="aq-ks-row2">
+          <div class="aq-ks-field">
+            <label class="aq-ks-lbl">模型名称（可选）</label>
+            <input type="text" class="aq-ks-input" data-aq-ks-model="1" autocomplete="off" spellcheck="false" placeholder="glm-4-flash-250414" value="${escapeHtml(aiCfg.model || '')}" />
+          </div>
+          <div class="aq-ks-field">
+            <label class="aq-ks-lbl">接口地址（可选）</label>
+            <input type="text" class="aq-ks-input" data-aq-ks-endpoint="1" autocomplete="off" spellcheck="false" placeholder="默认智谱官方接口" value="${escapeHtml(aiCfg.endpoint || '')}" />
+          </div>
+        </div>
+        <div class="aq-ks-note">密钥仅以 600 权限保存在本机 ~/.gemini/antigravity/quota-injector/config.json，不进入 Git 仓库。</div>
+        <div class="aq-ks-err" data-aq-ks-err="1" hidden></div>
+        <div class="aq-ks-ftr">
+          <div class="aq-ks-ftr-right">
+            <button type="button" class="aq-ks-btn" data-aq-ks-cancel="1">取消</button>
+            <button type="button" class="aq-ks-btn is-primary" data-aq-ks-save="1">保存</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const keyInput = overlay.querySelector('[data-aq-ks-key]');
+    const modelInput = overlay.querySelector('[data-aq-ks-model]');
+    const endpointInput = overlay.querySelector('[data-aq-ks-endpoint]');
+    const errEl = overlay.querySelector('[data-aq-ks-err]');
+    const saveBtn = overlay.querySelector('[data-aq-ks-save]');
+    let keyEdited = false;
+
+    const showModalError = (msg) => {
+      if (!errEl) return;
+      const clean = String(msg || '').trim();
+      errEl.textContent = clean;
+      errEl.hidden = !clean;
+    };
+
+    const resetSavingButton = () => {
+      state.keySettingsSaving = false;
+      state.keySettingsRequestId = '';
+      if (saveBtn) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = '保存';
+      }
+    };
+
+    keyInput?.addEventListener?.('input', () => {
+      keyEdited = true;
+      keyInput.setAttribute('data-aq-dirty', '1');
+    });
+    modelInput?.addEventListener?.('input', () => {
+      modelInput.setAttribute('data-aq-dirty', '1');
+    });
+    endpointInput?.addEventListener?.('input', () => {
+      endpointInput.setAttribute('data-aq-dirty', '1');
+    });
+
+    const submitConfig = () => {
+      if (state.keySettingsSaving) return;
+      showModalError('');
+      const rawKey = String(keyInput?.value || '').trim();
+      const rawModel = String(modelInput?.value || '').trim();
+      const rawEndpoint = String(endpointInput?.value || '').trim();
+      const reqId = `ks-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+      state.keySettingsSaving = true;
+      state.keySettingsRequestId = reqId;
+      if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = '保存中…';
+      }
+      const sent = sendUiPrefsAction({
+        type: 'set-ai-config',
+        requestId: reqId,
+        apiKey: rawKey,
+        model: rawModel,
+        endpoint: rawEndpoint,
+      });
+      if (!sent) {
+        resetSavingButton();
+        showModalError('后台守护进程未连接，请重启注入器后重试');
+        return;
+      }
+      if (state.keySettingsTimer) clearTimeout(state.keySettingsTimer);
+      state.keySettingsTimer = setTimeout(() => {
+        state.keySettingsTimer = null;
+        if (state.keySettingsOpen && state.keySettingsRequestId === reqId) {
+          resetSavingButton();
+          showModalError('保存响应超时，请确认注入器后台正在运行');
+        }
+      }, 4000);
+    };
+
+    overlay.addEventListener('pointerdown', (ev) => {
+      ev.stopPropagation();
+    });
+    overlay.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (ev.target === overlay || ev.target?.closest?.('[data-aq-ks-close], [data-aq-ks-cancel]')) {
+        closeKeySettingsModal();
+        return;
+      }
+      if (ev.target?.closest?.('[data-aq-ks-save]')) {
+        submitConfig();
+      }
+    });
+    overlay.addEventListener('keydown', (ev) => {
+      ev.stopPropagation();
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        closeKeySettingsModal();
+      } else if (ev.key === 'Enter') {
+        ev.preventDefault();
+        submitConfig();
+      }
+    });
+
+    document.body.appendChild(overlay);
+    setTimeout(() => {
+      try {
+        if (!keyEdited) keyInput?.focus?.();
+      } catch {}
+    }, 0);
   }
 
   function closeQuotaTooltip() {
@@ -6033,7 +7873,7 @@
   }
 
   const TRANSLATE_SKIP_SELECTOR =
-    '[data-markdown-root], [data-testid="user-message"], [data-testid="user-message-content"], [data-lexical-editor], [data-testid="model-selector-trigger"], [data-aq-turn-usage], [data-aq-native-menu-ext], .aq-conv-width-resizer, #aq-turn-tooltip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-batch-wake-panel, #aq-batch-toast, #aq-context-chip, #aq-quota-chip, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost, code, pre, script, style, .codicon, .google-symbols, .agy-sidebar-row';
+    '[data-markdown-root], [data-testid="user-message"], [data-testid="user-message-content"], [data-lexical-editor], [data-testid="model-selector-trigger"], [data-aq-turn-usage], [data-aq-thinking-btn], [data-aq-thinking-card], [data-aq-native-menu-ext], .aq-conv-width-resizer, #aq-turn-tooltip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-key-settings-modal, #aq-batch-wake-panel, #aq-batch-toast, #aq-context-chip, #aq-quota-chip, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost, code, pre, script, style, .codicon, .google-symbols, .agy-sidebar-row';
 
   const CHROME_ROOT_SELECTOR = [
     '.settings-modal-container',
@@ -6517,31 +8357,142 @@
 
     const walk = (parentId, depth) => {
       const kids = childrenByParent.get(parentId) || [];
-      let sum = 0;
+      const unionCids = new Set();
       for (let i = 0; i < kids.length; i++) {
         const g = kids[i];
         if (visited.has(g.id)) continue;
         visited.add(g.id);
         depthById.set(g.id, depth);
-        const directCount = Array.isArray(g.items) ? g.items.length : 0;
+        const directItems = Array.isArray(g.items) ? g.items : [];
+        const ownCids = new Set();
+        for (let j = 0; j < directItems.length; j++) {
+          const cidKey = String(directItems[j]?.cascadeId || '').trim().toLowerCase();
+          if (cidKey) ownCids.add(cidKey);
+        }
         const entry = {
           group: g,
           depth,
           hasChildren: (childrenByParent.get(g.id) || []).length > 0,
-          totalCount: directCount,
+          totalCount: ownCids.size,
         };
         orderedFlat.push(entry);
-        const subCount = walk(g.id, depth + 1);
-        const total = directCount + subCount;
+        const subCids = walk(g.id, depth + 1);
+        for (const k of subCids) ownCids.add(k);
+        const total = ownCids.size;
         entry.totalCount = total;
         totalCountById.set(g.id, total);
-        sum += total;
+        for (const k of ownCids) unionCids.add(k);
       }
-      return sum;
+      return unionCids;
     };
 
     walk('', 0);
     return { byId, childrenByParent, depthById, totalCountById, orderedFlat };
+  }
+
+  function getNormalizedGroupChildTokens(group, childGroups = []) {
+    const items = Array.isArray(group?.items) ? group.items : [];
+    const subIds = childGroups.map((cg) => cg.id);
+    const subIdSet = new Set(subIds);
+    const itemKeys = items
+      .map((it) => String(it?.cascadeId || '').trim().toLowerCase())
+      .filter(Boolean);
+    const itemKeySet = new Set(itemKeys);
+    const rawOrder = Array.isArray(group?.childOrder) ? group.childOrder : [];
+    const out = [];
+    const seen = new Set();
+    for (let i = 0; i < rawOrder.length; i++) {
+      const tok = String(rawOrder[i] || '').trim();
+      if (tok.startsWith('g:')) {
+        const sid = tok.slice(2);
+        if (subIdSet.has(sid) && !seen.has(tok)) {
+          seen.add(tok);
+          out.push(tok);
+        }
+      } else if (tok.startsWith('c:')) {
+        const ckey = tok.slice(2).toLowerCase();
+        const canon = `c:${ckey}`;
+        if (itemKeySet.has(ckey) && !seen.has(canon)) {
+          seen.add(canon);
+          out.push(canon);
+        }
+      }
+    }
+    for (let i = 0; i < subIds.length; i++) {
+      const tok = `g:${subIds[i]}`;
+      if (!seen.has(tok)) {
+        seen.add(tok);
+        out.push(tok);
+      }
+    }
+    for (let i = 0; i < itemKeys.length; i++) {
+      const tok = `c:${itemKeys[i]}`;
+      if (!seen.has(tok)) {
+        seen.add(tok);
+        out.push(tok);
+      }
+    }
+    return out;
+  }
+
+  function getDirectPeerDescriptors(blockEl) {
+    if (!blockEl) return [];
+    const nodes = blockEl.querySelectorAll(
+      ':scope > .aq-grp-children > [data-aq-grp-block], :scope > .aq-grp-children > .aq-grp-item[data-aq-grp-gid]'
+    );
+    const out = [];
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (el.hasAttribute('data-aq-grp-block')) {
+        const gid = el.getAttribute('data-aq-grp-block') || '';
+        if (gid) out.push({ kind: 'group', id: gid, token: `g:${gid}`, el });
+      } else {
+        const cid = el.getAttribute('data-aq-grp-open') || '';
+        if (cid) out.push({ kind: 'item', id: cid, token: `c:${cid.toLowerCase()}`, el });
+      }
+    }
+    return out;
+  }
+
+  function applyOptimisticChildReorder(groupId, movingToken, anchorToken, mode) {
+    const grpIdx = state.groups.findIndex((g) => g.id === groupId);
+    if (grpIdx < 0 || !movingToken || !anchorToken || movingToken === anchorToken) return;
+    const grp = state.groups[grpIdx];
+    const childGroups = state.groups.filter((g) => g.parentId === groupId);
+    const curOrder = getNormalizedGroupChildTokens(grp, childGroups);
+    if (!curOrder.includes(movingToken) || !curOrder.includes(anchorToken)) return;
+    const without = curOrder.filter((tok) => tok !== movingToken);
+    const tIdx = without.indexOf(anchorToken);
+    if (tIdx < 0) return;
+    without.splice(mode === 'before' ? tIdx : tIdx + 1, 0, movingToken);
+    if (without.every((tok, idx) => tok === curOrder[idx])) return;
+
+    const itemByKey = new Map(
+      (Array.isArray(grp.items) ? grp.items : []).map((it) => [
+        String(it.cascadeId || '').toLowerCase(),
+        it,
+      ])
+    );
+    const nextItems = without
+      .filter((tok) => tok.startsWith('c:'))
+      .map((tok) => itemByKey.get(tok.slice(2)))
+      .filter(Boolean);
+    const orderedSubIds = without.filter((tok) => tok.startsWith('g:')).map((tok) => tok.slice(2));
+    const subById = new Map(childGroups.map((cg) => [cg.id, cg]));
+    let subCursor = 0;
+    const nextGroups = state.groups.map((g, idx) => {
+      if (idx === grpIdx) {
+        return { ...grp, items: nextItems, childOrder: without };
+      }
+      if (orderedSubIds.length >= 2 && g.parentId === groupId) {
+        return subById.get(orderedSubIds[subCursor++]) || g;
+      }
+      return g;
+    });
+    state.groups = nextGroups;
+    state.cachedGroupsRef = null;
+    state.cachedGroupedCids = null;
+    renderSidebarGroupsPanel(false);
   }
 
   function isGroupDescendant(groups, ancestorId, targetId) {
@@ -7179,12 +9130,24 @@
       until: now + OPTIMISTIC_SEND_GRACE_MS,
       sawBackendRunning: false,
     });
+    state.localUserInputAtById[cidLower] = now;
     const meta = state.trajMetaById[cidLower];
     if (meta) {
-      meta.lastOperatedMs = Math.max(meta.lastOperatedMs || 0, now);
+      meta.lastUserInputMs = Math.max(meta.lastUserInputMs || 0, now);
     }
     scheduleOptimisticExpiry();
     schedulePostSendTrajectoryRefreshes([600, 2000]);
+    if (state.postSendTurnsTimer) clearTimeout(state.postSendTurnsTimer);
+    state.postSendTurnsTimer = setTimeout(() => {
+      state.postSendTurnsTimer = null;
+      if (state.disposed) return;
+      if (typeof window.__aqRequestTurns === 'function' && extractCascadeId().toLowerCase() === cidLower) {
+        try {
+          window.__aqRequestTurns(rawCid);
+        } catch {}
+      }
+      scheduleRender({ turns: true });
+    }, 350);
     renderSidebarGroupsPanel();
   }
 
@@ -7323,11 +9286,13 @@
       const project = nativeProjIdx.standaloneCids.has(cid)
         ? ''
         : dInfo?.project || nativeProjIdx.projectByCid.get(cid) || meta?.project || '';
-      const lastOperatedMs = Math.max(
-        meta?.lastOperatedMs || 0,
-        meta?.lastModifiedMs || 0,
+      const localInputAt = state.localUserInputAtById[cid] || 0;
+      const freshLocalInputMs =
+        localInputAt && now - localInputAt < 300_000 ? localInputAt : 0;
+      const lastUserInputMs = Math.max(
         meta?.lastUserInputMs || 0,
-        opt?.startedAt || 0
+        opt?.startedAt || 0,
+        freshLocalInputMs
       );
       const resolvedItem = {
         cascadeId: dInfo?.cascadeId || meta?.cascadeId || opt?.cascadeId || cid,
@@ -7335,7 +9300,7 @@
         project,
         status,
         lastModifiedMs: Math.max(meta?.lastModifiedMs || 0, opt?.startedAt || 0),
-        lastOperatedMs,
+        lastUserInputMs,
         domIndex: cid in domOrder ? domOrder[cid] : 99999,
       };
       if (status) {
@@ -7353,8 +9318,8 @@
     });
 
     recentCandidates.sort((a, b) => {
-      if ((b.lastOperatedMs || 0) !== (a.lastOperatedMs || 0)) {
-        return (b.lastOperatedMs || 0) - (a.lastOperatedMs || 0);
+      if ((b.lastUserInputMs || 0) !== (a.lastUserInputMs || 0)) {
+        return (b.lastUserInputMs || 0) - (a.lastUserInputMs || 0);
       }
       return a.domIndex - b.domIndex;
     });
@@ -7373,13 +9338,32 @@
         'Content-Type': 'application/json',
         ...(csrf ? { 'x-codeium-csrf-token': csrf } : {}),
       };
-      const res = await fetch('/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({}),
-      });
+      const [res, bgRes] = await Promise.all([
+        fetch('/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({}),
+        }),
+        fetch('/exa.language_server_pb.LanguageServerService/ListBackgroundTasks', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({}),
+        }).catch(() => null),
+      ]);
       if (!res.ok) return;
-      const json = await res.json().catch(() => null);
+      const [json, bgJson] = await Promise.all([
+        res.json().catch(() => null),
+        bgRes && bgRes.ok ? bgRes.json().catch(() => null) : Promise.resolve(null),
+      ]);
+      const bgTasks = Array.isArray(bgJson?.tasks) ? bgJson.tasks : [];
+      const nonDaemonTaskCids = new Set();
+      for (let i = 0; i < bgTasks.length; i++) {
+        const entryTask = bgTasks[i];
+        const taskCid = String(entryTask?.conversationId || '').trim().toLowerCase();
+        if (!taskCid || !entryTask?.task) continue;
+        if (entryTask.task.isDaemon === true) continue;
+        nonDaemonTaskCids.add(taskCid);
+      }
       const map = json?.trajectorySummaries || {};
       const nextById = Object.create(null);
       for (const [cid, entry] of Object.entries(map)) {
@@ -7420,7 +9404,10 @@
             Boolean(entry.notFullyIdle) ||
             Boolean(entry.hasRunningSubagents));
         const lastModifiedMs = Date.parse(entry.lastModifiedTime || '') || 0;
-        const lastUserInputMs = Date.parse(entry.lastUserInputTime || '') || 0;
+        const serverUserInputMs =
+          Date.parse(entry.lastUserInputTime || '') ||
+          Date.parse(entry.createdTime || '') ||
+          0;
         let lastUserViewMs = Date.parse(entry.annotations?.lastUserViewTime || '') || 0;
         let markedAsUnread = Boolean(entry.annotations?.markedAsUnread);
         const localViewedAt = state.localViewedAtById[key] || 0;
@@ -7429,7 +9416,14 @@
           if (lastModifiedMs <= localViewedAt) markedAsUnread = false;
         }
         const prev = state.trajMetaById[key] || {};
-        const lastOperatedMs = Math.max(lastModifiedMs, lastUserInputMs);
+        const localInputAt = state.localUserInputAtById[key] || 0;
+        if (localInputAt && serverUserInputMs >= localInputAt) {
+          delete state.localUserInputAtById[key];
+        }
+        const lastUserInputMs =
+          localInputAt && Date.now() - localInputAt < 300_000
+            ? Math.max(serverUserInputMs, localInputAt)
+            : serverUserInputMs;
         nextById[key] = {
           cascadeId: cid,
           title: title || prev.title || '',
@@ -7441,18 +9435,18 @@
           parentId,
           waiting,
           running,
+          bgTaskRunning: !killed && nonDaemonTaskCids.has(key),
           subagentWaiting: false,
           subagentRunning: false,
           markedAsUnread,
           lastModifiedMs,
           lastUserInputMs,
           lastUserViewMs,
-          lastOperatedMs,
         };
       }
-      // Bubble subagent waiting/running state up to root parent conversation
+      // Bubble subagent waiting/running/non-daemon background task state up to root parent conversation
       for (const item of Object.values(nextById)) {
-        if (!item.parentId || item.killed || (!item.waiting && !item.running)) continue;
+        if (!item.parentId || item.killed || (!item.waiting && !item.running && !item.bgTaskRunning)) continue;
         let curParentId = item.parentId;
         const visited = new Set();
         while (curParentId && !visited.has(curParentId)) {
@@ -7460,16 +9454,23 @@
           const parent = nextById[curParentId];
           if (!parent) break;
           if (item.waiting) parent.subagentWaiting = true;
-          if (item.running) parent.subagentRunning = true;
+          if (item.running || item.bgTaskRunning) parent.subagentRunning = true;
           curParentId = parent.parentId;
         }
       }
       state.trajMetaById = nextById;
+      state.nonDaemonBgTaskCids = nonDaemonTaskCids;
       const nowMeta = Date.now();
       for (const [key, opt] of state.optimisticRunningById.entries()) {
         const meta = nextById[key];
         if (meta) {
-          if (meta.running || meta.waiting || meta.subagentRunning || meta.subagentWaiting) {
+          if (
+            meta.running ||
+            meta.waiting ||
+            meta.subagentRunning ||
+            meta.subagentWaiting ||
+            meta.bgTaskRunning
+          ) {
             opt.sawBackendRunning = true;
           } else if (opt.sawBackendRunning || nowMeta >= opt.until) {
             state.optimisticRunningById.delete(key);
@@ -7481,6 +9482,15 @@
       scheduleOptimisticExpiry();
       syncGroupedConversationMetadata();
       renderSidebarGroupsPanel();
+      const watchedCidLower = extractCascadeId().toLowerCase();
+      if (
+        watchedCidLower &&
+        (state.liveTurnTimer !== null ||
+          state.liveTurnMainIdleSince > 0 ||
+          hasActiveConversationAsyncWork(watchedCidLower))
+      ) {
+        scheduleRender({ turns: true });
+      }
     } catch {}
   }
 
@@ -8137,19 +10147,29 @@
     }
     const d = state.convDrag;
     state.convDrag = null;
-    if (d?.mode === 'group-item' || d?.mode === 'group-folder' || d?.switchedFromProjects) {
+    if (d?.started) {
       d.sourceEl?.classList?.remove('is-dragging');
       document.body.style.userSelect = '';
       document.body.style.cursor = '';
     }
-    document.body.classList.remove('aq-dragging-to-group');
+    document.body.classList.remove('aq-conv-dragging', 'aq-dragging-to-group');
     const panel = document.getElementById('aq-conv-groups');
     if (panel) {
       panel.classList.remove('aq-grp-panel-drop-target');
       panel
-        .querySelectorAll('.aq-grp-drop-target, .aq-grp-drag-before, .aq-grp-drag-after, .aq-grp-drag-inside, .aq-grp-drag-root')
+        .querySelectorAll(
+          '.aq-grp-drop-target, .aq-grp-drag-before, .aq-grp-drag-after, .aq-grp-drag-inside, .aq-grp-drag-root, .aq-grp-item-drag-before, .aq-grp-item-drag-after'
+        )
         .forEach((el) =>
-          el.classList.remove('aq-grp-drop-target', 'aq-grp-drag-before', 'aq-grp-drag-after', 'aq-grp-drag-inside', 'aq-grp-drag-root')
+          el.classList.remove(
+            'aq-grp-drop-target',
+            'aq-grp-drag-before',
+            'aq-grp-drag-after',
+            'aq-grp-drag-inside',
+            'aq-grp-drag-root',
+            'aq-grp-item-drag-before',
+            'aq-grp-item-drag-after'
+          )
         );
     }
     const ghost = document.getElementById('aq-conv-drag-ghost');
@@ -8170,21 +10190,24 @@
     d.started = true;
     closeGroupMenu();
     closeGroupCtxMenu();
+    document.body.classList.add('aq-conv-dragging');
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'grabbing';
     if (d.mode === 'native-row' && state.sidebarTab === 'projects') {
       d.switchedFromProjects = true;
       state.sidebarTab = 'groups';
-      document.body.style.userSelect = 'none';
-      document.body.style.cursor = 'grabbing';
       const sidebar = findSidebarRoot();
       if (sidebar) syncSidebarTabState(sidebar);
       if (state.groupsCollapsedSection) {
         state.groupsCollapsedSection = false;
         renderSidebarGroupsPanel(true);
       }
-    } else if (d.mode === 'group-item' || d.mode === 'group-folder') {
+    } else if (
+      d.mode === 'group-item' ||
+      d.mode === 'group-folder' ||
+      d.sourceEl?.closest?.('#aq-conv-groups')
+    ) {
       d.sourceEl?.classList?.add('is-dragging');
-      document.body.style.userSelect = 'none';
-      document.body.style.cursor = 'grabbing';
     }
   }
 
@@ -8207,6 +10230,10 @@
       overEmptyPanel: false,
       folderDragMode: '',
       folderTargetId: '',
+      folderTargetCid: '',
+      itemDropMode: '',
+      itemTargetCid: '',
+      itemTargetGroupId: '',
     };
     state.convDrag = d;
     if (mode === 'native-row' && state.sidebarTab === 'projects') {
@@ -8219,107 +10246,364 @@
     }
   }
 
-  function updateFolderDragTarget(d, panel, clientX, clientY) {
-    panel
-      .querySelectorAll('.aq-grp-drag-before, .aq-grp-drag-after, .aq-grp-drag-inside, .aq-grp-drag-root')
-      .forEach((el) =>
-        el.classList.remove('aq-grp-drag-before', 'aq-grp-drag-after', 'aq-grp-drag-inside', 'aq-grp-drag-root')
+  function autoScrollGroupsBodyOnDrag(panel, clientY) {
+    const bodyEl = panel?.querySelector?.('.aq-grp-body');
+    if (!bodyEl || bodyEl.scrollHeight <= bodyEl.clientHeight + 2) return false;
+    const rect = bodyEl.getBoundingClientRect();
+    if (rect.height <= 0) return false;
+    const prevTop = bodyEl.scrollTop;
+    const edgePx = Math.min(26, Math.floor(rect.height * 0.22));
+    if (clientY >= rect.top - 8 && clientY < rect.top + edgePx && prevTop > 0) {
+      const ratio = Math.min(1, (rect.top + edgePx - clientY) / Math.max(1, edgePx));
+      bodyEl.scrollTop = Math.max(0, prevTop - Math.ceil(2 + ratio * 6));
+    } else if (
+      clientY > rect.bottom - edgePx &&
+      clientY <= rect.bottom + 8 &&
+      prevTop + bodyEl.clientHeight < bodyEl.scrollHeight
+    ) {
+      const ratio = Math.min(1, (clientY - (rect.bottom - edgePx)) / Math.max(1, edgePx));
+      bodyEl.scrollTop = Math.min(
+        bodyEl.scrollHeight - bodyEl.clientHeight,
+        prevTop + Math.ceil(2 + ratio * 6)
       );
+    }
+    return bodyEl.scrollTop !== prevTop;
+  }
 
+  function scheduleConvDragAutoScrollTick() {
+    if (!state.convDragRaf && !state.disposed && state.convDrag?.started) {
+      state.convDragRaf = requestAnimationFrame(() => {
+        state.convDragRaf = 0;
+        const active = state.convDrag;
+        if (!state.disposed && active?.started) {
+          updateConversationDragTarget(active.lastX, active.lastY);
+        }
+      });
+    }
+  }
+
+  function resolvePeerInsertHit(peers, fromIdx, clientY) {
+    if (!Array.isArray(peers) || peers.length < 2 || fromIdx < 0) return null;
+    const rects = peers.map((p) => p.el.getBoundingClientRect());
+    const fRect = rects[0];
+    const lRect = rects[rects.length - 1];
+    if (fRect.height > 0 && clientY < fRect.top) {
+      return fromIdx > 0 ? { peer: peers[0], mode: 'before' } : null;
+    }
+    if (lRect.height > 0 && clientY > lRect.bottom) {
+      return fromIdx < peers.length - 1 ? { peer: peers[peers.length - 1], mode: 'after' } : null;
+    }
+    let hitIdx = -1;
+    for (let i = 0; i < rects.length; i++) {
+      const r = rects[i];
+      if (r.height > 0 && clientY >= r.top - 1 && clientY <= r.bottom + 1) {
+        hitIdx = i;
+        break;
+      }
+    }
+    if (hitIdx < 0 || hitIdx === fromIdx) return null;
+    const r = rects[hitIdx];
+    if (hitIdx === fromIdx + 1) {
+      return clientY >= r.top + r.height * 0.2 ? { peer: peers[hitIdx], mode: 'after' } : null;
+    }
+    if (hitIdx === fromIdx - 1) {
+      return clientY <= r.bottom - r.height * 0.2 ? { peer: peers[hitIdx], mode: 'before' } : null;
+    }
+    return {
+      peer: peers[hitIdx],
+      mode: clientY <= r.top + r.height / 2 ? 'before' : 'after',
+    };
+  }
+
+  function updateFolderDragTarget(d, panel, clientX, clientY) {
     const dragId = d.sourceGroupId;
     const dragGrp = state.groups.find((g) => g.id === dragId);
     const ghost = ensureConvDragGhostEl();
     if (!dragGrp || !panel || !panel.isConnected) {
+      if (panel) {
+        panel
+          .querySelectorAll(
+            '.aq-grp-drag-before, .aq-grp-drag-after, .aq-grp-drag-inside, .aq-grp-drag-root, .aq-grp-item-drag-before, .aq-grp-item-drag-after'
+          )
+          .forEach((el) =>
+            el.classList.remove(
+              'aq-grp-drag-before',
+              'aq-grp-drag-after',
+              'aq-grp-drag-inside',
+              'aq-grp-drag-root',
+              'aq-grp-item-drag-before',
+              'aq-grp-item-drag-after'
+            )
+          );
+      }
       d.folderDragMode = '';
       d.folderTargetId = '';
+      d.folderTargetCid = '';
       ghost.classList.remove('is-visible');
       return;
     }
 
+    // 1. Scroll & read layout bounds BEFORE mutating classes to avoid forced synchronous reflow
+    const didScroll = autoScrollGroupsBodyOnDrag(panel, clientY);
     let nextMode = '';
     let nextTargetId = '';
+    let nextTargetCid = '';
+    let highlightEl = null;
+    let highlightClass = '';
 
     const smartHdr = panel.querySelector('[data-aq-smart-hdr]');
     if (smartHdr && dragGrp.parentId) {
       const sRect = smartHdr.getBoundingClientRect();
-      if (sRect.height > 0 && clientY >= sRect.top - 4 && clientY <= sRect.bottom + 4 && clientX >= sRect.left - 8 && clientX <= sRect.right + 8) {
-        smartHdr.classList.add('aq-grp-drag-root');
+      if (
+        sRect.height > 0 &&
+        clientY >= sRect.top - 4 &&
+        clientY <= sRect.bottom + 4 &&
+        clientX >= sRect.left - 8 &&
+        clientX <= sRect.right + 8
+      ) {
         nextMode = 'root';
+        highlightEl = smartHdr;
+        highlightClass = 'aq-grp-drag-root';
       }
     }
 
     if (!nextMode) {
       const tree = buildGroupTreeIndex(state.groups);
       const dragHeight = getGroupSubtreeHeight(tree.childrenByParent, dragId);
-      const blocks = panel.querySelectorAll('[data-aq-grp-block]');
+      const bodyEl = panel.querySelector('.aq-grp-body');
+      const bodyRect = bodyEl?.getBoundingClientRect?.();
+      const topWrap = panel.querySelector('.aq-grp-top-wrap') || panel;
+      const tRect = topWrap.getBoundingClientRect();
+      const inHoriz =
+        tRect.width > 0 && clientX >= tRect.left - 8 && clientX <= tRect.right + 8;
+      const inBodyVert =
+        !bodyRect || bodyRect.height <= 0
+          ? true
+          : clientY >= bodyRect.top - 2 && clientY <= bodyRect.bottom + 2;
+
       let bestBlock = null;
       let bestDepth = -1;
-      for (let i = 0; i < blocks.length; i++) {
-        const b = blocks[i];
-        const bRect = b.getBoundingClientRect();
-        if (bRect.height <= 0) continue;
-        if (clientY >= bRect.top - 2 && clientY <= bRect.bottom + 2 && clientX >= bRect.left - 8 && clientX <= bRect.right + 8) {
-          const depth = Number.parseInt(b.getAttribute('data-aq-grp-depth') || '0', 10) || 0;
-          if (depth >= bestDepth) {
-            bestDepth = depth;
-            bestBlock = b;
+      if (inHoriz && inBodyVert) {
+        const blocks = panel.querySelectorAll('[data-aq-grp-block]');
+        for (let i = 0; i < blocks.length; i++) {
+          const b = blocks[i];
+          const bRect = b.getBoundingClientRect();
+          if (bRect.height <= 0) continue;
+          if (
+            clientY >= bRect.top - 1 &&
+            clientY <= bRect.bottom + 1 &&
+            clientX >= bRect.left - 8 &&
+            clientX <= bRect.right + 8
+          ) {
+            const depth = Number.parseInt(b.getAttribute('data-aq-grp-depth') || '0', 10) || 0;
+            if (depth >= bestDepth) {
+              bestDepth = depth;
+              bestBlock = b;
+            }
           }
         }
       }
 
       if (bestBlock) {
         const targetId = bestBlock.getAttribute('data-aq-grp-block') || '';
-        if (targetId && targetId !== dragId && !isGroupDescendant(state.groups, dragId, targetId)) {
+        if (targetId && targetId === (dragGrp.parentId || '')) {
+          // Pointer is inside the dragged subfolder's own expanded parent folder:
+          // allow mixed sorting with sibling conversations/subfolders without ejecting out to outer level
+          const ownPeers = getDirectPeerDescriptors(bestBlock);
+          const fromPeerIdx = ownPeers.findIndex((p) => p.token === `g:${dragId}`);
+          const parentHdr = bestBlock.querySelector(':scope > [data-aq-grp-hdr]');
+          const phRect = parentHdr?.getBoundingClientRect?.();
+          if (phRect && phRect.height > 0 && clientY <= phRect.bottom) {
+            const rel = (clientY - phRect.top) / phRect.height;
+            const ownParentGrp = tree.byId.get(targetId);
+            const outerParentId = ownParentGrp?.parentId || '';
+            const outerParentDepth = outerParentId ? (tree.depthById.get(outerParentId) ?? 0) : -1;
+            const canPullBeforeParent = outerParentDepth + 1 + dragHeight < MAX_GROUP_DEPTH;
+            if (rel <= 0.5 && canPullBeforeParent) {
+              nextMode = 'before';
+              nextTargetId = targetId;
+              highlightEl = bestBlock;
+              highlightClass = 'aq-grp-drag-before';
+            } else if (rel > 0.5 && ownPeers.length >= 2 && fromPeerIdx > 0) {
+              const firstPeer = ownPeers[0];
+              nextMode = 'before';
+              highlightEl = firstPeer.el;
+              if (firstPeer.kind === 'group') {
+                nextTargetId = firstPeer.id;
+                highlightClass = 'aq-grp-drag-before';
+              } else {
+                nextTargetCid = firstPeer.id;
+                highlightClass = 'aq-grp-item-drag-before';
+              }
+            }
+          } else {
+            const peerHit = resolvePeerInsertHit(ownPeers, fromPeerIdx, clientY);
+            if (peerHit) {
+              nextMode = peerHit.mode;
+              highlightEl = peerHit.peer.el;
+              if (peerHit.peer.kind === 'group') {
+                nextTargetId = peerHit.peer.id;
+                highlightClass =
+                  peerHit.mode === 'before' ? 'aq-grp-drag-before' : 'aq-grp-drag-after';
+              } else {
+                nextTargetCid = peerHit.peer.id;
+                highlightClass =
+                  peerHit.mode === 'before' ? 'aq-grp-item-drag-before' : 'aq-grp-item-drag-after';
+              }
+            }
+          }
+        } else if (targetId && targetId !== dragId && !isGroupDescendant(state.groups, dragId, targetId)) {
           const targetDepth = tree.depthById.get(targetId) ?? 0;
-          const canNestInside = targetDepth + 1 + dragHeight < MAX_GROUP_DEPTH;
+          const canNestInside =
+            (dragGrp.parentId || '') !== targetId && targetDepth + 1 + dragHeight < MAX_GROUP_DEPTH;
+          const targetGrp = tree.byId.get(targetId);
+          const targetParentId = targetGrp?.parentId || '';
+          const targetParentDepth = targetParentId ? (tree.depthById.get(targetParentId) ?? 0) : -1;
+          const canBeSibling = targetParentDepth + 1 + dragHeight < MAX_GROUP_DEPTH;
+          const sameParent = (dragGrp.parentId || '') === targetParentId;
+          let fromSibIdx = -1;
+          let toSibIdx = -1;
+          if (sameParent) {
+            if (targetParentId) {
+              const parentGrp = tree.byId.get(targetParentId);
+              const peerTokens = getNormalizedGroupChildTokens(
+                parentGrp,
+                tree.childrenByParent.get(targetParentId) || []
+              );
+              fromSibIdx = peerTokens.indexOf(`g:${dragId}`);
+              toSibIdx = peerTokens.indexOf(`g:${targetId}`);
+            } else {
+              const rootSiblings = tree.childrenByParent.get('') || [];
+              fromSibIdx = rootSiblings.findIndex((g) => g.id === dragId);
+              toSibIdx = rootSiblings.findIndex((g) => g.id === targetId);
+            }
+          }
+          const isBeforeNoop = sameParent && fromSibIdx >= 0 && toSibIdx === fromSibIdx + 1;
+          const isAfterNoop = sameParent && fromSibIdx >= 0 && toSibIdx === fromSibIdx - 1;
+
           const hdr = bestBlock.querySelector(':scope > [data-aq-grp-hdr]');
           const hRect = hdr?.getBoundingClientRect?.();
-          let mode = 'after';
+          let mode = '';
           if (hRect && hRect.height > 0 && clientY <= hRect.bottom) {
             const rel = (clientY - hRect.top) / hRect.height;
-            if (rel <= (canNestInside ? 0.34 : 0.5)) {
+            if (!canNestInside) {
+              if (isBeforeNoop) {
+                mode = rel >= 0.22 ? 'after' : '';
+              } else if (isAfterNoop) {
+                mode = rel <= 0.78 ? 'before' : '';
+              } else {
+                mode = rel <= 0.5 ? 'before' : 'after';
+              }
+            } else if (isBeforeNoop) {
+              if (rel >= 0.55) mode = 'after';
+              else if (rel >= 0.18) mode = 'inside';
+            } else if (isAfterNoop) {
+              if (rel <= 0.45) mode = 'before';
+              else if (rel <= 0.82) mode = 'inside';
+            } else if (rel <= 0.32) {
               mode = 'before';
-            } else if (canNestInside && rel < 0.66) {
+            } else if (rel < 0.68) {
               mode = 'inside';
             } else {
               mode = 'after';
             }
+          } else if (!isAfterNoop) {
+            mode = 'after';
           }
-          const targetGrp = tree.byId.get(targetId);
-          const targetParentDepth = targetGrp?.parentId ? (tree.depthById.get(targetGrp.parentId) ?? 0) : -1;
-          if ((mode === 'before' || mode === 'after') && targetParentDepth + 1 + dragHeight >= MAX_GROUP_DEPTH) {
+
+          if ((mode === 'before' || mode === 'after') && !canBeSibling) {
             mode = canNestInside ? 'inside' : '';
           }
           if (mode) {
-            bestBlock.classList.add(
+            nextMode = mode;
+            nextTargetId = targetId;
+            highlightEl = bestBlock;
+            highlightClass =
               mode === 'inside'
                 ? 'aq-grp-drag-inside'
                 : mode === 'before'
                   ? 'aq-grp-drag-before'
-                  : 'aq-grp-drag-after'
-            );
-            nextMode = mode;
-            nextTargetId = targetId;
+                  : 'aq-grp-drag-after';
+          }
+        }
+      } else if (
+        inHoriz &&
+        tRect.height > 0 &&
+        clientY >= tRect.top - 6 &&
+        clientY <= tRect.bottom + 8 &&
+        dragHeight < MAX_GROUP_DEPTH
+      ) {
+        const topBlocks = bodyEl ? [...bodyEl.querySelectorAll(':scope > [data-aq-grp-block]')] : [];
+        if (topBlocks.length > 0) {
+          const firstBlock = topBlocks[0];
+          const firstId = firstBlock.getAttribute('data-aq-grp-block') || '';
+          const fRect = firstBlock.getBoundingClientRect();
+          const lastBlock = topBlocks[topBlocks.length - 1];
+          const lastId = lastBlock.getAttribute('data-aq-grp-block') || '';
+          const lRect = lastBlock.getBoundingClientRect();
+          if (fRect.height > 0 && clientY < fRect.top && firstId && firstId !== dragId) {
+            nextMode = 'before';
+            nextTargetId = firstId;
+            highlightEl = firstBlock;
+            highlightClass = 'aq-grp-drag-before';
+          } else if (lRect.height > 0 && clientY > lRect.bottom && lastId && lastId !== dragId) {
+            nextMode = 'after';
+            nextTargetId = lastId;
+            highlightEl = lastBlock;
+            highlightClass = 'aq-grp-drag-after';
           }
         }
       }
     }
 
+    // 2. Write DOM classes in one batch
+    panel
+      .querySelectorAll(
+        '.aq-grp-drag-before, .aq-grp-drag-after, .aq-grp-drag-inside, .aq-grp-drag-root, .aq-grp-item-drag-before, .aq-grp-item-drag-after'
+      )
+      .forEach((el) =>
+        el.classList.remove(
+          'aq-grp-drag-before',
+          'aq-grp-drag-after',
+          'aq-grp-drag-inside',
+          'aq-grp-drag-root',
+          'aq-grp-item-drag-before',
+          'aq-grp-item-drag-after'
+        )
+      );
+    if (highlightEl && highlightClass) {
+      highlightEl.classList.add(highlightClass);
+    }
+
     d.folderDragMode = nextMode;
     d.folderTargetId = nextTargetId;
+    d.folderTargetCid = nextTargetCid;
 
     let badgeText = '';
     if (nextMode === 'root') {
       badgeText = '移至顶层';
+    } else if (nextTargetCid && dragGrp.parentId) {
+      const pGrp = state.groups.find((g) => g.id === dragGrp.parentId);
+      const tItem = pGrp?.items?.find(
+        (it) => String(it.cascadeId || '').toLowerCase() === nextTargetCid.toLowerCase()
+      );
+      const rawTitle = String(tItem?.title || '').trim();
+      const shortTitle = rawTitle.length > 5 ? `${rawTitle.slice(0, 4)}…` : rawTitle;
+      badgeText = shortTitle
+        ? `移到 ${shortTitle} ${nextMode === 'before' ? '前' : '后'}`
+        : nextMode === 'before'
+          ? '移至上方'
+          : '移至下方';
     } else if (nextTargetId) {
       const tGrp = state.groups.find((g) => g.id === nextTargetId);
       if (tGrp?.name) {
+        const shortName = tGrp.name.length > 6 ? `${tGrp.name.slice(0, 5)}…` : tGrp.name;
         badgeText =
           nextMode === 'inside'
-            ? `放入 ${tGrp.name}`
+            ? `放入 ${shortName}`
             : nextMode === 'before'
-              ? `移到 ${tGrp.name} 前`
-              : `移到 ${tGrp.name} 后`;
+              ? `移到 ${shortName} 前`
+              : `移到 ${shortName} 后`;
       }
     }
 
@@ -8337,6 +10621,7 @@
     ghost.style.left = `${left}px`;
     ghost.style.top = `${top}px`;
     ghost.classList.add('is-visible');
+    if (didScroll) scheduleConvDragAutoScrollTick();
   }
 
   function updateConversationDragTarget(clientX, clientY) {
@@ -8353,12 +10638,16 @@
       d.overPanel = false;
       d.overGroupId = '';
       d.overEmptyPanel = false;
+      d.itemDropMode = '';
+      d.itemTargetCid = '';
+      d.itemTargetGroupId = '';
       document.body.classList.remove('aq-dragging-to-group');
       const ghost = document.getElementById('aq-conv-drag-ghost');
       if (ghost) ghost.classList.remove('is-visible');
       return;
     }
 
+    // 1. Read layout bounds BEFORE mutating classes to avoid forced synchronous reflow
     const pRect = panel.getBoundingClientRect();
     const inPanel =
       pRect.width > 0 &&
@@ -8367,6 +10656,8 @@
       clientX <= pRect.right + 8 &&
       clientY >= pRect.top - 4 &&
       clientY <= pRect.bottom + 4;
+
+    const didScroll = inPanel ? autoScrollGroupsBodyOnDrag(panel, clientY) : false;
 
     const topWrap = panel.querySelector('.aq-grp-top-wrap') || panel;
     const tRect = topWrap.getBoundingClientRect();
@@ -8378,78 +10669,162 @@
       clientY >= tRect.top - 4 &&
       clientY <= tRect.bottom + 4;
 
-    if (d.mode === 'native-row') {
-      document.body.classList.toggle('aq-dragging-to-group', inPanel);
-    }
+    const bodyEl = panel.querySelector('.aq-grp-body');
+    const bodyRect = bodyEl?.getBoundingClientRect?.();
+    const inGroupsBody =
+      inTopArea &&
+      (!bodyRect || bodyRect.height <= 0 || (clientY >= bodyRect.top - 2 && clientY <= bodyRect.bottom + 2));
 
-    let hitGroupId = '';
-    if (inPanel) {
-      const hdrs = panel.querySelectorAll('[data-aq-grp-hdr]');
-      for (let i = 0; i < hdrs.length; i++) {
-        const h = hdrs[i];
-        const hRect = h.getBoundingClientRect();
-        if (hRect.height <= 0) continue;
-        if (clientY >= hRect.top && clientY <= hRect.bottom) {
-          hitGroupId = h.getAttribute('data-aq-grp-hdr') || '';
-          break;
-        }
-      }
-      if (!hitGroupId) {
-        const blocks = panel.querySelectorAll('[data-aq-grp-block]');
-        let bestDepth = -1;
-        for (let i = 0; i < blocks.length; i++) {
-          const b = blocks[i];
-          const bRect = b.getBoundingClientRect();
-          if (bRect.height <= 0) continue;
-          if (clientY >= bRect.top && clientY <= bRect.bottom) {
-            const depth = Number.parseInt(b.getAttribute('data-aq-grp-depth') || '0', 10) || 0;
-            if (depth >= bestDepth) {
-              bestDepth = depth;
-              hitGroupId = b.getAttribute('data-aq-grp-block') || '';
-            }
+    const allBlocks = panel.querySelectorAll('[data-aq-grp-block]');
+    let rawHitGroupId = '';
+    if (inGroupsBody) {
+      let bestDepth = -1;
+      for (let i = 0; i < allBlocks.length; i++) {
+        const b = allBlocks[i];
+        const bRect = b.getBoundingClientRect();
+        if (bRect.height <= 0) continue;
+        if (clientY >= bRect.top - 1 && clientY <= bRect.bottom + 1) {
+          const depth = Number.parseInt(b.getAttribute('data-aq-grp-depth') || '0', 10) || 0;
+          if (depth >= bestDepth) {
+            bestDepth = depth;
+            rawHitGroupId = b.getAttribute('data-aq-grp-block') || '';
           }
         }
       }
+    }
 
-      // Hovering over any collapsed folder auto-expands it so users can inspect or drop inside
-      const hitGrp = hitGroupId ? state.groups.find((g) => g.id === hitGroupId) : null;
-      if (hitGrp && hitGrp.collapsed) {
-        if (state.convDragHoverGroupId !== hitGrp.id) {
-          if (state.convDragHoverGroupTimer) clearTimeout(state.convDragHoverGroupTimer);
-          state.convDragHoverGroupId = hitGrp.id;
-          state.convDragHoverGroupTimer = setTimeout(() => {
-            state.convDragHoverGroupTimer = null;
-            const gid = state.convDragHoverGroupId;
-            state.convDragHoverGroupId = '';
-            if (state.convDrag?.started && gid) {
-              const latest = state.groups.find((g) => g.id === gid);
-              if (latest?.collapsed) {
-                sendGroupAction({ type: 'toggle-collapse', groupId: gid });
-              }
-            }
-          }, 350);
+    let hitGroupId = rawHitGroupId;
+    let nextItemDropMode = '';
+    let nextItemTargetCid = '';
+    let nextItemTargetGroupId = '';
+    let pickedEl = null;
+    let pickedClass = '';
+
+    if (d.mode === 'group-item' && d.sourceGroupId && inGroupsBody) {
+      let sourceBlock = null;
+      for (let i = 0; i < allBlocks.length; i++) {
+        if (allBlocks[i].getAttribute('data-aq-grp-block') === d.sourceGroupId) {
+          sourceBlock = allBlocks[i];
+          break;
         }
-      } else {
-        if (state.convDragHoverGroupTimer) {
-          clearTimeout(state.convDragHoverGroupTimer);
-          state.convDragHoverGroupTimer = null;
-        }
-        state.convDragHoverGroupId = '';
       }
+      const ownPeers = getDirectPeerDescriptors(sourceBlock);
+      const dragCidLower = String(d.item?.cascadeId || '').toLowerCase();
+      const fromPeerIdx = ownPeers.findIndex((p) => p.token === `c:${dragCidLower}`);
 
-      if (d.mode === 'group-item' && hitGroupId && hitGroupId === d.sourceGroupId) {
+      if (rawHitGroupId === d.sourceGroupId) {
         hitGroupId = '';
+        const peerHit = resolvePeerInsertHit(ownPeers, fromPeerIdx, clientY);
+        if (peerHit) {
+          nextItemDropMode = peerHit.mode;
+          pickedEl = peerHit.peer.el;
+          if (peerHit.peer.kind === 'group') {
+            nextItemTargetGroupId = peerHit.peer.id;
+            pickedClass =
+              peerHit.mode === 'before' ? 'aq-grp-drag-before' : 'aq-grp-drag-after';
+          } else {
+            nextItemTargetCid = peerHit.peer.id;
+            pickedClass =
+              peerHit.mode === 'before' ? 'aq-grp-item-drag-before' : 'aq-grp-item-drag-after';
+          }
+        }
+      } else if (rawHitGroupId) {
+        const subPeerIdx = ownPeers.findIndex(
+          (p) => p.kind === 'group' && p.id === rawHitGroupId
+        );
+        if (subPeerIdx >= 0) {
+          const subBlock = ownPeers[subPeerIdx].el;
+          const subHdr = subBlock.querySelector(':scope > [data-aq-grp-hdr]');
+          const shRect = subHdr?.getBoundingClientRect?.();
+          const sbRect = subBlock.getBoundingClientRect();
+          const isBeforeNoop = fromPeerIdx >= 0 && subPeerIdx === fromPeerIdx + 1;
+          const isAfterNoop = fromPeerIdx >= 0 && subPeerIdx === fromPeerIdx - 1;
+          let subMode = 'inside';
+
+          if (shRect && shRect.height > 0 && clientY <= shRect.bottom) {
+            const rel = (clientY - shRect.top) / shRect.height;
+            if (isBeforeNoop) {
+              if (rel >= 0.62) subMode = 'after';
+              else if (rel >= 0.18) subMode = 'inside';
+              else subMode = '';
+            } else if (isAfterNoop) {
+              if (rel <= 0.38) subMode = 'before';
+              else if (rel <= 0.82) subMode = 'inside';
+              else subMode = '';
+            } else if (rel <= 0.3) {
+              subMode = 'before';
+            } else if (rel < 0.7) {
+              subMode = 'inside';
+            } else {
+              subMode = 'after';
+            }
+          } else if (!isAfterNoop && sbRect.height > 0 && clientY >= sbRect.bottom - 8) {
+            subMode = 'after';
+          }
+
+          if (subMode === 'before' || subMode === 'after') {
+            hitGroupId = '';
+            nextItemDropMode = subMode;
+            nextItemTargetGroupId = rawHitGroupId;
+            pickedEl = subBlock;
+            pickedClass = subMode === 'before' ? 'aq-grp-drag-before' : 'aq-grp-drag-after';
+          } else if (subMode !== 'inside') {
+            hitGroupId = '';
+          }
+        }
+      }
+    }
+
+    // Hovering over any collapsed target folder auto-expands it so users can inspect or drop inside
+    const hitGrp = hitGroupId ? state.groups.find((g) => g.id === hitGroupId) : null;
+    if (inGroupsBody && hitGrp && hitGrp.collapsed) {
+      if (state.convDragHoverGroupId !== hitGrp.id) {
+        if (state.convDragHoverGroupTimer) clearTimeout(state.convDragHoverGroupTimer);
+        state.convDragHoverGroupId = hitGrp.id;
+        state.convDragHoverGroupTimer = setTimeout(() => {
+          state.convDragHoverGroupTimer = null;
+          const gid = state.convDragHoverGroupId;
+          state.convDragHoverGroupId = '';
+          if (state.convDrag?.started && gid) {
+            const latest = state.groups.find((g) => g.id === gid);
+            if (latest?.collapsed) {
+              sendGroupAction({ type: 'toggle-collapse', groupId: gid });
+            }
+          }
+        }, 350);
       }
     } else if (state.convDragHoverGroupTimer) {
       clearTimeout(state.convDragHoverGroupTimer);
       state.convDragHoverGroupTimer = null;
       state.convDragHoverGroupId = '';
+    } else {
+      state.convDragHoverGroupId = '';
     }
 
-    panel.querySelectorAll('[data-aq-grp-block]').forEach((b) => {
+    // 2. Write DOM classes in one batch
+    if (d.mode === 'native-row' && document.body.classList.contains('aq-dragging-to-group') !== inPanel) {
+      document.body.classList.toggle('aq-dragging-to-group', inPanel);
+    }
+    panel
+      .querySelectorAll(
+        '.aq-grp-drag-before, .aq-grp-drag-after, .aq-grp-item-drag-before, .aq-grp-item-drag-after'
+      )
+      .forEach((el) =>
+        el.classList.remove(
+          'aq-grp-drag-before',
+          'aq-grp-drag-after',
+          'aq-grp-item-drag-before',
+          'aq-grp-item-drag-after'
+        )
+      );
+    if (pickedEl && pickedClass) {
+      pickedEl.classList.add(pickedClass);
+    }
+    for (let i = 0; i < allBlocks.length; i++) {
+      const b = allBlocks[i];
       const gid = b.getAttribute('data-aq-grp-block') || '';
       b.classList.toggle('aq-grp-drop-target', Boolean(hitGroupId && gid === hitGroupId));
-    });
+    }
 
     const overEmptyPanel = Boolean(inTopArea && state.groups.length === 0 && !state.groupCreating);
     panel.classList.toggle('aq-grp-panel-drop-target', overEmptyPanel);
@@ -8457,16 +10832,41 @@
     d.overPanel = inPanel;
     d.overGroupId = hitGroupId;
     d.overEmptyPanel = overEmptyPanel;
+    d.itemDropMode = nextItemDropMode;
+    d.itemTargetCid = nextItemTargetCid;
+    d.itemTargetGroupId = nextItemTargetGroupId;
 
     const showGhost = Boolean(d.switchedFromProjects || d.mode === 'group-item' || inPanel);
     const ghost = ensureConvDragGhostEl();
     if (!showGhost) {
       ghost.classList.remove('is-visible');
+      if (didScroll) scheduleConvDragAutoScrollTick();
       return;
     }
 
     let badgeText = '';
-    if (hitGroupId) {
+    if (nextItemDropMode && nextItemTargetGroupId) {
+      const tGrp = state.groups.find((g) => g.id === nextItemTargetGroupId);
+      const rawName = String(tGrp?.name || '').trim();
+      const shortName = rawName.length > 6 ? `${rawName.slice(0, 5)}…` : rawName;
+      badgeText = shortName
+        ? `移到 ${shortName} ${nextItemDropMode === 'before' ? '前' : '后'}`
+        : nextItemDropMode === 'before'
+          ? '移至上方'
+          : '移至下方';
+    } else if (nextItemDropMode && nextItemTargetCid) {
+      const sourceGrp = state.groups.find((g) => g.id === d.sourceGroupId);
+      const tItem = sourceGrp?.items?.find(
+        (it) => String(it.cascadeId || '').toLowerCase() === nextItemTargetCid.toLowerCase()
+      );
+      const rawTitle = String(tItem?.title || '').trim();
+      const shortTitle = rawTitle.length > 5 ? `${rawTitle.slice(0, 4)}…` : rawTitle;
+      badgeText = shortTitle
+        ? `移到 ${shortTitle} ${nextItemDropMode === 'before' ? '前' : '后'}`
+        : nextItemDropMode === 'before'
+          ? '移至上方'
+          : '移至下方';
+    } else if (hitGroupId) {
       const targetGrp = state.groups.find((g) => g.id === hitGroupId);
       if (targetGrp?.name) {
         badgeText = `${d.mode === 'group-item' ? '移至' : '加入'} ${targetGrp.name}`;
@@ -8489,6 +10889,7 @@
     ghost.style.left = `${left}px`;
     ghost.style.top = `${top}px`;
     ghost.classList.add('is-visible');
+    if (didScroll) scheduleConvDragAutoScrollTick();
   }
 
   const SMART_EXIT_GRACE_MS = 1200;
@@ -9012,6 +11413,11 @@
           ? '删除分组及全部子分组'
           : '删除分组';
 
+      const totalCount = tree.totalCountById.get(g.id) ?? items.length;
+      const collapsedCountHtml = !isExpanded
+        ? `<span class="aq-grp-count" data-aq-grp-count="${escapeHtml(g.id)}" title="共 ${totalCount} 个会话">${totalCount}</span>`
+        : '';
+
       const hdrHtml = isRenaming
         ? `
           <div class="aq-grp-inline-form" data-aq-grp-rename-form="${escapeHtml(g.id)}">
@@ -9024,6 +11430,7 @@
           <div class="aq-grp-hdr ${isDeleteConfirm ? 'has-confirm' : ''}" data-aq-grp-hdr="${escapeHtml(g.id)}" title="${escapeHtml(g.name)}">
             <span class="aq-grp-folder-ico ${isExpanded ? 'is-open' : ''}">${isExpanded ? SVG_FOLDER_OPEN : SVG_FOLDER}</span>
             <span class="aq-grp-name">${escapeHtml(g.name)}</span>
+            ${collapsedCountHtml}
             <span class="aq-grp-actions">
               ${newChildBtnHtml}
               <button type="button" class="aq-grp-icon-btn" data-aq-grp-rename="${escapeHtml(g.id)}" title="重命名分组">${SVG_EDIT}</button>
@@ -9035,33 +11442,48 @@
       let childrenHtml = '';
       if (isExpanded) {
         const childCreateHtml = isCreatingChildHere ? buildCreateFormHtml('输入子分组名称') : '';
-        const subGroupsHtml = childGroups.map((cg) => renderGroupBlock(cg, depth + 1)).join('');
-        const itemsListHtml = items
-          .map((it) => {
-            const cidLower = String(it.cascadeId || '').toLowerCase();
-            const isActive = activeCid && cidLower === activeCid;
-            const status = convStatuses[cidLower] || '';
-            const statusHtml = renderConvStatusBadgeHtml(status);
-            const tipText = it.project ? `${it.title} · ${it.project}` : it.title;
-            return `
-              <div class="aq-grp-item ${isActive ? 'is-active' : ''}" data-aq-grp-open="${escapeHtml(it.cascadeId)}" data-aq-grp-gid="${escapeHtml(g.id)}" data-aq-status="${escapeHtml(status)}" data-aq-project="${escapeHtml(it.project || '')}" title="${escapeHtml(tipText)}">
-                <div class="aq-grp-item-main">
-                  <span class="aq-grp-item-title">${escapeHtml(it.title)}</span>
-                  ${renderConvProjectSubHtml(it.project)}
-                </div>
-                ${statusHtml}
-                <span class="aq-grp-item-actions">
-                  <button type="button" class="aq-grp-icon-btn" data-aq-grp-item-rm="${escapeHtml(it.cascadeId)}" data-aq-grp-gid="${escapeHtml(g.id)}" title="移出此分组">${SVG_CLOSE}</button>
-                </span>
+        const renderItemRow = (it) => {
+          const cidLower = String(it.cascadeId || '').toLowerCase();
+          const isActive = activeCid && cidLower === activeCid;
+          const status = convStatuses[cidLower] || '';
+          const statusHtml = renderConvStatusBadgeHtml(status);
+          const tipText = it.project ? `${it.title} · ${it.project}` : it.title;
+          return `
+            <div class="aq-grp-item ${isActive ? 'is-active' : ''}" data-aq-grp-open="${escapeHtml(it.cascadeId)}" data-aq-grp-gid="${escapeHtml(g.id)}" data-aq-status="${escapeHtml(status)}" data-aq-project="${escapeHtml(it.project || '')}" title="${escapeHtml(tipText)}">
+              <div class="aq-grp-item-main">
+                <span class="aq-grp-item-title">${escapeHtml(it.title)}</span>
+                ${renderConvProjectSubHtml(it.project)}
               </div>
-            `;
+              ${statusHtml}
+              <span class="aq-grp-item-actions">
+                <button type="button" class="aq-grp-icon-btn" data-aq-grp-item-rm="${escapeHtml(it.cascadeId)}" data-aq-grp-gid="${escapeHtml(g.id)}" title="移出此分组">${SVG_CLOSE}</button>
+              </span>
+            </div>
+          `;
+        };
+        const subById = new Map(childGroups.map((cg) => [cg.id, cg]));
+        const itemByKey = new Map(
+          items.map((it) => [String(it.cascadeId || '').toLowerCase(), it])
+        );
+        const childTokens = getNormalizedGroupChildTokens(g, childGroups);
+        const mixedChildrenHtml = childTokens
+          .map((tok) => {
+            if (tok.startsWith('g:')) {
+              const sg = subById.get(tok.slice(2));
+              return sg ? renderGroupBlock(sg, depth + 1) : '';
+            }
+            if (tok.startsWith('c:')) {
+              const it = itemByKey.get(tok.slice(2));
+              return it ? renderItemRow(it) : '';
+            }
+            return '';
           })
           .join('');
         const emptyHtml =
           !isCreatingChildHere && childGroups.length === 0 && items.length === 0
             ? '<div class="aq-grp-item-empty">暂无对话</div>'
             : '';
-        childrenHtml = `<div class="aq-grp-children">${childCreateHtml}${subGroupsHtml}${itemsListHtml}${emptyHtml}</div>`;
+        childrenHtml = `<div class="aq-grp-children">${childCreateHtml}${mixedChildrenHtml}${emptyHtml}</div>`;
       }
 
       return `<div class="aq-grp-block" data-aq-grp-block="${escapeHtml(g.id)}" data-aq-grp-depth="${depth}">${hdrHtml}${childrenHtml}</div>`;
@@ -9082,7 +11504,7 @@
       '<div class="aq-grp-resizer" data-aq-grp-resizer="1" title="上下拖动设置分组最大高度，双击恢复默认"><span class="aq-grp-resizer-badge" data-aq-grp-resizer-badge="1"></span></div>';
     const recentSectionHtml = `
       <div class="aq-grp-recent-sec" data-aq-recent-sec="1">
-        <div class="aq-grp-hdr is-smart" data-aq-recent-hdr="1" title="最近会话（最多 10 条，点击可收起/展开）">
+        <div class="aq-grp-hdr is-smart" data-aq-recent-hdr="1" title="最近会话（按最后发消息时间排序，最多 10 条，点击可收起/展开）">
           <span class="aq-grp-name">最近会话</span>
           <span class="aq-grp-fold-hint" data-aq-recent-fold-hint="1"></span>
         </div>
@@ -9118,6 +11540,47 @@
     if (prevScrollTop > 0) {
       const nextBody = panel.querySelector('.aq-grp-body');
       if (nextBody) nextBody.scrollTop = prevScrollTop;
+    }
+
+    if (state.convDrag?.started) {
+      const d = state.convDrag;
+      if (d.mode === 'group-folder' && d.sourceGroupId) {
+        const allBlocks = panel.querySelectorAll('[data-aq-grp-block]');
+        for (let i = 0; i < allBlocks.length; i++) {
+          if (allBlocks[i].getAttribute('data-aq-grp-block') === d.sourceGroupId) {
+            d.sourceEl = allBlocks[i];
+            d.sourceEl.classList.add('is-dragging');
+            break;
+          }
+        }
+      } else if (d.mode === 'group-item' && d.sourceGroupId && d.item?.cascadeId) {
+        const cidLower = String(d.item.cascadeId).toLowerCase();
+        const allItems = panel.querySelectorAll('.aq-grp-item[data-aq-grp-gid]');
+        for (let i = 0; i < allItems.length; i++) {
+          if (
+            allItems[i].getAttribute('data-aq-grp-gid') === d.sourceGroupId &&
+            String(allItems[i].getAttribute('data-aq-grp-open') || '').toLowerCase() === cidLower
+          ) {
+            d.sourceEl = allItems[i];
+            d.sourceEl.classList.add('is-dragging');
+            break;
+          }
+        }
+      } else if (d.mode === 'native-row' && !d.switchedFromProjects && d.item?.cascadeId) {
+        const cidLower = String(d.item.cascadeId).toLowerCase();
+        const smartAndRecent = panel.querySelectorAll('[data-aq-grp-open]:not([data-aq-grp-gid])');
+        for (let i = 0; i < smartAndRecent.length; i++) {
+          if (
+            String(smartAndRecent[i].getAttribute('data-aq-grp-open') || '').toLowerCase() ===
+            cidLower
+          ) {
+            d.sourceEl = smartAndRecent[i];
+            d.sourceEl.classList.add('is-dragging');
+            break;
+          }
+        }
+      }
+      updateConversationDragTarget(d.lastX, d.lastY);
     }
 
     if (state.groupCreating) {
@@ -9814,6 +12277,7 @@
     const cid = extractCascadeId();
     if (cid !== state.cascadeId) {
       state.cascadeId = cid;
+      stopLiveTurnTimer();
       if (!cid) {
         state.turnsPayload = null;
       } else {
@@ -9875,8 +12339,28 @@
     if (runSidebar) {
       ensureSidebarGroupsPanel();
     }
-    if (runTurns) {
-      renderTurnUsageLines();
+    if (runTurns || runChip) {
+      const sharedCid = extractCascadeId();
+      const ts = state.thinkingTranslate;
+      const needTurnRows =
+        runTurns ||
+        Boolean(
+          ts.open ||
+            ts.btnEl ||
+            ts.hostEl ||
+            isActiveComposerBusy() ||
+            (sharedCid && hasActiveConversationAsyncWork(sharedCid.toLowerCase()))
+        );
+      const sharedTurnEls = needTurnRows ? findTurnRows() : [];
+      const sharedLiveCtx = needTurnRows
+        ? evaluateConversationLiveTurnContext(sharedCid, sharedTurnEls)
+        : null;
+      if (runTurns) {
+        renderTurnUsageLines(sharedCid, sharedTurnEls, sharedLiveCtx);
+      }
+      if (needTurnRows) {
+        renderRunningThinkingHelper(sharedCid, sharedTurnEls, sharedLiveCtx);
+      }
     }
     if (runMenus) {
       syncNativeConversationMenus();
@@ -9957,6 +12441,8 @@
       const lastTurn = turns.length > 0 ? turns[turns.length - 1] : null;
       const lastCompleted = lastTurn ? Boolean(lastTurn.completed) : true;
       const prevCompleted = state.lastTurnCompleted;
+      const prevTurnCount =
+        sameChat && Array.isArray(state.turnsPayload?.turns) ? state.turnsPayload.turns.length : 0;
       const activitySig = `${cid}|${turns.length}|${totalTokens}|${totalCalls}`;
       const activityChanged = Boolean(sameChat && activitySig !== state.lastTurnActivitySig);
       state.lastTurnsCid = cid;
@@ -9964,15 +12450,27 @@
       state.lastTurnCompleted = lastCompleted;
       state.turnsPayload = nextPayload;
       state.turnsRenderSeq += 1;
+      let newTurnAdded = false;
       if (cid && activityChanged) {
-        const meta = state.trajMetaById[cid.toLowerCase()];
+        const cidLower = cid.toLowerCase();
+        const now = Date.now();
+        if (prevTurnCount > 0 && turns.length > prevTurnCount) {
+          newTurnAdded = true;
+          state.localUserInputAtById[cidLower] = Math.max(
+            state.localUserInputAtById[cidLower] || 0,
+            now
+          );
+          schedulePostSendTrajectoryRefreshes([500]);
+        }
+        const meta = state.trajMetaById[cidLower];
         if (meta) {
-          const now = Date.now();
           meta.lastModifiedMs = Math.max(meta.lastModifiedMs || 0, now);
-          meta.lastOperatedMs = Math.max(meta.lastOperatedMs || 0, now);
+          if (newTurnAdded) {
+            meta.lastUserInputMs = Math.max(meta.lastUserInputMs || 0, now);
+          }
         }
       }
-      scheduleRender({ turns: true, chip: true });
+      scheduleRender({ turns: true, chip: true, sidebar: newTurnAdded });
       if (sameChat && !document.hidden) {
         if (lastCompleted && (activityChanged || !prevCompleted)) {
           scheduleQuotaForceRefresh(1500);
@@ -10074,8 +12572,165 @@
     } catch {}
   };
 
+  window.__aqResolveThinkingTranslate = function (payload) {
+    try {
+      if (state.disposed) return;
+      const ts = state.thinkingTranslate;
+      if (payload?.resetClientSig) {
+        ts.lastUploadedClientSig = '';
+      }
+      const cid = String(payload?.cascadeId || '');
+      const activeCid = extractCascadeId();
+      if (!cid || cid !== activeCid || !ts.open) return;
+
+      const reqId = String(payload?.requestId || '');
+      if (!reqId || reqId !== ts.requestId) return;
+
+      const turnEls = findTurnRows();
+      const liveCtx = evaluateConversationLiveTurnContext(cid, turnEls);
+      if (!liveCtx.running) {
+        resetThinkingTranslateState();
+        return;
+      }
+
+      const prevStepIdx = ts.stepIdx;
+      const prevCount = ts.thinkingCount;
+      ts.loading = false;
+      ts.switchingSource = false;
+
+      if (payload?.unchanged) {
+        if (Number.isInteger(payload.stepIdx) && payload.stepIdx >= 0) ts.stepIdx = payload.stepIdx;
+        if (Number(payload.thinkingCount) > 0) ts.thinkingCount = Number(payload.thinkingCount);
+      } else if (payload?.ok && payload?.onlyOriginal) {
+        ts.empty = false;
+        ts.stepIdx = Number.isInteger(payload.stepIdx) ? payload.stepIdx : -1;
+        ts.thinkingCount = Number(payload.thinkingCount || 0);
+        ts.hasOriginal = true;
+        if (typeof payload.sourceText === 'string') {
+          ts.sourceText = payload.sourceText;
+        }
+      } else if (payload?.ok) {
+        ts.error = '';
+        ts.errorRetryAfter = 0;
+        ts.empty = false;
+        ts.stepIdx = Number.isInteger(payload.stepIdx) ? payload.stepIdx : -1;
+        ts.thinkingCount = Number(payload.thinkingCount || 0);
+        ts.activeSourcePref = sanitizeClientThinkingSource(payload.sourcePref || state.thinkingSourcePref);
+        ts.hasOriginal = Boolean(payload.hasOriginal);
+        ts.sourceText = String(payload.sourceText || '');
+        ts.translatedText = String(payload.translatedText || '');
+        ts.translatedSourceText = ts.sourceText;
+        ts.providerLabel = String(payload.providerLabel || '');
+      } else {
+        ts.empty = Boolean(payload?.empty);
+        ts.error = String(payload?.error || '翻译失败');
+        ts.errorRetryAfter = ts.empty ? 0 : Date.now() + 8000;
+        ts.hasOriginal = Boolean(payload?.hasOriginal);
+        if (typeof payload?.sourceText === 'string' && payload.sourceText) {
+          ts.sourceText = payload.sourceText;
+        }
+        if (Number(payload?.thinkingCount) > 0) {
+          ts.thinkingCount = Number(payload.thinkingCount);
+        }
+      }
+
+      renderRunningThinkingHelper(cid, turnEls, liveCtx);
+      if (
+        !payload?.unchanged &&
+        payload?.ok &&
+        ts.cardParts?.bodyEl &&
+        ((ts.stepIdx >= 0 && ts.stepIdx !== prevStepIdx) || ts.thinkingCount !== prevCount)
+      ) {
+        ts.cardParts.bodyEl.scrollTop = 0;
+      }
+    } catch {}
+  };
+
   window.__aqRenderUiPrefs = function (payload) {
     try {
+      if (payload && typeof payload === 'object' && 'aiKeyConfigured' in payload) {
+        const prevConfigured = Boolean(state.aiConfigMeta?.configured);
+        const prevKey = state.aiConfigMeta?.apiKey || '';
+        const prevModel = state.aiConfigMeta?.model || '';
+        const prevEndpoint = state.aiConfigMeta?.endpoint || '';
+        state.aiConfigMeta = {
+          configured: Boolean(payload.aiKeyConfigured),
+          apiKey: String(payload.aiApiKey || ''),
+          hasEnvKey: Boolean(payload.hasEnvAiKey),
+          source: String(payload.aiKeySource || ''),
+          endpoint: String(payload.aiEndpoint || ''),
+          model: String(payload.aiModel || ''),
+        };
+        if (
+          payload.aiSavedRequestId &&
+          payload.aiSavedRequestId === state.keySettingsRequestId
+        ) {
+          if (state.keySettingsTimer) {
+            clearTimeout(state.keySettingsTimer);
+            state.keySettingsTimer = null;
+          }
+          if (payload.aiSaveError) {
+            state.keySettingsSaving = false;
+            state.keySettingsRequestId = '';
+            const modalEl = document.getElementById('aq-key-settings-modal');
+            const saveBtn = modalEl?.querySelector?.('[data-aq-ks-save]');
+            if (saveBtn) {
+              saveBtn.disabled = false;
+              saveBtn.textContent = '保存';
+            }
+            const errEl = modalEl?.querySelector?.('[data-aq-ks-err]');
+            if (errEl) {
+              errEl.textContent = String(payload.aiSaveError);
+              errEl.hidden = false;
+            }
+          } else {
+            closeKeySettingsModal();
+          }
+        } else if (state.keySettingsOpen) {
+          const modalEl = document.getElementById('aq-key-settings-modal');
+          const keyIn = modalEl?.querySelector?.('[data-aq-ks-key]');
+          if (keyIn && !keyIn.getAttribute('data-aq-dirty')) {
+            keyIn.value = state.aiConfigMeta.apiKey;
+            keyIn.setAttribute(
+              'placeholder',
+              !state.aiConfigMeta.apiKey && state.aiConfigMeta.hasEnvKey
+                ? '当前正使用环境变量 Key，填写后优先使用此处配置'
+                : '粘贴智谱 BigModel 或 OpenAI 兼容 API Key'
+            );
+          }
+          const modelIn = modalEl?.querySelector?.('[data-aq-ks-model]');
+          if (modelIn && !modelIn.getAttribute('data-aq-dirty')) {
+            modelIn.value = state.aiConfigMeta.model;
+          }
+          const epIn = modalEl?.querySelector?.('[data-aq-ks-endpoint]');
+          if (epIn && !epIn.getAttribute('data-aq-dirty')) {
+            epIn.value = state.aiConfigMeta.endpoint;
+          }
+        }
+        const aiChanged =
+          prevConfigured !== state.aiConfigMeta.configured ||
+          prevKey !== state.aiConfigMeta.apiKey ||
+          prevModel !== state.aiConfigMeta.model ||
+          prevEndpoint !== state.aiConfigMeta.endpoint;
+        if (aiChanged && state.thinkingTranslate.open && !state.thinkingTranslate.showOriginal) {
+          state.thinkingTranslate.switchingSource = true;
+          triggerLatestThinkingTranslate({ force: true });
+        }
+      }
+      if (payload && typeof payload.thinkingTranslateSource === 'string') {
+        const nextThinkingSrc = sanitizeClientThinkingSource(payload.thinkingTranslateSource);
+        if (nextThinkingSrc !== state.thinkingSourcePref) {
+          saveClientThinkingSourcePref(nextThinkingSrc, { notifyDaemon: false });
+          if (state.thinkingTranslate.open) {
+            if (!state.thinkingTranslate.showOriginal) {
+              state.thinkingTranslate.switchingSource = true;
+              triggerLatestThinkingTranslate({ force: true, explicitSource: nextThinkingSrc });
+            } else {
+              syncThinkingHelperDomContent();
+            }
+          }
+        }
+      }
       const mode =
         payload?.convWidthMode === 'full'
           ? 'full'
@@ -10139,7 +12794,9 @@
         state.groupCreating = false;
       }
       ensureSidebarGroupsPanel();
-      renderSidebarGroupsPanel(true);
+      if (state.groupsError) {
+        renderSidebarGroupsPanel(true);
+      }
       renderGroupMenuContent();
       refreshOpenNativeMenuFolders();
       if (state.pendingUnpinCascadeIds.size > 0) {
@@ -10202,7 +12859,7 @@
   injectStyles();
 
   const SELF_MUTATION_IGNORE_SELECTOR =
-    '[data-aq-turn-usage], [data-aq-native-menu-ext], [data-aq-proj-card], [data-aq-row-grp-btn], .aq-conv-width-resizer, #aq-context-chip, #aq-quota-chip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-batch-wake-panel, #aq-batch-toast, #aq-turn-tooltip, #aq-sidebar-tabs, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost';
+    '[data-aq-turn-usage], [data-aq-thinking-btn], [data-aq-thinking-card], [data-aq-native-menu-ext], [data-aq-proj-card], [data-aq-row-grp-btn], .aq-conv-width-resizer, #aq-context-chip, #aq-quota-chip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-key-settings-modal, #aq-batch-wake-panel, #aq-batch-toast, #aq-turn-tooltip, #aq-sidebar-tabs, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost';
 
   const POPUP_CHROME_SELECTOR = [
     '.settings-modal-container',
@@ -10305,6 +12962,7 @@
           dirtyI18nSidebar = true;
         } else if (el.closest?.('#antigravity\\.agentSidePanelInputBox')) {
           dirtyChip = true;
+          dirtyTurns = true;
           dirtyI18n = true;
         } else if (el.closest?.('[data-testid="conversation-view"]')) {
           dirtyTurns = true;
@@ -10366,13 +13024,16 @@
   };
   const onPopState = () => checkRoute();
   const onVisChange = () => {
-    if (!document.hidden) {
-      checkRoute();
-      if (!state.quotaData || Date.now() - state.quotaForceFetchedAt >= 10_000) {
-        void fetchQuota({ force: true });
-      }
-      void refreshTrajectoryMetadata(false, 5_000);
+    if (document.hidden) {
+      stopLiveTurnTimer();
+      return;
     }
+    checkRoute();
+    scheduleRender({ turns: true });
+    if (!state.quotaData || Date.now() - state.quotaForceFetchedAt >= 10_000) {
+      void fetchQuota({ force: true });
+    }
+    void refreshTrajectoryMetadata(false, 5_000);
   };
   const recordNativeMenuTargetFromEvent = (ev) => {
     const row = ev.target?.closest?.('[data-testid="conversation-row-sidebar"][data-cascade-id]');
@@ -10691,7 +13352,16 @@
     const dropOnEmptyPanel = d.overEmptyPanel;
     const folderMode = d.folderDragMode;
     const folderTargetId = d.folderTargetId;
-    const droppedInGroupTarget = Boolean(targetGroupId || dropOnEmptyPanel);
+    const folderTargetCid = d.folderTargetCid;
+    const itemDropMode = d.itemDropMode;
+    const itemTargetCid = d.itemTargetCid;
+    const itemTargetGroupId = d.itemTargetGroupId;
+    const droppedInGroupTarget = Boolean(
+      targetGroupId ||
+        dropOnEmptyPanel ||
+        (itemDropMode && (itemTargetCid || itemTargetGroupId)) ||
+        (folderMode && (folderTargetId || folderTargetCid || folderMode === 'root'))
+    );
     if (d.switchedFromProjects && droppedInGroupTarget) {
       saveSidebarTab('groups');
     }
@@ -10704,6 +13374,26 @@
       if (folderMode === 'root') {
         state.groupsError = '';
         sendGroupAction({ type: 'move-group', groupId: d.sourceGroupId, parentId: '' });
+      } else if ((folderMode === 'before' || folderMode === 'after') && folderTargetCid) {
+        const srcGrp = state.groups.find((g) => g.id === d.sourceGroupId);
+        const parentId = srcGrp?.parentId || '';
+        if (parentId) {
+          state.groupsError = '';
+          applyOptimisticChildReorder(
+            parentId,
+            `g:${d.sourceGroupId}`,
+            `c:${folderTargetCid.toLowerCase()}`,
+            folderMode
+          );
+          sendGroupAction({
+            type: 'move-group',
+            groupId: d.sourceGroupId,
+            parentId,
+            ...(folderMode === 'before'
+              ? { beforeCascadeId: folderTargetCid }
+              : { afterCascadeId: folderTargetCid }),
+          });
+        }
       } else if (
         folderTargetId &&
         folderTargetId !== d.sourceGroupId &&
@@ -10713,11 +13403,37 @@
         if (folderMode === 'inside') {
           sendGroupAction({ type: 'move-group', groupId: d.sourceGroupId, parentId: folderTargetId });
         } else if (folderMode === 'before' || folderMode === 'after') {
+          const srcGrp = state.groups.find((g) => g.id === d.sourceGroupId);
           const targetGrp = state.groups.find((g) => g.id === folderTargetId);
+          const nextParentId = targetGrp?.parentId || '';
+          if (nextParentId && (srcGrp?.parentId || '') === nextParentId) {
+            applyOptimisticChildReorder(
+              nextParentId,
+              `g:${d.sourceGroupId}`,
+              `g:${folderTargetId}`,
+              folderMode
+            );
+          } else if (!nextParentId && !(srcGrp?.parentId || '')) {
+            const fromIdx = state.groups.findIndex((g) => g.id === d.sourceGroupId);
+            if (fromIdx >= 0) {
+              const moving = state.groups[fromIdx];
+              const without = state.groups.filter((_, idx) => idx !== fromIdx);
+              const tIdx = without.findIndex((g) => g.id === folderTargetId);
+              if (tIdx >= 0) {
+                without.splice(folderMode === 'before' ? tIdx : tIdx + 1, 0, moving);
+                if (without.some((g, idx) => g.id !== state.groups[idx]?.id)) {
+                  state.groups = without;
+                  state.cachedGroupsRef = null;
+                  state.cachedGroupedCids = null;
+                  renderSidebarGroupsPanel(false);
+                }
+              }
+            }
+          }
           sendGroupAction({
             type: 'move-group',
             groupId: d.sourceGroupId,
-            parentId: targetGrp?.parentId || '',
+            parentId: nextParentId,
             ...(folderMode === 'before'
               ? { beforeGroupId: folderTargetId }
               : { afterGroupId: folderTargetId }),
@@ -10754,7 +13470,31 @@
       state.suppressGroupClickUntil = Date.now() + 200;
       ev.preventDefault();
       ev.stopPropagation();
-      if (targetGroupId && targetGroupId !== d.sourceGroupId) {
+      if (itemDropMode && (itemTargetCid || itemTargetGroupId) && d.sourceGroupId) {
+        state.groupsError = '';
+        const dragLower = String(d.item?.cascadeId || '').toLowerCase();
+        const anchorToken = itemTargetGroupId
+          ? `g:${itemTargetGroupId}`
+          : `c:${itemTargetCid.toLowerCase()}`;
+        applyOptimisticChildReorder(
+          d.sourceGroupId,
+          `c:${dragLower}`,
+          anchorToken,
+          itemDropMode
+        );
+        sendGroupAction({
+          type: 'reorder-items',
+          groupId: d.sourceGroupId,
+          cascadeId: d.item.cascadeId,
+          ...(itemTargetGroupId
+            ? itemDropMode === 'before'
+              ? { beforeGroupId: itemTargetGroupId }
+              : { afterGroupId: itemTargetGroupId }
+            : itemDropMode === 'before'
+              ? { beforeCascadeId: itemTargetCid }
+              : { afterCascadeId: itemTargetCid }),
+        });
+      } else if (targetGroupId && targetGroupId !== d.sourceGroupId) {
         state.groupsError = '';
         sendGroupAction({
           type: 'move-item',
@@ -10824,13 +13564,15 @@
         ev.stopPropagation();
       }
       if (state.convDrag?.started) {
-        const wasGroupItem = state.convDrag.mode === 'group-item';
+        const wasGroupDrag =
+          state.convDrag.mode === 'group-item' || state.convDrag.mode === 'group-folder';
         cleanupConversationPointerDrag();
-        if (wasGroupItem) {
+        if (wasGroupDrag) {
           ev.preventDefault();
           ev.stopPropagation();
         }
       }
+      if (state.keySettingsOpen) closeKeySettingsModal();
       if (state.quotaTooltipPinned) closeQuotaTooltip();
       if (state.groupMenuTarget) closeGroupMenu();
     }
@@ -10886,6 +13628,8 @@
     state.convDragRaf = 0;
     for (const tid of state.historyTimers) clearTimeout(tid);
     state.historyTimers.clear();
+    stopLiveTurnTimer();
+    if (state.postSendTurnsTimer) clearTimeout(state.postSendTurnsTimer);
     if (state.routeTimer) clearInterval(state.routeTimer);
     if (state.trajStatusTimer) clearInterval(state.trajStatusTimer);
     if (state.quotaTimer) clearInterval(state.quotaTimer);
@@ -10910,6 +13654,7 @@
     if (state.convWidthDragRaf) cancelAnimationFrame(state.convWidthDragRaf);
     if (state.optimisticExpiryTimer) clearTimeout(state.optimisticExpiryTimer);
     if (state.keepAliveDeadlineTimer) clearTimeout(state.keepAliveDeadlineTimer);
+    if (state.keySettingsTimer) clearTimeout(state.keySettingsTimer);
     try {
       clearPostSendRefreshTimers();
     } catch {}
@@ -10958,12 +13703,15 @@
     });
     document.querySelectorAll('.aq-conv-width-resizer').forEach((el) => el.remove());
     state.optimisticRunningById.clear();
+    state.turnConfirmedPeakMsByKey.clear();
+    state.nonDaemonBgTaskCids.clear();
     state.keepAliveClaims.clear();
     state.keepAliveRunningPools.clear();
     state.hiddenKeepAliveCids.clear();
     state.smartStableMap.clear();
     state.trajMetaById = Object.create(null);
     state.localViewedAtById = Object.create(null);
+    state.localUserInputAtById = Object.create(null);
     state.groups = [];
     state.accounts = [];
     state.turnsPayload = null;
@@ -10984,6 +13732,7 @@
     document.getElementById('aq-quota-chip')?.remove();
     document.getElementById('aq-context-tooltip')?.remove();
     document.getElementById('aq-quota-tooltip')?.remove();
+    closeKeySettingsModal();
     document.getElementById('aq-acct-quota-tooltip')?.remove();
     document.getElementById('aq-batch-wake-panel')?.remove();
     document.getElementById('aq-batch-toast')?.remove();
@@ -11015,6 +13764,7 @@
     document.querySelectorAll('[data-aq-native-menu-ext]').forEach((el) => el.remove());
     document.querySelectorAll('[data-aq-menu-open]').forEach((el) => el.removeAttribute('data-aq-menu-open'));
     document.querySelectorAll('[data-aq-turn-usage]').forEach((el) => el.remove());
+    resetThinkingTranslateState();
     if (window.__aq_active_token === INSTANCE_TOKEN) {
       delete window.__aq_active_token;
       delete window.__aqRenderTurns;
@@ -11023,6 +13773,7 @@
       delete window.__aqRenderUpdate;
       delete window.__aqRenderKeepAlive;
       delete window.__aqResolveKeepAliveClaim;
+      delete window.__aqResolveThinkingTranslate;
       delete window.__aqRenderBatchKeepAlive;
       delete window.__aqRenderUiPrefs;
       delete window.__aqRenderGroups;

@@ -99,6 +99,11 @@ function readTimestampSec(buf) {
   return Number.isFinite(val) && val > 0 ? val : 0;
 }
 
+function isActiveStepStatus(status) {
+  const s = Number(status);
+  return s === 1 || s === 2 || s === 4;
+}
+
 function extractStepMaxTimestampSec(metaMap) {
   let maxTs = 0;
   for (const field of [8, 32, 7, 6, 1]) {
@@ -134,7 +139,7 @@ function extractStepCallDetails(stepIds, stepByIdx) {
           const startTs = readTimestampSec(m.get(7)) || readTimestampSec(m.get(6));
           const endTs = readTimestampSec(m.get(8)) || readTimestampSec(m.get(32));
           const durationMs =
-            Number(step.status) !== 1 && startTs > 0 && endTs >= startTs
+            !isActiveStepStatus(step.status) && startTs > 0 && endTs >= startTs
               ? Math.round((endTs - startTs) * 1000)
               : null;
           toolCalls.push({ toolName, durationMs });
@@ -244,7 +249,7 @@ function aggregateTurnSlice({
     const s = allSteps[i];
     const idx = Number(s.idx);
     stepByIdx.set(idx, s);
-    if (idx >= lastUserIdx && Number(s.status) === 1) {
+    if (idx >= lastUserIdx && isActiveStepStatus(s.status)) {
       lastTurnRunning = true;
     }
   }
@@ -272,6 +277,7 @@ function aggregateTurnSlice({
     streamDurationMs: 0,
     streamTokens: 0,
     totalDurationMs: 0,
+    startTsMs: null,
     wallDurationMs: null,
     firstTokenLatencyMs: null,
     outputSpeed: null,
@@ -287,12 +293,21 @@ function aggregateTurnSlice({
     if (localIdx < 0 || localIdx >= turnWallBounds.length) continue;
     const m = parseProto(s.metadata);
     const bounds = turnWallBounds[localIdx];
-    if (Number(s.step_type) === 14 && bounds.startTsSec === 0) {
+    const stepType = Number(s.step_type);
+    if (stepType === 14 && bounds.startTsSec === 0) {
       bounds.startTsSec = readTimestampSec(m.get(1)) || readTimestampSec(m.get(6)) || 0;
     }
-    const stepMaxTs = extractStepMaxTimestampSec(m);
-    if (stepMaxTs > bounds.endTsSec) {
-      bounds.endTsSec = stepMaxTs;
+    if (
+      stepType === 14 ||
+      stepType === 15 ||
+      stepType === 101 ||
+      stepType === 132 ||
+      isActiveStepStatus(s.status)
+    ) {
+      const stepMaxTs = extractStepMaxTimestampSec(m);
+      if (stepMaxTs > bounds.endTsSec) {
+        bounds.endTsSec = stepMaxTs;
+      }
     }
   }
 
@@ -423,8 +438,11 @@ function aggregateTurnSlice({
       turn.outputSpeed = turn.streamTokens / (turn.streamDurationMs / 1000);
     }
     const bounds = turnWallBounds[i];
-    if (bounds.startTsSec > 0 && bounds.endTsSec >= bounds.startTsSec) {
-      turn.wallDurationMs = Math.round((bounds.endTsSec - bounds.startTsSec) * 1000);
+    if (bounds.startTsSec > 0) {
+      turn.startTsMs = Math.round(bounds.startTsSec * 1000);
+      if (bounds.endTsSec >= bounds.startTsSec) {
+        turn.wallDurationMs = Math.round((bounds.endTsSec - bounds.startTsSec) * 1000);
+      }
     }
   }
 
@@ -515,7 +533,7 @@ export function parseConversationTurns(dbPath, cascadeId = '', { prevPayload = n
       }
       if (prefixMatches) {
         const hasEarlierRunning = db
-          .prepare('SELECT 1 FROM steps WHERE idx < ? AND status = 1 LIMIT 1')
+          .prepare('SELECT 1 FROM steps WHERE idx < ? AND status IN (1, 2, 4) LIMIT 1')
           .get(prevMeta.tailStartIdx);
         const curFrozenGenCount =
           prevMeta.maxFrozenGenIdx >= 0
@@ -546,7 +564,7 @@ export function parseConversationTurns(dbPath, cascadeId = '', { prevPayload = n
           if (!genSpillsBeforeTail) {
             const tailSteps = db
               .prepare(
-                `SELECT ${selectCols.join(', ')} FROM steps WHERE idx >= ? AND (step_type IN (14, 15, 132) OR status = 1) ORDER BY idx ASC`
+                `SELECT ${selectCols.join(', ')} FROM steps WHERE idx >= ? AND (step_type IN (14, 15, 101, 132) OR status IN (1, 2, 4)) ORDER BY idx ASC`
               )
               .all(prevMeta.tailStartIdx);
             const tailUserIndices = userStepIndices.slice(prevMeta.frozenCount);
@@ -585,7 +603,7 @@ export function parseConversationTurns(dbPath, cascadeId = '', { prevPayload = n
 
     const allSteps = db
       .prepare(
-        `SELECT ${selectCols.join(', ')} FROM steps WHERE step_type IN (14, 15, 132) OR status = 1 ORDER BY idx ASC`
+        `SELECT ${selectCols.join(', ')} FROM steps WHERE step_type IN (14, 15, 101, 132) OR status IN (1, 2, 4) ORDER BY idx ASC`
       )
       .all();
     const genRows = db.prepare('SELECT idx, data FROM gen_metadata ORDER BY idx ASC').all();
@@ -634,4 +652,95 @@ export function parseConversationTurns(dbPath, cascadeId = '', { prevPayload = n
 export function resolveConversationDbPath(cascadeId, conversationsDir) {
   if (!cascadeId || !UUID_RE.test(cascadeId) || !conversationsDir) return '';
   return path.join(conversationsDir, `${cascadeId}.db`);
+}
+
+function hasNonWhitespaceUtf8Bytes(buf) {
+  if (!(buf instanceof Uint8Array) || buf.length === 0) return false;
+  if (buf.length > 64 && (buf[0] > 0x20 || buf[buf.length - 1] > 0x20)) {
+    return true;
+  }
+  return readUtf8(buf).trim().length > 0;
+}
+
+/**
+ * Extract the latest non-empty native thinking text in the current (last) turn
+ * from an Antigravity conversation SQLite database.
+ */
+export function extractLatestTurnThinking(dbPath) {
+  if (!dbPath || !fs.existsSync(dbPath)) {
+    return { found: false, thinkingCount: 0, reason: 'missing-db' };
+  }
+
+  let db = null;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true, timeout: 250 });
+    const stepCols = new Set(db.prepare('PRAGMA table_info(steps)').all().map((c) => c.name));
+    if (!stepCols.has('step_payload')) {
+      return { found: false, thinkingCount: 0, reason: 'unsupported-schema' };
+    }
+    const lastUserRow = db
+      .prepare('SELECT idx FROM steps WHERE step_type = 14 ORDER BY idx DESC LIMIT 1')
+      .get();
+    if (!lastUserRow) {
+      return { found: false, thinkingCount: 0, reason: 'no-turn' };
+    }
+    const turnStartStepIdx = Number(lastUserRow.idx);
+    const stmt = db.prepare(
+      'SELECT idx, status, step_payload FROM steps WHERE idx > ? AND step_type = 15 ORDER BY idx DESC'
+    );
+
+    let thinkingCount = 0;
+    let latest = null;
+    for (const row of stmt.iterate(turnStartStepIdx)) {
+      if (!(row.step_payload instanceof Uint8Array)) continue;
+      const sp = parseProto(row.step_payload);
+      const p20Raw = sp.get(20);
+      if (!(p20Raw instanceof Uint8Array)) continue;
+      const p20 = parseProto(p20Raw);
+      const rawField = p20.get(3);
+      if (!latest) {
+        const text = readUtf8(rawField).trim();
+        if (!text) continue;
+        thinkingCount += 1;
+        latest = {
+          stepIdx: Number(row.idx),
+          status: Number(row.status || 0),
+          text,
+        };
+      } else if (hasNonWhitespaceUtf8Bytes(rawField)) {
+        thinkingCount += 1;
+      }
+    }
+
+    if (!latest) {
+      return {
+        found: false,
+        turnStartStepIdx,
+        thinkingCount: 0,
+        reason: 'empty-thinking',
+      };
+    }
+
+    return {
+      found: true,
+      turnStartStepIdx,
+      stepIdx: latest.stepIdx,
+      status: latest.status,
+      thinkingCount,
+      text: latest.text,
+    };
+  } catch (err) {
+    const msg = String(err?.message || '');
+    return {
+      found: false,
+      thinkingCount: 0,
+      transientError: /locked|busy/i.test(msg),
+      reason: 'db-error',
+      error: msg,
+    };
+  } finally {
+    try {
+      db?.close();
+    } catch {}
+  }
 }

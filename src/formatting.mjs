@@ -38,8 +38,8 @@ export function formatDurationMs(value) {
 export function formatElapsedDuration(value) {
   const ms = Number(value);
   if (!Number.isFinite(ms) || ms <= 0) return null;
-  if (ms < 60_000) return formatDurationMs(ms);
-  const totalSec = Math.round(ms / 1_000);
+  const totalSec = Math.max(1, Math.round(ms / 1_000));
+  if (totalSec < 60) return `${totalSec}秒`;
   const hours = Math.floor(totalSec / 3600);
   const mins = Math.floor((totalSec % 3600) / 60);
   const secs = totalSec % 60;
@@ -126,18 +126,46 @@ export function formatPricingSourceNote(cost) {
   return baseLabel;
 }
 
-export function formatTurnSummary(turn) {
+export function resolveTurnElapsedMs(
+  turn,
+  { liveRunning = false, nowMs = 0, minWallDurationMs = 0 } = {}
+) {
+  if (!turn) return 0;
+  const recordedWallMs = Number(turn.wallDurationMs) > 0 ? Number(turn.wallDurationMs) : 0;
+  const floorWallMs = Math.max(
+    recordedWallMs,
+    Number(minWallDurationMs) > 0 ? Number(minWallDurationMs) : 0
+  );
+  if (liveRunning) {
+    const startMs = Number(turn.startTsMs);
+    const liveWallMs =
+      startMs > 0 && Number.isFinite(nowMs) && nowMs > startMs
+        ? Math.round(nowMs - startMs)
+        : 0;
+    const activeWallMs = Math.max(floorWallMs, liveWallMs);
+    if (activeWallMs > 0) return activeWallMs;
+  }
+  if (floorWallMs > 0) return floorWallMs;
+  const totalDurMs = Number(turn.totalDurationMs);
+  return Number.isFinite(totalDurMs) && totalDurMs > 0 ? totalDurMs : 0;
+}
+
+export function formatTurnSummary(turn, options = {}) {
+  const liveRunning = Boolean(options?.liveRunning);
+  const effectiveCompleted = liveRunning ? false : Boolean(turn?.completed);
+  const elapsedMs = resolveTurnElapsedMs(turn, options);
+  const elapsed = formatElapsedDuration(elapsedMs);
   if (!turn || Number(turn.totalTokens) <= 0) {
-    return turn?.completed
-      ? '本轮未获取到 Token 数据 · 价格无法计算'
+    if (effectiveCompleted) {
+      return '本轮未获取到 Token 数据 · 价格无法计算';
+    }
+    return elapsed
+      ? `本轮耗时 ${elapsed} · 等待 Token 数据 · 价格待计算`
       : '等待 Token 数据 · 价格待计算';
   }
   const cacheHit = formatCacheHitRate(turn.cachedInputTokens, turn.inputTokens);
   const firstToken = formatDurationMs(turn.firstTokenLatencyMs);
   const speed = formatRate(turn.outputSpeed);
-  const elapsedMs =
-    Number(turn.wallDurationMs) > 0 ? Number(turn.wallDurationMs) : Number(turn.totalDurationMs);
-  const elapsed = formatElapsedDuration(elapsedMs);
   const cost = turn.cost;
   const priceText = cost?.available ? `价格 ${formatCny(cost.totalCny)}` : '价格暂不可算';
 

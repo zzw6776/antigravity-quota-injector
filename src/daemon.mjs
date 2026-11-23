@@ -26,6 +26,7 @@ import {
   readConversationGroupsStore,
   removeConversationFromGroup,
   renameConversationGroup,
+  reorderConversationGroupItems,
   reorderConversationGroups,
   syncConversationMetadata,
   toggleConversationGroupCollapse,
@@ -42,12 +43,21 @@ import {
 } from './batch-keepalive.mjs';
 import { createKeepAliveManager } from './keepalive.mjs';
 import {
+  extractLatestTurnThinking,
   getDbSignature,
   parseConversationTurns,
   resolveConversationDbPath,
 } from './proto-metrics.mjs';
+import {
+  createThinkingTranslator,
+  normalizeThinkingTranslateSource,
+} from './thinking-translator.mjs';
 import { TokenPricingManager } from './token-pricing.mjs';
-import { readUiPrefsStore, updateConversationWidthPref } from './ui-prefs.mjs';
+import {
+  readUiPrefsStore,
+  updateConversationWidthPref,
+  updateThinkingSourcePref,
+} from './ui-prefs.mjs';
 
 function sendSystemNotification({ title = '', message = '' } = {}) {
   if (process.platform !== 'darwin' || process.env.NODE_TEST_CONTEXT) return;
@@ -153,19 +163,78 @@ export async function fetchCdpTargets(port) {
   }
 }
 
+const DEFAULT_USER_CONFIG = {
+  codexTheme: true,
+  zhUi: true,
+  antigravityExe: '',
+  aiApiKey: '',
+  aiEndpoint: '',
+  aiModel: '',
+  aiBriefPrompt: '',
+};
+
+export function maskSecretKey(rawKey) {
+  const clean = String(rawKey || '').trim();
+  if (!clean) return '';
+  if (clean.length <= 8) return `${clean.slice(0, 2)}****`;
+  return `${clean.slice(0, 4)}****${clean.slice(-4)}`;
+}
+
 export function readUserConfig(stateDir) {
   try {
     const cfgPath = path.join(stateDir, 'config.json');
-    if (!fs.existsSync(cfgPath)) return { codexTheme: true, zhUi: true, antigravityExe: '' };
+    if (!fs.existsSync(cfgPath)) {
+      return { ...DEFAULT_USER_CONFIG };
+    }
     const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
     return {
       codexTheme: parsed?.codexTheme !== false,
       zhUi: parsed?.zhUi !== false,
       antigravityExe: typeof parsed?.antigravityExe === 'string' ? parsed.antigravityExe.trim() : '',
+      aiApiKey: typeof parsed?.aiApiKey === 'string' ? parsed.aiApiKey.trim() : '',
+      aiEndpoint: typeof parsed?.aiEndpoint === 'string' ? parsed.aiEndpoint.trim() : '',
+      aiModel: typeof parsed?.aiModel === 'string' ? parsed.aiModel.trim() : '',
+      aiBriefPrompt: typeof parsed?.aiBriefPrompt === 'string' ? parsed.aiBriefPrompt.trim() : '',
     };
   } catch {
-    return { codexTheme: true, zhUi: true, antigravityExe: '' };
+    return { ...DEFAULT_USER_CONFIG };
   }
+}
+
+export function writeUserConfig(stateDir, patch = {}) {
+  if (!stateDir) return { ...DEFAULT_USER_CONFIG };
+  fs.mkdirSync(stateDir, { recursive: true });
+  const cfgPath = path.join(stateDir, 'config.json');
+  let rawObj = {};
+  try {
+    if (fs.existsSync(cfgPath)) {
+      const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        rawObj = { ...parsed };
+      }
+    }
+  } catch {}
+
+  const stringFields = ['aiApiKey', 'aiEndpoint', 'aiModel', 'aiBriefPrompt', 'antigravityExe'];
+  for (let i = 0; i < stringFields.length; i++) {
+    const key = stringFields[i];
+    if (Object.prototype.hasOwnProperty.call(patch, key)) {
+      const val = String(patch[key] ?? '').trim();
+      if (val) {
+        rawObj[key] = val;
+      } else {
+        delete rawObj[key];
+      }
+    }
+  }
+
+  const tmpPath = `${cfgPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2, 8)}.tmp`;
+  fs.writeFileSync(tmpPath, `${JSON.stringify(rawObj, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  if (process.platform !== 'win32') {
+    fs.chmodSync(tmpPath, 0o600);
+  }
+  fs.renameSync(tmpPath, cfgPath);
+  return readUserConfig(stateDir);
 }
 
 const CLIENT_SCRIPT_ASSETS = ['formatting.mjs', 'i18n-zh.mjs', 'codex-theme.css', 'client-inject.js'];
@@ -373,6 +442,14 @@ export async function runDaemon({
     ? createFollowAppController({ startupGraceMs, exitConfirmTicks })
     : null;
   const keepAliveManager = createKeepAliveManager({ stateDir: paths.stateDir });
+  const thinkingTranslator = createThinkingTranslator({
+    getAiConfig: () => ({
+      apiKey: userCfg.aiApiKey,
+      endpoint: userCfg.aiEndpoint,
+      model: userCfg.aiModel,
+      briefPrompt: userCfg.aiBriefPrompt,
+    }),
+  });
   const batchStore = createBatchKeepAliveStore();
   let batchDriverInFlight = false;
   const attached = new Map(); // targetId -> session state
@@ -586,9 +663,20 @@ export async function runDaemon({
   const pushUiPrefsToSession = async (session, extra = {}) => {
     if (!session?.client?.isOpen() || !session.hostConfirmed) return;
     const store = extra.store || readUiPrefsStore(paths.uiPrefsFile);
+    const envAiKey = String(process.env.AQ_AI_API_KEY || process.env.ZHIPU_API_KEY || '').trim();
+    const effectiveAiKey = userCfg.aiApiKey || envAiKey;
     const payload = {
       convWidthMode: store.convWidthMode,
       convMaxWidth: store.convMaxWidth,
+      thinkingTranslateSource: store.thinkingTranslateSource || 'auto',
+      aiKeyConfigured: Boolean(effectiveAiKey),
+      aiApiKey: userCfg.aiApiKey || '',
+      hasEnvAiKey: Boolean(envAiKey),
+      aiKeySource: userCfg.aiApiKey ? 'config' : envAiKey ? 'env' : '',
+      aiEndpoint: userCfg.aiEndpoint || '',
+      aiModel: userCfg.aiModel || '',
+      ...(extra.aiSavedRequestId ? { aiSavedRequestId: String(extra.aiSavedRequestId) } : {}),
+      ...(extra.aiSaveError ? { aiSaveError: String(extra.aiSaveError) } : {}),
     };
     try {
       await session.client.send('Runtime.evaluate', {
@@ -614,6 +702,7 @@ export async function runDaemon({
     }
     const type = String(msg?.type || '');
     if (type === 'get') {
+      userCfg = readUserConfig(paths.stateDir);
       await pushUiPrefsToSession(session);
       return;
     }
@@ -623,6 +712,258 @@ export async function runDaemon({
         width: msg?.width,
       });
       await pushUiPrefsToAllSessions({ store });
+      return;
+    }
+    if (type === 'set-thinking-source') {
+      const store = updateThinkingSourcePref(paths.uiPrefsFile, msg?.source);
+      await pushUiPrefsToAllSessions({ store });
+      return;
+    }
+    if (type === 'set-ai-config') {
+      const reqId = typeof msg?.requestId === 'string' ? msg.requestId : '';
+      const patch = {};
+      if (msg?.clearKey === true) {
+        patch.aiApiKey = '';
+      } else if (typeof msg?.apiKey === 'string') {
+        patch.aiApiKey = msg.apiKey.trim();
+      }
+      if (typeof msg?.endpoint === 'string') {
+        patch.aiEndpoint = msg.endpoint.trim();
+      }
+      if (typeof msg?.model === 'string') {
+        patch.aiModel = msg.model.trim();
+      }
+      try {
+        userCfg = writeUserConfig(paths.stateDir, patch);
+        for (const s of attached.values()) {
+          s.lastThinkingPushSig = '';
+        }
+        await pushUiPrefsToAllSessions({ aiSavedRequestId: reqId });
+      } catch (err) {
+        await pushUiPrefsToSession(session, {
+          aiSavedRequestId: reqId,
+          aiSaveError: String(err?.message || '保存本地配置失败'),
+        });
+      }
+    }
+  };
+
+  const thinkingDbCache = new Map();
+
+  const readCachedTurnThinking = (dbPath) => {
+    if (!dbPath) return { found: false, thinkingCount: 0 };
+    const sig = getDbSignature(dbPath);
+    if (!sig) return { found: false, thinkingCount: 0 };
+    const hit = thinkingDbCache.get(dbPath);
+    if (hit && hit.sig === sig) return hit.result;
+    const result = extractLatestTurnThinking(dbPath);
+    if (!result.transientError) {
+      if (thinkingDbCache.size >= 16 && !thinkingDbCache.has(dbPath)) {
+        const oldest = thinkingDbCache.keys().next().value;
+        if (oldest) thinkingDbCache.delete(oldest);
+      }
+      thinkingDbCache.set(dbPath, { sig, result });
+    }
+    return result;
+  };
+
+  const pushThinkingResultToSession = async (session, payload) => {
+    if (!session?.client?.isOpen() || !session.hostConfirmed) return;
+    try {
+      await session.client.send('Runtime.evaluate', {
+        expression: `window.__aqResolveThinkingTranslate && window.__aqResolveThinkingTranslate(${JSON.stringify(payload)})`,
+        returnByValue: false,
+      });
+    } catch {}
+  };
+
+  const handleThinkingAction = async (session, rawPayload) => {
+    if (!session) return;
+    let msg;
+    try {
+      msg = JSON.parse(String(rawPayload || '{}'));
+    } catch {
+      return;
+    }
+    const type = String(msg?.type || '');
+    if (type === 'close') {
+      session.latestThinkingReqId = '';
+      session.lastThinkingPushSig = '';
+      session.lastOriginalPushSig = '';
+      return;
+    }
+
+    if (type !== 'translate') return;
+    const requestId = String(msg?.requestId || '').trim();
+    const rawCid = String(msg?.cascadeId || session.activeCascadeId || '').trim();
+    const cascadeId = UUID_RE.test(rawCid) ? rawCid : '';
+    if (!requestId || !cascadeId) return;
+    session.latestThinkingReqId = requestId;
+
+    const clientInfo = msg?.clientThinking && typeof msg.clientThinking === 'object' ? msg.clientThinking : null;
+    let clientText = '';
+    let clientCacheMiss = false;
+    let clientStepIdx = Number.isInteger(clientInfo?.stepIdx) ? clientInfo.stepIdx : -1;
+    let clientCount =
+      Number.isInteger(clientInfo?.thinkingCount) && clientInfo.thinkingCount > 0
+        ? clientInfo.thinkingCount
+        : 0;
+
+    if (clientInfo?.sameSig) {
+      if (
+        session.lastClientThinking?.cascadeId === cascadeId &&
+        session.lastClientThinking.sig === String(clientInfo.sameSig)
+      ) {
+        clientText = session.lastClientThinking.text;
+        if (clientStepIdx < 0) clientStepIdx = session.lastClientThinking.stepIdx;
+        if (clientCount <= 0) clientCount = session.lastClientThinking.thinkingCount;
+      } else {
+        clientCacheMiss = true;
+      }
+    } else if (typeof clientInfo?.text === 'string' && clientInfo.text.trim()) {
+      clientText = clientInfo.text.trim();
+      session.lastClientThinking = {
+        cascadeId,
+        sig: String(clientInfo.sig || ''),
+        text: clientText,
+        stepIdx: clientStepIdx,
+        thinkingCount: clientCount,
+      };
+    }
+
+    const dbPath = resolveConversationDbPath(cascadeId, paths.conversationsDir);
+    const dbThinking = readCachedTurnThinking(dbPath);
+    const turnStartIdx = Number.isInteger(dbThinking.turnStartStepIdx) ? dbThinking.turnStartStepIdx : -1;
+    const validClientText =
+      turnStartIdx >= 0 && clientStepIdx >= 0 && clientStepIdx <= turnStartIdx ? '' : clientText;
+
+    let rawSource = '';
+    let stepIdx = -1;
+    let thinkingCount = 0;
+
+    if (dbThinking.found && validClientText) {
+      if (
+        clientStepIdx > dbThinking.stepIdx ||
+        (clientStepIdx === dbThinking.stepIdx && validClientText.length >= dbThinking.text.length) ||
+        (clientStepIdx < 0 && clientCount > dbThinking.thinkingCount)
+      ) {
+        rawSource = validClientText;
+        stepIdx = clientStepIdx >= 0 ? clientStepIdx : dbThinking.stepIdx;
+        thinkingCount = Math.max(clientCount, dbThinking.thinkingCount);
+      } else {
+        rawSource = dbThinking.text;
+        stepIdx = dbThinking.stepIdx;
+        thinkingCount = Math.max(dbThinking.thinkingCount, clientCount);
+      }
+    } else if (validClientText) {
+      rawSource = validClientText;
+      stepIdx = clientStepIdx;
+      thinkingCount = clientCount || 1;
+    } else if (dbThinking.found) {
+      rawSource = dbThinking.text;
+      stepIdx = dbThinking.stepIdx;
+      thinkingCount = dbThinking.thinkingCount;
+    }
+
+    const extraClientFlags = clientCacheMiss ? { resetClientSig: true } : {};
+
+    if (!rawSource) {
+      session.lastThinkingPushSig = '';
+      session.lastOriginalPushSig = '';
+      await pushThinkingResultToSession(session, {
+        requestId,
+        cascadeId,
+        ok: false,
+        empty: true,
+        error: '当前轮次暂未生成思考内容，正在等待实时刷新…',
+        ...extraClientFlags,
+      });
+      return;
+    }
+
+    const sourcePref = normalizeThinkingTranslateSource(msg?.source);
+    const onlyOriginal = Boolean(msg?.onlyOriginal);
+    const prep = thinkingTranslator.getEffectiveKey(rawSource, { source: sourcePref });
+    const origSig = `${cascadeId}|orig:${crypto.createHash('sha256').update(prep.text).digest('hex')}`;
+
+    if (onlyOriginal) {
+      if (!msg?.force && session.lastOriginalPushSig === origSig) {
+        await pushThinkingResultToSession(session, {
+          requestId,
+          cascadeId,
+          ok: true,
+          onlyOriginal: true,
+          unchanged: true,
+          stepIdx,
+          thinkingCount,
+          ...extraClientFlags,
+        });
+        return;
+      }
+      session.lastOriginalPushSig = origSig;
+      await pushThinkingResultToSession(session, {
+        requestId,
+        cascadeId,
+        ok: true,
+        onlyOriginal: true,
+        stepIdx,
+        thinkingCount,
+        sourceText: prep.text,
+        hasOriginal: true,
+        ...extraClientFlags,
+      });
+      return;
+    }
+
+    const pushSig = `${cascadeId}|${prep.effectiveKey}`;
+    if (!msg?.force && session.lastThinkingPushSig === pushSig) {
+      await pushThinkingResultToSession(session, {
+        requestId,
+        cascadeId,
+        ok: true,
+        unchanged: true,
+        stepIdx,
+        thinkingCount,
+        ...extraClientFlags,
+      });
+      return;
+    }
+
+    try {
+      const res = await thinkingTranslator.translate(rawSource, { source: sourcePref });
+      if (session.latestThinkingReqId !== requestId) return;
+      session.lastThinkingPushSig = `${cascadeId}|${res.effectiveKey || prep.effectiveKey}`;
+      session.lastOriginalPushSig =
+        res.sourceText === prep.text
+          ? origSig
+          : `${cascadeId}|orig:${crypto.createHash('sha256').update(res.sourceText).digest('hex')}`;
+      await pushThinkingResultToSession(session, {
+        requestId,
+        cascadeId,
+        ok: true,
+        stepIdx,
+        thinkingCount,
+        sourcePref,
+        sourceText: res.sourceText,
+        translatedText: res.translatedText,
+        hasOriginal: res.sourceText !== res.translatedText,
+        provider: res.provider,
+        providerLabel: res.providerLabel,
+        ...extraClientFlags,
+      });
+    } catch (err) {
+      if (session.latestThinkingReqId !== requestId) return;
+      await pushThinkingResultToSession(session, {
+        requestId,
+        cascadeId,
+        ok: false,
+        stepIdx,
+        thinkingCount,
+        sourceText: prep.text,
+        hasOriginal: Boolean(prep.text),
+        error: String(err?.message || '翻译请求失败'),
+        ...extraClientFlags,
+      });
     }
   };
 
@@ -1104,6 +1445,10 @@ export async function runDaemon({
         const store = addConversationToGroup(paths.groupsFile, {
           groupId: msg?.groupId,
           item: msg?.item,
+          beforeCascadeId: msg?.beforeCascadeId || '',
+          afterCascadeId: msg?.afterCascadeId || '',
+          beforeGroupId: msg?.beforeGroupId || '',
+          afterGroupId: msg?.afterGroupId || '',
         });
         await pushGroupsToAllSessions({ store });
         return;
@@ -1121,6 +1466,23 @@ export async function runDaemon({
           fromGroupId: msg?.fromGroupId,
           toGroupId: msg?.toGroupId,
           item: msg?.item,
+          beforeCascadeId: msg?.beforeCascadeId || '',
+          afterCascadeId: msg?.afterCascadeId || '',
+          beforeGroupId: msg?.beforeGroupId || '',
+          afterGroupId: msg?.afterGroupId || '',
+        });
+        await pushGroupsToAllSessions({ store });
+        return;
+      }
+      if (type === 'reorder-items') {
+        const store = reorderConversationGroupItems(paths.groupsFile, {
+          groupId: msg?.groupId,
+          cascadeId: msg?.cascadeId || '',
+          beforeCascadeId: msg?.beforeCascadeId || '',
+          afterCascadeId: msg?.afterCascadeId || '',
+          beforeGroupId: msg?.beforeGroupId || '',
+          afterGroupId: msg?.afterGroupId || '',
+          orderedCascadeIds: msg?.orderedCascadeIds,
         });
         await pushGroupsToAllSessions({ store });
         return;
@@ -1131,6 +1493,8 @@ export async function runDaemon({
           parentId: msg?.parentId || '',
           beforeGroupId: msg?.beforeGroupId || '',
           afterGroupId: msg?.afterGroupId || '',
+          beforeCascadeId: msg?.beforeCascadeId || '',
+          afterCascadeId: msg?.afterCascadeId || '',
         });
         await pushGroupsToAllSessions({ store });
         return;
@@ -1400,6 +1764,10 @@ export async function runDaemon({
       lastPushedCid: '',
       lastPushedRateSig: '',
       lastPushedRawTurns: null,
+      latestThinkingReqId: '',
+      lastThinkingPushSig: '',
+      lastOriginalPushSig: '',
+      lastClientThinking: null,
       evalScriptId: null,
     };
     attached.set(target.id, session);
@@ -1430,6 +1798,7 @@ export async function runDaemon({
     await client.send('Runtime.addBinding', { name: '__aqKeepAliveAction' });
     await client.send('Runtime.addBinding', { name: '__aqBatchKeepAliveAction' });
     await client.send('Runtime.addBinding', { name: '__aqUiPrefsAction' });
+    await client.send('Runtime.addBinding', { name: '__aqThinkingAction' });
 
     client.onBinding((params) => {
       if (params?.name === '__aqRequestTurns') {
@@ -1451,6 +1820,8 @@ export async function runDaemon({
         void handleBatchKeepAliveAction(session, params.payload);
       } else if (params?.name === '__aqUiPrefsAction') {
         void handleUiPrefsAction(session, params.payload);
+      } else if (params?.name === '__aqThinkingAction') {
+        void handleThinkingAction(session, params.payload);
       }
     });
 
@@ -1524,13 +1895,21 @@ export async function runDaemon({
         if (resolvedCid && resolvedCid !== session.activeCascadeId) {
           session.activeCascadeId = resolvedCid;
           session.lastPushedKey = '';
+          session.latestThinkingReqId = '';
+          session.lastThinkingPushSig = '';
+          session.lastOriginalPushSig = '';
+          session.lastClientThinking = null;
         }
         if (!pageState || pageState.v !== version) {
           session.lastPushedRawTurns = null;
+          session.lastThinkingPushSig = '';
+          session.lastOriginalPushSig = '';
           await session.client.send('Runtime.evaluate', { expression: script, returnByValue: false });
           await hydrateSession(session);
         } else if (!pageState.h) {
           session.lastPushedRawTurns = null;
+          session.lastThinkingPushSig = '';
+          session.lastOriginalPushSig = '';
           await hydrateSession(session);
         } else {
           await syncTurnsForSession(session, false, { skipCidProbe: Boolean(pageState?.v) });

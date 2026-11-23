@@ -139,6 +139,7 @@ function normalizeStore(parsed) {
       parentId: String(g.parentId || '').trim(),
       collapsed: Boolean(g.collapsed),
       items,
+      childOrder: Array.isArray(g.childOrder) ? g.childOrder : [],
     });
   }
 
@@ -152,6 +153,78 @@ function normalizeStore(parsed) {
     const depth = getGroupDepth(byId, g.id);
     if (depth < 0 || depth >= MAX_GROUP_DEPTH) {
       g.parentId = '';
+    }
+  }
+
+  const directSubIdsByParent = new Map();
+  for (const g of groups) {
+    if (!g.parentId) continue;
+    let list = directSubIdsByParent.get(g.parentId);
+    if (!list) {
+      list = [];
+      directSubIdsByParent.set(g.parentId, list);
+    }
+    list.push(g.id);
+  }
+
+  for (const g of groups) {
+    const subIds = directSubIdsByParent.get(g.id) || [];
+    const subIdSet = new Set(subIds);
+    const itemByKey = new Map(g.items.map((it) => [it.cascadeId.toLowerCase(), it]));
+    const nextOrder = [];
+    const seen = new Set();
+
+    for (const rawTok of g.childOrder) {
+      const tok = String(rawTok || '').trim();
+      if (tok.startsWith('g:')) {
+        const sid = tok.slice(2);
+        if (subIdSet.has(sid) && !seen.has(tok)) {
+          seen.add(tok);
+          nextOrder.push(tok);
+        }
+      } else if (tok.startsWith('c:')) {
+        const ckey = tok.slice(2).toLowerCase();
+        const canon = `c:${ckey}`;
+        if (itemByKey.has(ckey) && !seen.has(canon)) {
+          seen.add(canon);
+          nextOrder.push(canon);
+        }
+      }
+    }
+
+    for (const sid of subIds) {
+      const tok = `g:${sid}`;
+      if (!seen.has(tok)) {
+        seen.add(tok);
+        nextOrder.push(tok);
+      }
+    }
+    for (const ckey of itemByKey.keys()) {
+      const tok = `c:${ckey}`;
+      if (!seen.has(tok)) {
+        seen.add(tok);
+        nextOrder.push(tok);
+      }
+    }
+
+    g.childOrder = nextOrder;
+    g.items = nextOrder
+      .filter((tok) => tok.startsWith('c:'))
+      .map((tok) => itemByKey.get(tok.slice(2)))
+      .filter(Boolean);
+  }
+
+  for (const g of [...groups]) {
+    const orderedSubIds = g.childOrder
+      .filter((tok) => tok.startsWith('g:'))
+      .map((tok) => tok.slice(2));
+    if (orderedSubIds.length >= 2) {
+      let cursor = 0;
+      for (let i = 0; i < groups.length; i++) {
+        if (groups[i].parentId === g.id) {
+          groups[i] = byId.get(orderedSubIds[cursor++]);
+        }
+      }
     }
   }
 
@@ -267,7 +340,60 @@ export function toggleConversationGroupCollapse(filePath, { groupId = '', sectio
   return writeConversationGroupsStore(filePath, store);
 }
 
-export function addConversationToGroup(filePath, { groupId, item } = {}) {
+function resolveAnchorTokens({
+  beforeGroupId = '',
+  afterGroupId = '',
+  beforeCascadeId = '',
+  afterCascadeId = '',
+} = {}) {
+  const bGrp = String(beforeGroupId || '').trim();
+  const aGrp = String(afterGroupId || '').trim();
+  const bCid = String(beforeCascadeId || '').trim().toLowerCase();
+  const aCid = String(afterCascadeId || '').trim().toLowerCase();
+  const beforeToken = bGrp ? `g:${bGrp}` : bCid ? `c:${bCid}` : '';
+  const afterToken = !beforeToken ? (aGrp ? `g:${aGrp}` : aCid ? `c:${aCid}` : '') : '';
+  return { beforeToken, afterToken };
+}
+
+function placeTokenInChildOrder(
+  childOrder,
+  movingToken,
+  { isExisting = false, beforeToken = '', afterToken = '' } = {}
+) {
+  const list = Array.isArray(childOrder) ? childOrder.slice() : [];
+  const existingIdx = list.indexOf(movingToken);
+  const hasExplicitAnchor =
+    (beforeToken && beforeToken !== movingToken) || (afterToken && afterToken !== movingToken);
+
+  if ((isExisting || existingIdx >= 0) && !hasExplicitAnchor) {
+    if (existingIdx >= 0) return list;
+    list.push(movingToken);
+    return list;
+  }
+
+  const without = existingIdx >= 0 ? list.filter((t) => t !== movingToken) : list;
+  if (beforeToken && beforeToken !== movingToken) {
+    const tIdx = without.indexOf(beforeToken);
+    if (tIdx >= 0) {
+      without.splice(tIdx, 0, movingToken);
+      return without;
+    }
+  } else if (afterToken && afterToken !== movingToken) {
+    const tIdx = without.indexOf(afterToken);
+    if (tIdx >= 0) {
+      without.splice(tIdx + 1, 0, movingToken);
+      return without;
+    }
+  }
+
+  without.push(movingToken);
+  return without;
+}
+
+export function addConversationToGroup(
+  filePath,
+  { groupId, item, beforeCascadeId = '', afterCascadeId = '', beforeGroupId = '', afterGroupId = '' } = {}
+) {
   const id = String(groupId || '').trim();
   const normalizedItem = normalizeItem(item);
   if (!normalizedItem) {
@@ -278,19 +404,28 @@ export function addConversationToGroup(filePath, { groupId, item } = {}) {
   if (!target) {
     throw new Error('分组不存在');
   }
-  const idx = target.items.findIndex(
-    (it) => it.cascadeId.toLowerCase() === normalizedItem.cascadeId.toLowerCase()
-  );
+  const cidLower = normalizedItem.cascadeId.toLowerCase();
+  const idx = target.items.findIndex((it) => it.cascadeId.toLowerCase() === cidLower);
   if (idx >= 0) {
-    const prev = target.items[idx];
     target.items[idx] = {
-      ...prev,
-      title: normalizedItem.title || prev.title,
-      project: normalizedItem.project || prev.project,
+      ...target.items[idx],
+      title: normalizedItem.title || target.items[idx].title,
+      project: normalizedItem.project || target.items[idx].project,
     };
   } else {
-    target.items.unshift(normalizedItem);
+    target.items.push(normalizedItem);
   }
+  const { beforeToken, afterToken } = resolveAnchorTokens({
+    beforeGroupId,
+    afterGroupId,
+    beforeCascadeId,
+    afterCascadeId,
+  });
+  target.childOrder = placeTokenInChildOrder(target.childOrder, `c:${cidLower}`, {
+    isExisting: idx >= 0,
+    beforeToken,
+    afterToken,
+  });
   target.collapsed = false;
   expandAncestorChain(store, target.id);
   return writeConversationGroupsStore(filePath, store);
@@ -309,7 +444,18 @@ export function removeConversationFromGroup(filePath, { groupId, cascadeId } = {
   return writeConversationGroupsStore(filePath, store);
 }
 
-export function moveConversationBetweenGroups(filePath, { fromGroupId, toGroupId, item } = {}) {
+export function moveConversationBetweenGroups(
+  filePath,
+  {
+    fromGroupId,
+    toGroupId,
+    item,
+    beforeCascadeId = '',
+    afterCascadeId = '',
+    beforeGroupId = '',
+    afterGroupId = '',
+  } = {}
+) {
   const fromId = String(fromGroupId || '').trim();
   const toId = String(toGroupId || '').trim();
   const normalizedItem = normalizeItem(item);
@@ -330,23 +476,113 @@ export function moveConversationBetweenGroups(filePath, { fromGroupId, toGroupId
   }
   const idx = target.items.findIndex((it) => it.cascadeId.toLowerCase() === cidLower);
   if (idx >= 0) {
-    const prev = target.items[idx];
     target.items[idx] = {
-      ...prev,
-      title: normalizedItem.title || prev.title,
-      project: normalizedItem.project || prev.project,
+      ...target.items[idx],
+      title: normalizedItem.title || target.items[idx].title,
+      project: normalizedItem.project || target.items[idx].project,
     };
   } else {
-    target.items.unshift(normalizedItem);
+    target.items.push(normalizedItem);
   }
+  const { beforeToken, afterToken } = resolveAnchorTokens({
+    beforeGroupId,
+    afterGroupId,
+    beforeCascadeId,
+    afterCascadeId,
+  });
+  target.childOrder = placeTokenInChildOrder(target.childOrder, `c:${cidLower}`, {
+    isExisting: idx >= 0,
+    beforeToken,
+    afterToken,
+  });
   target.collapsed = false;
   expandAncestorChain(store, target.id);
   return writeConversationGroupsStore(filePath, store);
 }
 
+export function reorderConversationGroupItems(
+  filePath,
+  {
+    groupId,
+    cascadeId = '',
+    beforeCascadeId = '',
+    afterCascadeId = '',
+    beforeGroupId = '',
+    afterGroupId = '',
+    orderedCascadeIds = null,
+  } = {}
+) {
+  const id = String(groupId || '').trim();
+  const store = readConversationGroupsStore(filePath);
+  const target = store.groups.find((g) => g.id === id);
+  if (!target) {
+    return store;
+  }
+
+  let nextOrder = null;
+  if (Array.isArray(orderedCascadeIds) && orderedCascadeIds.length >= 2) {
+    if (target.items.length < 2) return store;
+    const validItemSet = new Set(target.items.map((it) => it.cascadeId.toLowerCase()));
+    const reorderedKeys = [];
+    const seen = new Set();
+    for (const rawCid of orderedCascadeIds) {
+      const key = String(rawCid || '').trim().toLowerCase();
+      if (key && !seen.has(key) && validItemSet.has(key)) {
+        seen.add(key);
+        reorderedKeys.push(key);
+      }
+    }
+    for (const it of target.items) {
+      const key = it.cascadeId.toLowerCase();
+      if (!seen.has(key)) reorderedKeys.push(key);
+    }
+    let cursor = 0;
+    nextOrder = target.childOrder.map((tok) =>
+      tok.startsWith('c:') ? `c:${reorderedKeys[cursor++]}` : tok
+    );
+  } else {
+    if (target.childOrder.length < 2) return store;
+    const cidLower = String(cascadeId || '').trim().toLowerCase();
+    const movingToken = cidLower ? `c:${cidLower}` : '';
+    if (!movingToken || !target.childOrder.includes(movingToken)) return store;
+    const { beforeToken, afterToken } = resolveAnchorTokens({
+      beforeGroupId,
+      afterGroupId,
+      beforeCascadeId,
+      afterCascadeId,
+    });
+    const validBefore =
+      beforeToken && beforeToken !== movingToken && target.childOrder.includes(beforeToken)
+        ? beforeToken
+        : '';
+    const validAfter =
+      !validBefore && afterToken && afterToken !== movingToken && target.childOrder.includes(afterToken)
+        ? afterToken
+        : '';
+    if (!validBefore && !validAfter) return store;
+    nextOrder = placeTokenInChildOrder(target.childOrder, movingToken, {
+      isExisting: true,
+      beforeToken: validBefore,
+      afterToken: validAfter,
+    });
+  }
+
+  const changed = nextOrder.some((tok, i) => tok !== target.childOrder[i]);
+  if (!changed) return store;
+  target.childOrder = nextOrder;
+  return writeConversationGroupsStore(filePath, store);
+}
+
 export function moveConversationGroup(
   filePath,
-  { groupId, parentId = '', beforeGroupId = '', afterGroupId = '' } = {}
+  {
+    groupId,
+    parentId = '',
+    beforeGroupId = '',
+    afterGroupId = '',
+    beforeCascadeId = '',
+    afterCascadeId = '',
+  } = {}
 ) {
   const id = String(groupId || '').trim();
   const nextParentId = String(parentId || '').trim();
@@ -383,7 +619,57 @@ export function moveConversationGroup(
 
   const prevParentId = moving.parentId;
   const prevOrder = store.groups.map((g) => g.id);
+  if (prevParentId && prevParentId !== nextParentId) {
+    const prevParent = byId.get(prevParentId);
+    if (prevParent) {
+      prevParent.childOrder = prevParent.childOrder.filter((tok) => tok !== `g:${id}`);
+    }
+  }
   moving.parentId = nextParentId;
+
+  if (nextParentId) {
+    const parentGrp = byId.get(nextParentId);
+    const movingToken = `g:${id}`;
+    const { beforeToken, afterToken } = resolveAnchorTokens({
+      beforeGroupId: beforeId,
+      afterGroupId: afterId,
+      beforeCascadeId,
+      afterCascadeId,
+    });
+    const validBefore =
+      beforeToken && beforeToken !== movingToken && parentGrp.childOrder.includes(beforeToken)
+        ? beforeToken
+        : '';
+    const validAfter =
+      !validBefore &&
+      afterToken &&
+      afterToken !== movingToken &&
+      parentGrp.childOrder.includes(afterToken)
+        ? afterToken
+        : '';
+    if (prevParentId === nextParentId && !validBefore && !validAfter) {
+      return store;
+    }
+    const nextChildOrder = placeTokenInChildOrder(parentGrp.childOrder, movingToken, {
+      isExisting: prevParentId === nextParentId,
+      beforeToken: validBefore,
+      afterToken: validAfter,
+    });
+    const childOrderChanged =
+      nextChildOrder.length !== parentGrp.childOrder.length ||
+      nextChildOrder.some((tok, idx) => tok !== parentGrp.childOrder[idx]);
+    if (prevParentId === nextParentId && !childOrderChanged) {
+      return store;
+    }
+    parentGrp.childOrder = nextChildOrder;
+    if (prevParentId !== nextParentId) {
+      const without = store.groups.filter((g) => g.id !== id);
+      without.push(moving);
+      store.groups = without;
+    }
+    expandAncestorChain(store, nextParentId);
+    return writeConversationGroupsStore(filePath, store);
+  }
 
   const without = store.groups.filter((g) => g.id !== id);
   if (beforeId && beforeId !== id) {
@@ -403,7 +689,6 @@ export function moveConversationGroup(
   } else if (prevParentId !== nextParentId) {
     without.push(moving);
   } else {
-    // Same parent and no explicit anchor: keep position unchanged
     return store;
   }
 
@@ -413,10 +698,28 @@ export function moveConversationGroup(
   }
 
   store.groups = without;
-  if (nextParentId) {
-    expandAncestorChain(store, nextParentId);
-  }
   return writeConversationGroupsStore(filePath, store);
+}
+
+function syncParentSubgroupOrder(groups) {
+  const byParent = new Map();
+  for (const g of groups) {
+    if (!g.parentId) continue;
+    let list = byParent.get(g.parentId);
+    if (!list) {
+      list = [];
+      byParent.set(g.parentId, list);
+    }
+    list.push(g.id);
+  }
+  for (const g of groups) {
+    const subIds = byParent.get(g.id);
+    if (!subIds || subIds.length < 2 || !Array.isArray(g.childOrder)) continue;
+    let cursor = 0;
+    g.childOrder = g.childOrder.map((tok) =>
+      tok.startsWith('g:') && cursor < subIds.length ? `g:${subIds[cursor++]}` : tok
+    );
+  }
 }
 
 export function reorderConversationGroups(filePath, { orderedIds, parentId } = {}) {
@@ -447,6 +750,7 @@ export function reorderConversationGroups(filePath, { orderedIds, parentId } = {
     const changed = next.some((g, i) => g.id !== store.groups[i]?.id);
     if (!changed) return store;
     store.groups = next;
+    syncParentSubgroupOrder(store.groups);
     return writeConversationGroupsStore(filePath, store);
   }
 
@@ -466,6 +770,7 @@ export function reorderConversationGroups(filePath, { orderedIds, parentId } = {
   const changed = next.some((g, i) => g.id !== store.groups[i]?.id);
   if (!changed) return store;
   store.groups = next;
+  syncParentSubgroupOrder(store.groups);
   return writeConversationGroupsStore(filePath, store);
 }
 

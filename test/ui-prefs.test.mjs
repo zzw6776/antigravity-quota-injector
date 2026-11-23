@@ -12,6 +12,7 @@ import {
   readUiPrefsStore,
   sanitizeConvWidthPref,
   updateConversationWidthPref,
+  updateThinkingSourcePref,
 } from '../src/ui-prefs.mjs';
 
 test('ui-prefs store persists unset, custom, and full conversation widths with bounds', () => {
@@ -48,6 +49,31 @@ test('ui-prefs store persists unset, custom, and full conversation widths with b
 
     fs.writeFileSync(filePath, '{corrupted json', 'utf8');
     assert.deepEqual(readUiPrefsStore(filePath), {
+      version: 1,
+      convWidthMode: 'unset',
+      convMaxWidth: 0,
+    });
+
+    const withLegacyBrief = updateThinkingSourcePref(filePath, 'easydict-ai-brief');
+    assert.deepEqual(withLegacyBrief, {
+      version: 1,
+      convWidthMode: 'unset',
+      convMaxWidth: 0,
+      thinkingTranslateSource: 'ai-brief',
+    });
+    assert.deepEqual(readUiPrefsStore(filePath), withLegacyBrief);
+
+    const withSrc = updateThinkingSourcePref(filePath, 'deepl');
+    assert.deepEqual(withSrc, {
+      version: 1,
+      convWidthMode: 'unset',
+      convMaxWidth: 0,
+      thinkingTranslateSource: 'deepl',
+    });
+    assert.deepEqual(readUiPrefsStore(filePath), withSrc);
+
+    const resetAuto = updateThinkingSourcePref(filePath, 'auto');
+    assert.deepEqual(resetAuto, {
       version: 1,
       convWidthMode: 'unset',
       convMaxWidth: 0,

@@ -119,6 +119,9 @@ async function cmdDoctor() {
     antigravityPages: antigravityPages.map((p) => ({ id: p.id, title: p.title, url: p.url.split('?')[0] })),
     daemonPid,
     daemonAlive,
+    aiTranslateConfigured: Boolean(
+      userCfg.aiApiKey || process.env.AQ_AI_API_KEY || process.env.ZHIPU_API_KEY
+    ),
     singleInstanceStatus,
     accountSwitchSupported: accountSwitch.supported,
     accountSwitchNote: accountSwitch.reason || null,
@@ -141,58 +144,86 @@ async function cmdVerify() {
     process.exit(1);
   }
   const targets = await fetchCdpTargets(port);
-  const page = targets.find(
-    (t) => t.type === 'page' && /^https?:\/\/(?:127\.0\.0\.1|localhost)/i.test(String(t.url || ''))
+  const candidates = targets.filter(
+    (t) =>
+      t.type === 'page' &&
+      /^https?:\/\/(?:127\.0\.0\.1|localhost)/i.test(String(t.url || '')) &&
+      t.webSocketDebuggerUrl
   );
-  if (!page?.webSocketDebuggerUrl) {
+  if (candidates.length === 0) {
     console.error('No Antigravity page target found.');
     process.exit(1);
   }
 
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  await new Promise((r, rej) => {
-    const t = setTimeout(() => rej(new Error('CDP connect timeout')), 5000);
-    ws.onopen = () => {
-      clearTimeout(t);
-      r();
-    };
-    ws.onerror = (err) => {
-      clearTimeout(t);
-      rej(err);
-    };
-  });
+  let matchedEval = null;
+  for (const page of candidates) {
+    const ws = new WebSocket(page.webSocketDebuggerUrl);
+    try {
+      await new Promise((r, rej) => {
+        const t = setTimeout(() => rej(new Error('CDP connect timeout')), 3000);
+        ws.onopen = () => {
+          clearTimeout(t);
+          r();
+        };
+        ws.onerror = (err) => {
+          clearTimeout(t);
+          rej(err);
+        };
+      });
 
-  const evalRes = await new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error('CDP evaluate timeout')), 5000);
-    ws.addEventListener('message', (ev) => {
-      const msg = JSON.parse(String(ev.data));
-      if (msg.id === 1) {
-        clearTimeout(t);
-        resolve(msg.result?.result?.value);
+      const evalRes = await new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('CDP evaluate timeout')), 3000);
+        ws.addEventListener('message', (ev) => {
+          const msg = JSON.parse(String(ev.data));
+          if (msg.id === 1) {
+            clearTimeout(t);
+            resolve(msg.result?.result?.value);
+          }
+        });
+        ws.send(
+          JSON.stringify({
+            id: 1,
+            method: 'Runtime.evaluate',
+            params: {
+              expression: `(() => ({
+                isHost: Boolean(window.__APP_CONFIG__?.productName === 'antigravity' || document.getElementById('antigravity.agentSidePanelInputBox')),
+                version: window.__aq_version || null,
+                hasStyle: Boolean(document.getElementById('aq-style')),
+                hasContextChip: Boolean(document.getElementById('aq-context-chip')),
+                contextText: document.getElementById('aq-context-chip')?.textContent || '',
+                hasQuotaChip: Boolean(document.getElementById('aq-quota-chip')),
+                quotaText: document.getElementById('aq-quota-chip')?.textContent || '',
+                turnUsageCount: document.querySelectorAll('[data-aq-turn-usage]').length,
+                cascadeId: window.__aqGetWatchedCascadeId ? window.__aqGetWatchedCascadeId() : ''
+              }))()`,
+              returnByValue: true,
+            },
+          })
+        );
+      });
+      ws.close();
+      if (evalRes?.isHost) {
+        const { isHost: _ignored, ...rest } = evalRes;
+        matchedEval = rest;
+        break;
       }
-    });
-    ws.send(
-      JSON.stringify({
-        id: 1,
-        method: 'Runtime.evaluate',
-        params: {
-          expression: `(() => ({
-            version: window.__aq_version || null,
-            hasStyle: Boolean(document.getElementById('aq-style')),
-            hasContextChip: Boolean(document.getElementById('aq-context-chip')),
-            contextText: document.getElementById('aq-context-chip')?.textContent || '',
-            hasQuotaChip: Boolean(document.getElementById('aq-quota-chip')),
-            quotaText: document.getElementById('aq-quota-chip')?.textContent || '',
-            turnUsageCount: document.querySelectorAll('[data-aq-turn-usage]').length,
-            cascadeId: window.__aqGetWatchedCascadeId ? window.__aqGetWatchedCascadeId() : ''
-          }))()`,
-          returnByValue: true,
-        },
-      })
-    );
-  });
-  ws.close();
-  console.log(JSON.stringify({ ok: Boolean(evalRes?.version && evalRes?.hasQuotaChip), ...evalRes }, null, 2));
+      if (!matchedEval && evalRes) {
+        const { isHost: _ignored, ...rest } = evalRes;
+        matchedEval = rest;
+      }
+    } catch {
+      try {
+        ws.close();
+      } catch {}
+    }
+  }
+  if (!matchedEval) {
+    console.error('Failed to evaluate Antigravity page target.');
+    process.exit(1);
+  }
+  console.log(
+    JSON.stringify({ ok: Boolean(matchedEval?.version && matchedEval?.hasQuotaChip), ...matchedEval }, null, 2)
+  );
 }
 
 async function cmdLaunch() {
