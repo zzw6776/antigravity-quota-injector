@@ -399,6 +399,7 @@
       return map;
     })(),
     convScrollPersistTimer: null,
+    convScrollIdleDirty: false,
     activeScrollRestore: null,
     routeEnterUnread: null,
     unreadOnEnterByCid: new Map(),
@@ -7917,7 +7918,7 @@
       }
     }
     if (!hitEl) {
-      const fileUriEl = el.closest('[data-file-uri]');
+      const fileUriEl = el.closest('[data-testid="changed-file-row"][data-file-uri]');
       if (fileUriEl) {
         const candidate = String(fileUriEl.getAttribute('data-file-uri') || '').trim();
         if (/^file:\/\//i.test(candidate)) {
@@ -7945,11 +7946,19 @@
     const isArtifactCard = Boolean(
       hitEl.closest('[data-testid="artifact-card"], [data-testid="bubble-artifact-card"]')
     );
-    const isBreadcrumb = Boolean(hitEl.closest('[aria-label="File path breadcrumbs"]'));
+    const breadcrumbNav = hitEl.closest('[aria-label="File path breadcrumbs"]');
+    const isBreadcrumb = Boolean(breadcrumbNav);
+    const bcItems = breadcrumbNav?.querySelectorAll?.('[data-uri]') || null;
+    const isAncestorBreadcrumb = Boolean(
+      bcItems && bcItems.length > 1 && bcItems[bcItems.length - 1] !== hitEl
+    );
     const symText = String(hitEl.querySelector?.('.google-symbols')?.textContent || '').trim();
     const isDirectory =
+      isAncestorBreadcrumb ||
       parsed.cleanUri.endsWith('/') ||
-      Boolean(hitEl.querySelector?.('[data-project-glyph="folder"]')) ||
+      Boolean(
+        hitEl.querySelector?.('[data-project-glyph="folder"], svg.lucide-folder, svg.lucide-folder-open')
+      ) ||
       symText === 'folder' ||
       symText === 'folder_open';
 
@@ -8082,7 +8091,12 @@
         : '';
     const openRows = [];
 
-    if (getEffectiveFileOpenDefault() !== 'builtin' && !fileTarget.isReviewRow) {
+    if (
+      getEffectiveFileOpenDefault() !== 'builtin' &&
+      !fileTarget.isReviewRow &&
+      !fileTarget.isDirectory &&
+      !fileTarget.isBreadcrumb
+    ) {
       openRows.push(
         '<button type="button" class="aq-ctx-item" data-aq-fctx="builtin"><span class="aq-ctx-item-label">在内置面板打开</span></button>'
       );
@@ -14138,6 +14152,9 @@
     if (!cidLower && viewport) {
       cidLower = getViewportFiberOwnerCid(viewport);
     }
+    if (!cidLower && viewport?.__aqCid) {
+      cidLower = viewport.__aqCid;
+    }
     if (!cidLower) {
       const urlCid = extractCascadeId();
       cidLower = /^[0-9a-f-]{36}$/i.test(urlCid) ? urlCid.toLowerCase() : '';
@@ -14200,39 +14217,21 @@
       clearTimeout(state.convScrollPersistTimer);
       state.convScrollPersistTimer = null;
     }
-    try {
-      const { viewport, cidLower } = findConversationScrollViewport(null);
-      if (
-        cidLower &&
-        viewport?.isConnected &&
-        viewport.__aqReadyToRecord &&
-        viewport.__aqCid === cidLower
-      ) {
-        const scrollTop = Math.max(0, Number(viewport.scrollTop) || 0);
-        const maxScroll = Math.max(
-          0,
-          (Number(viewport.scrollHeight) || 0) - (Number(viewport.clientHeight) || 0)
-        );
-        const existing = state.convScrollMemory.get(cidLower);
-        if (existing) {
-          const parked = isViewportNativeParked(viewport, scrollTop, maxScroll);
-          existing.userScrolled = parked;
-          existing.atBottom = !parked;
-          existing.scrollTop = parked ? Math.round(scrollTop) : Math.round(maxScroll);
-          existing.maxScroll = Math.round(maxScroll);
-          if (parked) {
-            const anchor = captureViewportStepAnchor(viewport);
-            existing.anchorStepIndex = anchor ? anchor.anchorStepIndex : '';
-            existing.anchorOffset = anchor ? anchor.anchorOffset : 0;
-          } else {
-            existing.anchorStepIndex = '';
-            existing.anchorOffset = 0;
-          }
-          const wm = getConversationStepWatermark(viewport);
-          if (wm >= 0) existing.stepWatermark = wm;
+    if (state.convScrollIdleDirty) {
+      state.convScrollIdleDirty = false;
+      try {
+        const { viewport, cidLower } = findConversationScrollViewport(null);
+        if (
+          cidLower &&
+          viewport?.isConnected &&
+          viewport.__aqReadyToRecord &&
+          viewport.__aqCid === cidLower &&
+          state.activeScrollRestore?.viewport !== viewport
+        ) {
+          recordConversationScrollState(cidLower, viewport, { skipPersistSchedule: true });
         }
-      }
-    } catch {}
+      } catch {}
+    }
     try {
       if (typeof sessionStorage === 'undefined') return;
       const entries = [...state.convScrollMemory.entries()].slice(-MAX_CONV_SCROLL_MEMORY);
@@ -14248,7 +14247,19 @@
     }, 250);
   }
 
-  function setConvScrollMemoryEntry(cidLower, entry) {
+  function scheduleScrollIdlePersist() {
+    if (state.disposed) return;
+    state.convScrollIdleDirty = true;
+    if (state.convScrollPersistTimer) {
+      clearTimeout(state.convScrollPersistTimer);
+    }
+    state.convScrollPersistTimer = setTimeout(() => {
+      state.convScrollPersistTimer = null;
+      if (!state.disposed) persistConvScrollMemoryNow();
+    }, 200);
+  }
+
+  function setConvScrollMemoryEntry(cidLower, entry, { skipPersistSchedule = false } = {}) {
     if (!cidLower || !entry) return;
     if (state.convScrollMemory.has(cidLower)) {
       state.convScrollMemory.delete(cidLower);
@@ -14259,7 +14270,9 @@
       if (!oldestKey) break;
       state.convScrollMemory.delete(oldestKey);
     }
-    schedulePersistConvScrollMemory();
+    if (!skipPersistSchedule) {
+      schedulePersistConvScrollMemory();
+    }
   }
 
   function getAutoScrollHandle(viewport) {
@@ -14301,6 +14314,66 @@
       (Number(viewport.scrollHeight) || 0) - (Number(viewport.clientHeight) || 0)
     );
     viewport.scrollTop = maxScroll;
+  }
+
+  function findAutoScrollSpacerResetFn(viewport) {
+    const vpFiber = findReactFiberOnNode(viewport);
+    const autoFiber = vpFiber?.return?.return || null;
+    let h = autoFiber?.memoizedState || null;
+    let guard = 0;
+    while (h && guard++ < 32) {
+      const m1 = h.memoizedState;
+      const m2 = h.next?.memoizedState;
+      const m3 = h.next?.next?.memoizedState;
+      if (
+        m1 &&
+        typeof m1 === 'object' &&
+        typeof m1.current === 'function' &&
+        m1.current.length === 0 &&
+        m2 &&
+        typeof m2 === 'object' &&
+        typeof m2.current === 'function' &&
+        m2.current.length === 0 &&
+        m3 &&
+        typeof m3 === 'object' &&
+        typeof m3.current === 'function' &&
+        m3.current.length === 1
+      ) {
+        return m2.current;
+      }
+      h = h.next;
+    }
+    return null;
+  }
+
+  function healStaleAutoScrollMinHeight(targetViewport = null) {
+    const viewport = targetViewport || findConversationScrollViewport(null).viewport;
+    if (!viewport || !viewport.isConnected) return;
+    const contentDiv = viewport.firstElementChild?.firstElementChild || null;
+    const rawMinH = contentDiv?.style?.minHeight || '';
+    if (!rawMinH || !rawMinH.endsWith('px')) return;
+
+    const lockedMinH = Number.parseFloat(rawMinH);
+    if (!Number.isFinite(lockedMinH) || lockedMinH <= 0) return;
+    const clientH = Number(viewport.clientHeight) || 0;
+    if (clientH <= 0 || lockedMinH <= clientH + 120) return;
+
+    let naturalH = 0;
+    const kids = contentDiv.children;
+    for (let i = 0; i < kids.length; i++) {
+      naturalH += Number(kids[i].offsetHeight) || 0;
+    }
+    if (lockedMinH <= naturalH + clientH + 80) return;
+
+    const resetFn = findAutoScrollSpacerResetFn(viewport);
+    if (resetFn) {
+      try {
+        resetFn();
+      } catch {}
+    }
+    if (contentDiv.style.minHeight) {
+      contentDiv.style.minHeight = '';
+    }
   }
 
   function cancelActiveScrollRestore({ markReady = true } = {}) {
@@ -14387,48 +14460,7 @@
     };
   }
 
-  function recordViewportScrollPositionOnly(cidLower, viewport) {
-    if (!cidLower || !viewport || !viewport.isConnected) return;
-    const scrollTop = Math.max(0, Number(viewport.scrollTop) || 0);
-    const scrollHeight = Math.max(0, Number(viewport.scrollHeight) || 0);
-    const clientHeight = Math.max(0, Number(viewport.clientHeight) || 0);
-    if (clientHeight <= 0 && scrollHeight <= 0) return;
-    const maxScroll = Math.max(0, scrollHeight - clientHeight);
-
-    const userScrolled = isViewportNativeParked(viewport, scrollTop, maxScroll);
-    const atBottom = !userScrolled;
-    const roundedTop = userScrolled ? Math.round(scrollTop) : Math.round(maxScroll);
-    const roundedMax = Math.round(maxScroll);
-    const existing = state.convScrollMemory.get(cidLower);
-    if (existing) {
-      existing.scrollTop = roundedTop;
-      existing.maxScroll = roundedMax;
-      existing.atBottom = atBottom;
-      existing.userScrolled = userScrolled;
-      if (!userScrolled) {
-        existing.anchorStepIndex = '';
-        existing.anchorOffset = 0;
-      }
-      existing.leftAt = Date.now();
-      schedulePersistConvScrollMemory();
-      return;
-    }
-    setConvScrollMemoryEntry(cidLower, {
-      scrollTop: roundedTop,
-      maxScroll: roundedMax,
-      atBottom,
-      userScrolled,
-      anchorStepIndex: '',
-      anchorOffset: 0,
-      stepWatermark: getConversationStepWatermark(viewport),
-      leftAt: Date.now(),
-      turnCount: 0,
-      totalCalls: 0,
-      wasRunning: false,
-    });
-  }
-
-  function recordConversationScrollState(cidLower, viewport) {
+  function recordConversationScrollState(cidLower, viewport, { skipPersistSchedule = false } = {}) {
     if (!cidLower || !viewport || !viewport.isConnected) return;
     const scrollTop = Math.max(0, Number(viewport.scrollTop) || 0);
     const scrollHeight = Math.max(0, Number(viewport.scrollHeight) || 0);
@@ -14441,19 +14473,23 @@
     const prev = state.convScrollMemory.get(cidLower) || null;
     const summary = countTurnsPayloadSummary(state.turnsPayload, cidLower);
     const wm = getConversationStepWatermark(viewport);
-    setConvScrollMemoryEntry(cidLower, {
-      scrollTop: userScrolled ? Math.round(scrollTop) : Math.round(maxScroll),
-      maxScroll: Math.round(maxScroll),
-      atBottom,
-      userScrolled,
-      anchorStepIndex: anchor ? anchor.anchorStepIndex : '',
-      anchorOffset: anchor ? anchor.anchorOffset : 0,
-      stepWatermark: wm >= 0 ? wm : (prev?.stepWatermark ?? -1),
-      leftAt: Date.now(),
-      turnCount: summary.matches ? summary.turnCount : (prev?.turnCount || 0),
-      totalCalls: summary.matches ? summary.totalCalls : (prev?.totalCalls || 0),
-      wasRunning: isConversationCurrentlyRunning(cidLower),
-    });
+    setConvScrollMemoryEntry(
+      cidLower,
+      {
+        scrollTop: userScrolled ? Math.round(scrollTop) : Math.round(maxScroll),
+        maxScroll: Math.round(maxScroll),
+        atBottom,
+        userScrolled,
+        anchorStepIndex: anchor ? anchor.anchorStepIndex : '',
+        anchorOffset: anchor ? anchor.anchorOffset : 0,
+        stepWatermark: wm >= 0 ? wm : (prev?.stepWatermark ?? -1),
+        leftAt: Date.now(),
+        turnCount: summary.matches ? summary.turnCount : (prev?.turnCount || 0),
+        totalCalls: summary.matches ? summary.totalCalls : (prev?.totalCalls || 0),
+        wasRunning: isConversationCurrentlyRunning(cidLower),
+      },
+      { skipPersistSchedule }
+    );
   }
 
   function refreshSavedConversationReplyMarkers(cidLower) {
@@ -14485,6 +14521,7 @@
   }
 
   function snapshotActiveConversationScrollBeforeLeave() {
+    state.convScrollIdleDirty = false;
     const { viewport, cidLower } = findConversationScrollViewport(null);
     if (!cidLower) return;
     if (
@@ -14840,6 +14877,8 @@
     }
     if (cid !== state.cascadeId) {
       const prevCid = state.cascadeId;
+      cancelActiveScrollRestore({ markReady: false });
+      state.mountedViewportCid = '';
       if (prevCid) {
         const prevLower = prevCid.toLowerCase();
         // Freeze outgoing viewport so unmount layout cleanup cannot overwrite saved scroll memory
@@ -14859,6 +14898,7 @@
         }
         refreshSavedConversationReplyMarkers(prevLower);
       }
+      state.unreadOnEnterByCid.clear();
       if (cid) {
         const incomingLower = cid.toLowerCase();
         const preclick =
@@ -14874,12 +14914,10 @@
         state.unreadOnEnterByCid.set(incomingLower, incomingUnread);
       } else {
         state.routeEnterUnread = null;
-        state.mountedViewportCid = '';
       }
       state.cascadeId = cid;
       stopLiveTurnTimer();
       if (!cid) {
-        cancelActiveScrollRestore({ markReady: false });
         state.turnsPayload = null;
       } else {
         const cidLower = cid.toLowerCase();
@@ -14963,6 +15001,7 @@
       if (needTurnRows) {
         renderRunningThinkingHelper(sharedCid, sharedTurnEls, sharedLiveCtx);
       }
+      healStaleAutoScrollMinHeight();
       syncConversationViewportScroll();
     }
     if (runMenus) {
@@ -15074,7 +15113,6 @@
             const vp = activeRestore.viewport;
             cancelActiveScrollRestore({ markReady: true });
             if (vp?.isConnected) {
-              vp.__aqUserScrolled = false;
               forceNativeScrollToBottom(vp);
               recordConversationScrollState(cidLowerForScroll, vp);
             }
@@ -15731,8 +15769,25 @@
       }
     }
   };
+  const hasNonEmptyTextSelectionAtTarget = (target) => {
+    try {
+      const sel = window.getSelection?.();
+      if (!sel || sel.isCollapsed || sel.rangeCount <= 0) return false;
+      if (!String(sel.toString() || '').trim()) return false;
+      const el = target?.nodeType === 1 ? target : target?.parentElement;
+      if (!el) return true;
+      for (let i = 0; i < sel.rangeCount; i++) {
+        const range = sel.getRangeAt(i);
+        if (typeof range.intersectsNode === 'function' && range.intersectsNode(el)) {
+          return true;
+        }
+      }
+    } catch {}
+    return false;
+  };
   const onWinContextMenuCapture = (ev) => {
     if (!isInstanceAlive()) return;
+    if (hasNonEmptyTextSelectionAtTarget(ev.target)) return;
     const fileTarget = resolveFileTargetFromNode(ev.target);
     if (fileTarget) {
       ev.preventDefault();
@@ -16401,11 +16456,14 @@
     if (!isInstanceAlive()) return;
     const t = ev.target;
     if (!t || t.nodeType !== 1 || t.getAttribute?.('data-testid') !== 'autoscroll-viewport') return;
+    if (t.firstElementChild?.firstElementChild?.style?.minHeight) {
+      healStaleAutoScrollMinHeight(t);
+    }
     if (state.activeScrollRestore?.viewport === t && !state.activeScrollRestore.userInteracted) {
       return;
     }
     if (t.__aqReadyToRecord && t.__aqCid) {
-      recordViewportScrollPositionOnly(t.__aqCid, t);
+      scheduleScrollIdlePersist();
     }
   };
   const onDocWheelOrTouchCapture = (ev) => {
