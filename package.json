@@ -1,6 +1,6 @@
 {
   "name": "antigravity-quota-injector",
-  "version": "0.1.113",
+  "version": "0.1.115",
   "private": true,
   "type": "module",
   "description": "Lightweight CDP injector displaying per-turn token metrics, context usage and quota indicator in Antigravity.",

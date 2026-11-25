@@ -372,11 +372,13 @@
           try {
             sessionStorage.removeItem('aq_conv_scroll_v1');
             sessionStorage.removeItem('aq_conv_scroll_v2');
+            sessionStorage.removeItem('aq_conv_scroll_v3');
+            sessionStorage.removeItem('aq_conv_scroll_v4');
           } catch {}
         }
         const raw =
           typeof sessionStorage !== 'undefined'
-            ? sessionStorage.getItem('aq_conv_scroll_v3')
+            ? sessionStorage.getItem('aq_conv_scroll_v5')
             : null;
         const parsed = raw ? JSON.parse(raw) : null;
         if (Array.isArray(parsed)) {
@@ -399,7 +401,10 @@
     convScrollPersistTimer: null,
     activeScrollRestore: null,
     routeEnterUnread: null,
-    initialScrollBootstrapped: false,
+    unreadOnEnterByCid: new Map(),
+    initialRouteSynced: false,
+    initialViewportBootstrapped: false,
+    mountedViewportCid: '',
     autoUnpinnedCids: (() => {
       try {
         const raw = localStorage.getItem('aq_auto_unpinned_cids_v1');
@@ -13966,46 +13971,129 @@
 
   const MAX_CONV_SCROLL_MEMORY = 100;
   const SCROLL_AT_BOTTOM_EPSILON_PX = 48;
-  const SCROLL_RESTORE_STABILIZE_MS = 600;
+  const SCROLL_MOUNT_WAIT_MS = 300;
+  const SCROLL_PAGINATED_SLICE_WAIT_MS = 1_500;
+
+  function findReactFiberOnNode(node) {
+    if (!node || typeof node !== 'object') return null;
+    try {
+      const keys = Object.keys(node);
+      for (let i = 0; i < keys.length; i++) {
+        if (keys[i].startsWith('__reactFiber$')) {
+          return node[keys[i]] || null;
+        }
+      }
+    } catch {}
+    return null;
+  }
+
+  function getViewportFiberOwnerCid(viewport) {
+    let f = findReactFiberOnNode(viewport);
+    let guard = 0;
+    while (f && guard++ < 12) {
+      const props = f.memoizedProps;
+      const raw = props?.conversationId || props?.cascadeId || '';
+      if (typeof raw === 'string' && /^[0-9a-f-]{36}$/i.test(raw.trim())) {
+        return raw.trim().toLowerCase();
+      }
+      f = f.return;
+    }
+    return '';
+  }
+
+  function getMaxMountedStepIndex(viewport) {
+    if (!viewport || typeof viewport.querySelectorAll !== 'function') return -1;
+    const steps = viewport.querySelectorAll('[data-step-index]');
+    let maxNum = -1;
+    for (let i = 0; i < steps.length; i++) {
+      const raw = String(steps[i].getAttribute('data-step-index') || '').trim();
+      if (/^\d+$/.test(raw)) {
+        const n = Number.parseInt(raw, 10);
+        if (n > maxNum) maxNum = n;
+      }
+    }
+    return maxNum;
+  }
+
+  function getConversationStepWatermark(viewport) {
+    const maxDom = getMaxMountedStepIndex(viewport);
+    let f = findReactFiberOnNode(viewport);
+    let guard = 0;
+    while (f && guard++ < 12) {
+      const total = Number(f.memoizedProps?.trajectorySlice?.totalStepsLength);
+      if (Number.isFinite(total) && total > 0) {
+        return Math.max(maxDom, total);
+      }
+      f = f.return;
+    }
+    return maxDom;
+  }
+
+  function getPaginationHandle(viewport) {
+    const root = findReactFiberOnNode(viewport);
+    if (!root) return null;
+    try {
+      const stack = [root.child];
+      let visited = 0;
+      while (stack.length > 0 && visited++ < 36) {
+        const node = stack.pop();
+        if (!node) continue;
+        const pRef = node.memoizedProps?.paginationRef;
+        const cur = pRef && typeof pRef === 'object' ? pRef.current : null;
+        if (cur && typeof cur.navigateTo === 'function') {
+          return cur;
+        }
+        if (node.sibling) stack.push(node.sibling);
+        if (node.child) stack.push(node.child);
+      }
+    } catch {}
+    return null;
+  }
+
+  function countTurnsPayloadSummary(payload, cidLower) {
+    if (!payload || !cidLower) return { matches: false, turnCount: 0, totalCalls: 0 };
+    if (String(payload.cascadeId || '').trim().toLowerCase() !== cidLower) {
+      return { matches: false, turnCount: 0, totalCalls: 0 };
+    }
+    const turns = Array.isArray(payload.turns) ? payload.turns : [];
+    let totalCalls = 0;
+    for (let i = 0; i < turns.length; i++) {
+      totalCalls += Number(turns[i]?.calls || 0);
+    }
+    return { matches: true, turnCount: turns.length, totalCalls };
+  }
 
   function isConversationUnreadNow(cidLower, saved = null) {
     if (!cidLower) return false;
     const row = findConversationSidebarRow(cidLower);
     if (row) {
-      return Boolean(
-        row.querySelector?.('[data-testid="status-unread-dot"], [data-testid="attention-dot"]')
-      );
+      return Boolean(row.querySelector?.('[data-testid="status-unread-dot"]'));
     }
-    const leftAtMs = Number(saved?.leftAt) || 0;
-    const meta = state.trajMetaById[cidLower];
     const grpPanel = document.getElementById('aq-conv-groups');
     if (grpPanel) {
       const grpItems = grpPanel.querySelectorAll('[data-aq-grp-open]');
+      let matchedGrpItem = false;
       for (let i = 0; i < grpItems.length; i++) {
         const it = grpItems[i];
         if (String(it.getAttribute('data-aq-grp-open') || '').trim().toLowerCase() !== cidLower) {
           continue;
         }
-        const st = it.getAttribute('data-aq-status');
-        if (st === 'waiting') return true;
-        if (
-          st === 'unread' &&
-          (!leftAtMs ||
-            !meta ||
-            meta.markedAsUnread ||
-            (!meta.running && !meta.subagentRunning && meta.lastModifiedMs > leftAtMs + 500))
-        ) {
+        matchedGrpItem = true;
+        if (it.getAttribute('data-aq-status') === 'unread') {
           return true;
         }
       }
-    }
-    if (meta) {
-      if (meta.markedAsUnread || (!meta.killed && (meta.waiting || meta.subagentWaiting))) {
-        return true;
+      if (matchedGrpItem) {
+        return false;
       }
-      if (!meta.killed && !meta.running && !meta.subagentRunning) {
+    }
+    const leftAtMs = Number(saved?.leftAt) || 0;
+    const meta = state.trajMetaById[cidLower];
+    if (meta) {
+      if (meta.markedAsUnread) return true;
+      if (leftAtMs > 0 && !meta.killed && !meta.running && !meta.subagentRunning) {
         const baselineMs = Math.max(leftAtMs, Number(meta.lastUserViewMs) || 0);
-        if (meta.lastModifiedMs > 0 && meta.lastModifiedMs > baselineMs + (leftAtMs ? 500 : 0)) {
+        if (meta.lastModifiedMs > 0 && meta.lastModifiedMs > baselineMs + 500) {
           return true;
         }
       }
@@ -14013,20 +14101,7 @@
     return false;
   }
 
-  function isConversationUnreadOnOpen(cidLower, saved = null) {
-    if (!cidLower) return false;
-    if (
-      state.routeEnterUnread &&
-      state.routeEnterUnread.cidLower === cidLower &&
-      Date.now() - state.routeEnterUnread.at < 2_500 &&
-      state.routeEnterUnread.isUnread
-    ) {
-      return true;
-    }
-    return isConversationUnreadNow(cidLower, saved);
-  }
-
-  function hasTurnsPayloadNewTurn(payload, cidLower, saved) {
+  function hasTurnsPayloadAdvanced(payload, cidLower, saved) {
     if (!payload || !cidLower || !saved) return false;
     if (String(payload.cascadeId || '').trim().toLowerCase() !== cidLower) return false;
     const turns = Array.isArray(payload.turns) ? payload.turns : [];
@@ -14039,6 +14114,15 @@
     if (saved.turnCount > 0 && turns.length > saved.turnCount) {
       return true;
     }
+    if (saved.totalCalls > 0) {
+      let totalCalls = 0;
+      for (let i = 0; i < turns.length; i++) {
+        totalCalls += Number(turns[i]?.calls || 0);
+      }
+      if (totalCalls > saved.totalCalls) {
+        return true;
+      }
+    }
     return false;
   }
 
@@ -14049,8 +14133,15 @@
       document.querySelector('[data-testid="conversation-view"]');
     if (!root) return { viewEl: null, viewport: null, cidLower: '' };
     const viewport = root.querySelector('[data-testid="autoscroll-viewport"]');
-    const cidRaw = root.getAttribute('data-cascade-id')?.trim() || extractCascadeId();
-    const cidLower = /^[0-9a-f-]{36}$/i.test(cidRaw) ? cidRaw.toLowerCase() : '';
+    const attrCid = root.getAttribute('data-cascade-id')?.trim() || '';
+    let cidLower = /^[0-9a-f-]{36}$/i.test(attrCid) ? attrCid.toLowerCase() : '';
+    if (!cidLower && viewport) {
+      cidLower = getViewportFiberOwnerCid(viewport);
+    }
+    if (!cidLower) {
+      const urlCid = extractCascadeId();
+      cidLower = /^[0-9a-f-]{36}$/i.test(urlCid) ? urlCid.toLowerCase() : '';
+    }
     return { viewEl: root, viewport, cidLower };
   }
 
@@ -14078,21 +14169,27 @@
     return false;
   }
 
-  function didSavedConversationAdvance(cidLower, saved) {
+  function didSavedConversationAdvance(cidLower, saved, viewport = null) {
     if (!cidLower || !saved) return false;
     const row = findConversationSidebarRow(cidLower);
     if (
       row &&
       !saved.wasRunning &&
-      row.querySelector('[data-testid="status-loading-spinner"], [data-testid="status-task-running"]')
+      row.querySelector('[data-testid="status-loading-spinner"], [data-testid="status-task-running"], [data-testid="attention-dot"]')
     ) {
       return true;
     }
     const meta = state.trajMetaById[cidLower];
-    if (meta && !saved.wasRunning && !meta.killed && (meta.running || meta.subagentRunning)) {
+    if (meta && !saved.wasRunning && !meta.killed && (meta.running || meta.waiting || meta.subagentRunning || meta.subagentWaiting)) {
       return true;
     }
-    if (hasTurnsPayloadNewTurn(state.turnsPayload, cidLower, saved)) {
+    if (typeof saved.stepWatermark === 'number' && saved.stepWatermark >= 0 && viewport) {
+      const curWatermark = getConversationStepWatermark(viewport);
+      if (curWatermark > saved.stepWatermark) {
+        return true;
+      }
+    }
+    if (hasTurnsPayloadAdvanced(state.turnsPayload, cidLower, saved)) {
       return true;
     }
     return false;
@@ -14109,21 +14206,37 @@
         cidLower &&
         viewport?.isConnected &&
         viewport.__aqReadyToRecord &&
-        viewport.__aqCid === cidLower &&
-        viewport.__aqUserScrolled
+        viewport.__aqCid === cidLower
       ) {
+        const scrollTop = Math.max(0, Number(viewport.scrollTop) || 0);
+        const maxScroll = Math.max(
+          0,
+          (Number(viewport.scrollHeight) || 0) - (Number(viewport.clientHeight) || 0)
+        );
         const existing = state.convScrollMemory.get(cidLower);
-        if (existing && existing.userScrolled) {
-          const anchor = captureViewportStepAnchor(viewport);
-          existing.anchorStepIndex = anchor ? anchor.anchorStepIndex : '';
-          existing.anchorOffset = anchor ? anchor.anchorOffset : 0;
+        if (existing) {
+          const parked = isViewportNativeParked(viewport, scrollTop, maxScroll);
+          existing.userScrolled = parked;
+          existing.atBottom = !parked;
+          existing.scrollTop = parked ? Math.round(scrollTop) : Math.round(maxScroll);
+          existing.maxScroll = Math.round(maxScroll);
+          if (parked) {
+            const anchor = captureViewportStepAnchor(viewport);
+            existing.anchorStepIndex = anchor ? anchor.anchorStepIndex : '';
+            existing.anchorOffset = anchor ? anchor.anchorOffset : 0;
+          } else {
+            existing.anchorStepIndex = '';
+            existing.anchorOffset = 0;
+          }
+          const wm = getConversationStepWatermark(viewport);
+          if (wm >= 0) existing.stepWatermark = wm;
         }
       }
     } catch {}
     try {
       if (typeof sessionStorage === 'undefined') return;
       const entries = [...state.convScrollMemory.entries()].slice(-MAX_CONV_SCROLL_MEMORY);
-      sessionStorage.setItem('aq_conv_scroll_v3', JSON.stringify(entries));
+      sessionStorage.setItem('aq_conv_scroll_v5', JSON.stringify(entries));
     } catch {}
   }
 
@@ -14132,7 +14245,7 @@
     state.convScrollPersistTimer = setTimeout(() => {
       state.convScrollPersistTimer = null;
       if (!state.disposed) persistConvScrollMemoryNow();
-    }, 300);
+    }, 250);
   }
 
   function setConvScrollMemoryEntry(cidLower, entry) {
@@ -14150,30 +14263,19 @@
   }
 
   function getAutoScrollHandle(viewport) {
-    if (!viewport || typeof viewport !== 'object') return null;
-    try {
-      const keys = Object.keys(viewport);
-      let fiberKey = '';
-      for (let i = 0; i < keys.length; i++) {
-        if (keys[i].startsWith('__reactFiber$')) {
-          fiberKey = keys[i];
-          break;
-        }
+    let f = findReactFiberOnNode(viewport);
+    let guard = 0;
+    while (f && guard++ < 10) {
+      const handle = f.ref && typeof f.ref === 'object' ? f.ref.current : null;
+      if (
+        handle &&
+        typeof handle.stopAutoScroll === 'function' &&
+        typeof handle.forceScrollToBottom === 'function'
+      ) {
+        return handle;
       }
-      let f = fiberKey ? viewport[fiberKey] : null;
-      let guard = 0;
-      while (f && guard++ < 10) {
-        const handle = f.ref && typeof f.ref === 'object' ? f.ref.current : null;
-        if (
-          handle &&
-          typeof handle.stopAutoScroll === 'function' &&
-          typeof handle.forceScrollToBottom === 'function'
-        ) {
-          return handle;
-        }
-        f = f.return;
-      }
-    } catch {}
+      f = f.return;
+    }
     return null;
   }
 
@@ -14206,18 +14308,13 @@
     if (!r) return;
     state.activeScrollRestore = null;
     if (r.timer) clearTimeout(r.timer);
-    if (r.resizeObserver) {
-      try {
-        r.resizeObserver.disconnect();
-      } catch {}
-    }
+    if (r.settleRaf) cancelAnimationFrame(r.settleRaf);
     if (markReady && r.viewport) {
       r.viewport.__aqReadyToRecord = true;
     }
   }
 
   function isViewportVisuallyAtBottom(viewport, scrollTop, maxScroll) {
-    if (maxScroll - scrollTop <= SCROLL_AT_BOTTOM_EPSILON_PX) return true;
     const latestEl = viewport?.querySelector?.('[data-turn-content="latest"]');
     if (latestEl && typeof latestEl.getBoundingClientRect === 'function') {
       const vpRect = viewport.getBoundingClientRect();
@@ -14225,6 +14322,28 @@
       if (vpRect.height > 0 && lRect.height > 0) {
         return lRect.bottom - vpRect.bottom <= SCROLL_AT_BOTTOM_EPSILON_PX;
       }
+    }
+    if (viewport?.querySelector?.('[data-testid="detached-window-spacer"]')) {
+      return false;
+    }
+    return maxScroll - scrollTop <= SCROLL_AT_BOTTOM_EPSILON_PX;
+  }
+
+  function isViewportNativeParked(viewport, scrollTop, maxScroll) {
+    if (!viewport) return false;
+    if (isViewportVisuallyAtBottom(viewport, scrollTop, maxScroll)) {
+      return false;
+    }
+    const host = viewport.closest?.('[data-autoscroll-overlay-host]') || null;
+    const jumpBtn = host?.querySelector?.(':scope > button') || null;
+    if (jumpBtn && jumpBtn.getAttribute('aria-hidden') !== 'true') {
+      return true;
+    }
+    if (viewport.style?.overflowAnchor === 'auto') {
+      return true;
+    }
+    if (viewport.querySelector?.('[data-testid="detached-window-spacer"]')) {
+      return true;
     }
     return false;
   }
@@ -14275,27 +14394,8 @@
     const clientHeight = Math.max(0, Number(viewport.clientHeight) || 0);
     if (clientHeight <= 0 && scrollHeight <= 0) return;
     const maxScroll = Math.max(0, scrollHeight - clientHeight);
-    const prevTop =
-      typeof viewport.__aqLastScrollTop === 'number' ? viewport.__aqLastScrollTop : scrollTop;
-    const prevMax =
-      typeof viewport.__aqLastMaxScroll === 'number' ? viewport.__aqLastMaxScroll : maxScroll;
-    viewport.__aqLastScrollTop = scrollTop;
-    viewport.__aqLastMaxScroll = maxScroll;
 
-    const nearBottom = maxScroll - scrollTop <= 240;
-    const atBottomNow = nearBottom
-      ? isViewportVisuallyAtBottom(viewport, scrollTop, maxScroll)
-      : false;
-    if (atBottomNow) {
-      viewport.__aqUserScrolled = false;
-    } else if (
-      (scrollTop < prevTop - 0.5 && maxScroll >= prevMax - 1) ||
-      (viewport.__aqNavJumpUntil && Date.now() < viewport.__aqNavJumpUntil)
-    ) {
-      viewport.__aqUserScrolled = true;
-    }
-
-    const userScrolled = Boolean(viewport.__aqUserScrolled) && !atBottomNow;
+    const userScrolled = isViewportNativeParked(viewport, scrollTop, maxScroll);
     const atBottom = !userScrolled;
     const roundedTop = userScrolled ? Math.round(scrollTop) : Math.round(maxScroll);
     const roundedMax = Math.round(maxScroll);
@@ -14320,8 +14420,10 @@
       userScrolled,
       anchorStepIndex: '',
       anchorOffset: 0,
+      stepWatermark: getConversationStepWatermark(viewport),
       leftAt: Date.now(),
       turnCount: 0,
+      totalCalls: 0,
       wasRunning: false,
     });
   }
@@ -14333,23 +14435,12 @@
     const clientHeight = Math.max(0, Number(viewport.clientHeight) || 0);
     if (clientHeight <= 0 && scrollHeight <= 0) return;
     const maxScroll = Math.max(0, scrollHeight - clientHeight);
-    viewport.__aqLastScrollTop = scrollTop;
-    viewport.__aqLastMaxScroll = maxScroll;
-    const visuallyAtBottom = isViewportVisuallyAtBottom(viewport, scrollTop, maxScroll);
-    if (visuallyAtBottom) {
-      viewport.__aqUserScrolled = false;
-    }
-    const userScrolled = Boolean(viewport.__aqUserScrolled) && !visuallyAtBottom;
+    const userScrolled = isViewportNativeParked(viewport, scrollTop, maxScroll);
     const atBottom = !userScrolled;
     const anchor = userScrolled ? captureViewportStepAnchor(viewport) : null;
     const prev = state.convScrollMemory.get(cidLower) || null;
-    const payloadMatches =
-      String(state.turnsPayload?.cascadeId || '').trim().toLowerCase() === cidLower;
-    const turnCount = payloadMatches
-      ? Array.isArray(state.turnsPayload?.turns)
-        ? state.turnsPayload.turns.length
-        : 0
-      : prev?.turnCount || 0;
+    const summary = countTurnsPayloadSummary(state.turnsPayload, cidLower);
+    const wm = getConversationStepWatermark(viewport);
     setConvScrollMemoryEntry(cidLower, {
       scrollTop: userScrolled ? Math.round(scrollTop) : Math.round(maxScroll),
       maxScroll: Math.round(maxScroll),
@@ -14357,8 +14448,10 @@
       userScrolled,
       anchorStepIndex: anchor ? anchor.anchorStepIndex : '',
       anchorOffset: anchor ? anchor.anchorOffset : 0,
+      stepWatermark: wm >= 0 ? wm : (prev?.stepWatermark ?? -1),
       leftAt: Date.now(),
-      turnCount,
+      turnCount: summary.matches ? summary.turnCount : (prev?.turnCount || 0),
+      totalCalls: summary.matches ? summary.totalCalls : (prev?.totalCalls || 0),
       wasRunning: isConversationCurrentlyRunning(cidLower),
     });
   }
@@ -14367,18 +14460,24 @@
     if (!cidLower) return;
     const prev = state.convScrollMemory.get(cidLower);
     if (!prev) return;
-    const payloadMatches =
-      String(state.turnsPayload?.cascadeId || '').trim().toLowerCase() === cidLower;
-    const turnCount = payloadMatches
-      ? Array.isArray(state.turnsPayload?.turns)
-        ? state.turnsPayload.turns.length
-        : 0
-      : prev.turnCount || 0;
+    const summary = countTurnsPayloadSummary(state.turnsPayload, cidLower);
+    const turnCount = summary.matches ? summary.turnCount : (prev.turnCount || 0);
+    const totalCalls = summary.matches ? summary.totalCalls : (prev.totalCalls || 0);
+    const { viewport, cidLower: vpCid } = findConversationScrollViewport(null);
+    const curWm = viewport && vpCid === cidLower ? getConversationStepWatermark(viewport) : -1;
+    const stepWatermark = curWm >= 0 ? curWm : (prev.stepWatermark ?? -1);
     const wasRunning = isConversationCurrentlyRunning(cidLower);
-    if (turnCount !== prev.turnCount || wasRunning !== prev.wasRunning) {
+    if (
+      turnCount !== prev.turnCount ||
+      totalCalls !== (prev.totalCalls || 0) ||
+      stepWatermark !== (prev.stepWatermark ?? -1) ||
+      wasRunning !== prev.wasRunning
+    ) {
       setConvScrollMemoryEntry(cidLower, {
         ...prev,
         turnCount,
+        totalCalls,
+        stepWatermark,
         wasRunning,
         leftAt: Date.now(),
       });
@@ -14411,6 +14510,7 @@
       const steps = viewport.querySelectorAll('[data-step-index]');
       if (steps && steps.length > 0) {
         let matchEl = null;
+        let exactMatched = false;
         let minStepNum = Infinity;
         let maxStepNum = -Infinity;
         let nearestAfterEl = null;
@@ -14420,6 +14520,7 @@
           const raw = String(el.getAttribute('data-step-index') || '').trim();
           if (raw === anchorIdx && !matchEl) {
             matchEl = el;
+            exactMatched = true;
           }
           if (/^\d+$/.test(raw)) {
             const n = Number.parseInt(raw, 10);
@@ -14434,7 +14535,11 @@
         if (!matchEl) {
           if (Number.isFinite(anchorNum) && Number.isFinite(minStepNum)) {
             if (anchorNum < minStepNum) {
-              return { mode: 'abandon-bottom', scrollTop: currentMaxScroll };
+              return {
+                mode: 'need-older-slice',
+                targetStep: anchorNum,
+                scrollTop: currentMaxScroll,
+              };
             }
             if (anchorNum > maxStepNum) {
               return { mode: 'pending', scrollTop: currentMaxScroll };
@@ -14454,7 +14559,8 @@
         }
         const curTop = Math.max(0, Number(viewport.scrollTop) || 0);
         const stepTopInScroll = mRect.top - vpRect.top + curTop;
-        const rawTarget = Math.round(stepTopInScroll - (Number(saved?.anchorOffset) || 0));
+        const effectiveOffset = exactMatched ? Number(saved?.anchorOffset) || 0 : 16;
+        const rawTarget = Math.round(stepTopInScroll - effectiveOffset);
         const minTop = isPaginatedSlice ? Math.min(currentMaxScroll, MIN_PAGINATED_SAFE_TOP_PX) : 0;
         return {
           mode: 'restore',
@@ -14495,140 +14601,199 @@
     };
   }
 
-  function applyPendingScrollRestore() {
+  function scheduleScrollRestoreSettlePass(restore) {
+    if (!restore || restore.settleRaf || state.activeScrollRestore !== restore) return;
+    restore.settleRaf = requestAnimationFrame(() => {
+      restore.settleRaf = 0;
+      if (state.activeScrollRestore !== restore) return;
+      applyPendingScrollRestore(true);
+    });
+  }
+
+  function finalizeScrollRestore(restore) {
+    if (!restore || state.activeScrollRestore !== restore) return;
+    const { cidLower, viewport, applied } = restore;
+    cancelActiveScrollRestore({ markReady: true });
+    if (!viewport?.isConnected) return;
+    if (applied) {
+      recordConversationScrollState(cidLower, viewport);
+    } else {
+      refreshSavedConversationReplyMarkers(cidLower);
+    }
+  }
+
+  function applyPendingScrollRestore(fromSettleRaf = false) {
     const r = state.activeScrollRestore;
     if (!r) return;
     const vp = r.viewport;
-    const vpOwnerCid =
-      vp?.closest?.('[data-testid="conversation-view"]')?.getAttribute('data-cascade-id')?.trim().toLowerCase() ||
-      extractCascadeId().toLowerCase();
+    const { cidLower: vpOwnerCid } = findConversationScrollViewport(r.viewEl);
     if (!vp || !vp.isConnected || vpOwnerCid !== r.cidLower) {
-      cancelActiveScrollRestore({ markReady: true });
+      cancelActiveScrollRestore({ markReady: false });
       return;
-    }
-    if (r.resizeObserver) {
-      const contentWrap = vp.firstElementChild;
-      if (contentWrap && contentWrap !== r.observedWrap) {
-        try {
-          r.resizeObserver.observe(contentWrap);
-          if (contentWrap.firstElementChild) {
-            r.resizeObserver.observe(contentWrap.firstElementChild);
-          }
-          r.observedWrap = contentWrap;
-        } catch {}
-      }
     }
     const clientH = Number(vp.clientHeight) || 0;
     const scrollH = Number(vp.scrollHeight) || 0;
     if (clientH <= 0 && scrollH <= 0) return;
     const currentMaxScroll = Math.max(0, scrollH - clientH);
+
     if (r.mode === 'user-prompt') {
       const target = computeUnreadUserMessageTarget(vp, r.viewEl, currentMaxScroll, clientH);
-      if (target !== null) {
-        r.applied = true;
-        if (target.overflowsBottom) {
-          stopNativeAutoScroll(vp);
-        }
-        if (Math.abs((Number(vp.scrollTop) || 0) - target.scrollTop) >= 1) {
-          vp.scrollTop = target.scrollTop;
-        }
-        vp.__aqLastScrollTop = Math.max(0, Number(vp.scrollTop) || 0);
-        vp.__aqLastMaxScroll = currentMaxScroll;
+      if (target === null) {
+        return;
+      }
+      r.applied = true;
+      if (target.overflowsBottom) {
+        stopNativeAutoScroll(vp);
+      }
+      if (Math.abs((Number(vp.scrollTop) || 0) - target.scrollTop) >= 1) {
+        vp.scrollTop = target.scrollTop;
+      }
+      if (target.overflowsBottom) {
+        stopNativeAutoScroll(vp);
+      }
+      if (fromSettleRaf) {
+        finalizeScrollRestore(r);
+      } else {
+        scheduleScrollRestoreSettlePass(r);
       }
       return;
     }
-    const resolved = resolveSavedScrollTarget(vp, r.saved, currentMaxScroll);
-    if (resolved.mode === 'pending') {
-      return;
-    }
-    if (resolved.mode === 'abandon-bottom') {
-      vp.__aqUserScrolled = false;
+
+    if (didSavedConversationAdvance(r.cidLower, r.saved, vp)) {
       forceNativeScrollToBottom(vp);
-      vp.__aqLastScrollTop = Math.max(0, Number(vp.scrollTop) || 0);
-      vp.__aqLastMaxScroll = currentMaxScroll;
       cancelActiveScrollRestore({ markReady: true });
       recordConversationScrollState(r.cidLower, vp);
       return;
     }
+
+    const resolved = resolveSavedScrollTarget(vp, r.saved, currentMaxScroll);
+    if (resolved.mode === 'pending') {
+      return;
+    }
+    if (resolved.mode === 'need-older-slice') {
+      if (!r.requestedOlderSlice) {
+        const pag = getPaginationHandle(vp);
+        if (pag) {
+          r.requestedOlderSlice = true;
+          stopNativeAutoScroll(vp);
+          if (r.timer) clearTimeout(r.timer);
+          r.timer = setTimeout(() => {
+            if (state.activeScrollRestore === r) {
+              applyPendingScrollRestore(true);
+              if (state.activeScrollRestore === r) {
+                finalizeScrollRestore(r);
+              }
+            }
+          }, SCROLL_PAGINATED_SLICE_WAIT_MS);
+          try {
+            void pag.navigateTo(resolved.targetStep);
+          } catch {}
+          return;
+        }
+      } else {
+        return;
+      }
+      // Fallback if pagination handle unavailable
+      forceNativeScrollToBottom(vp);
+      cancelActiveScrollRestore({ markReady: true });
+      recordConversationScrollState(r.cidLower, vp);
+      return;
+    }
+    if (resolved.mode === 'abandon-bottom') {
+      forceNativeScrollToBottom(vp);
+      cancelActiveScrollRestore({ markReady: true });
+      recordConversationScrollState(r.cidLower, vp);
+      return;
+    }
+
     r.applied = true;
     stopNativeAutoScroll(vp);
     if (Math.abs((Number(vp.scrollTop) || 0) - resolved.scrollTop) >= 1) {
       vp.scrollTop = resolved.scrollTop;
     }
-    vp.__aqLastScrollTop = Math.max(0, Number(vp.scrollTop) || 0);
-    vp.__aqLastMaxScroll = currentMaxScroll;
+    stopNativeAutoScroll(vp);
+    if (fromSettleRaf) {
+      finalizeScrollRestore(r);
+    } else {
+      scheduleScrollRestoreSettlePass(r);
+    }
   }
 
   function syncConversationViewportScroll() {
+    const urlCidRaw = extractCascadeId();
+    if (urlCidRaw !== state.cascadeId) {
+      syncCascadeRoute();
+      return;
+    }
+
     const { viewEl, viewport, cidLower } = findConversationScrollViewport(null);
     if (!viewport || !cidLower) {
-      if (!state.initialScrollBootstrapped) {
-        state.initialScrollBootstrapped = true;
+      if (!state.initialViewportBootstrapped && !urlCidRaw) {
+        state.initialViewportBootstrapped = true;
+        state.mountedViewportCid = '';
       }
       return;
     }
 
-    if (viewport.__aqScrollChecked === cidLower) {
-      if (state.activeScrollRestore?.viewport === viewport) {
-        applyPendingScrollRestore();
-      }
+    const urlCidLower = urlCidRaw ? urlCidRaw.toLowerCase() : '';
+    if (urlCidLower && cidLower !== urlCidLower) {
+      // Old conversation DOM has not yet switched to the new URL; do not touch or overwrite
       return;
     }
 
-    // First boot/hot-reload while a conversation is already open on screen: adopt existing v3 scroll state only
-    if (!state.initialScrollBootstrapped) {
-      state.initialScrollBootstrapped = true;
-      const bootScrollTop = Math.max(0, Number(viewport.scrollTop) || 0);
-      const bootMaxScroll = Math.max(
-        0,
-        (Number(viewport.scrollHeight) || 0) - (Number(viewport.clientHeight) || 0)
-      );
-      const existingBootSaved = state.convScrollMemory.get(cidLower) || null;
+    // Initial script boot or hot-reload on an already-open conversation: adopt in place without scrolling
+    if (!state.initialViewportBootstrapped) {
+      state.initialViewportBootstrapped = true;
+      state.mountedViewportCid = cidLower;
       viewport.__aqCid = cidLower;
       viewport.__aqScrollChecked = cidLower;
-      viewport.__aqLastScrollTop = bootScrollTop;
-      viewport.__aqLastMaxScroll = bootMaxScroll;
-      viewport.__aqUserScrolled =
-        Boolean(existingBootSaved?.userScrolled && !existingBootSaved?.atBottom) &&
-        !isViewportVisuallyAtBottom(viewport, bootScrollTop, bootMaxScroll);
+      viewport.__aqReadyToRecord = true;
+      const existingBoot = state.convScrollMemory.get(cidLower);
+      if (!existingBoot) {
+        recordConversationScrollState(cidLower, viewport);
+      } else {
+        refreshSavedConversationReplyMarkers(cidLower);
+      }
+      return;
+    }
+
+    // Same conversation still mounted (or remounted on server reconnect): never yank scrollTop or wipe memory
+    if (cidLower === state.mountedViewportCid) {
+      if (viewport.__aqScrollChecked !== cidLower) {
+        viewport.__aqCid = cidLower;
+        viewport.__aqScrollChecked = cidLower;
+        viewport.__aqReadyToRecord = true;
+      } else if (state.activeScrollRestore?.viewport === viewport) {
+        applyPendingScrollRestore(false);
+      }
+      return;
+    }
+
+    // Genuine cross-conversation viewport enter
+    if (state.activeScrollRestore && state.activeScrollRestore.viewport !== viewport) {
+      cancelActiveScrollRestore({ markReady: false });
+    }
+    state.mountedViewportCid = cidLower;
+    viewport.__aqCid = cidLower;
+    viewport.__aqScrollChecked = cidLower;
+
+    const saved = state.convScrollMemory.get(cidLower) || null;
+    const isUnread = Boolean(state.unreadOnEnterByCid.get(cidLower));
+    state.unreadOnEnterByCid.delete(cidLower);
+
+    const restoreMode = isUnread
+      ? 'user-prompt'
+      : saved && saved.userScrolled && !saved.atBottom && !didSavedConversationAdvance(cidLower, saved, viewport)
+        ? 'saved'
+        : '';
+
+    if (!restoreMode) {
       viewport.__aqReadyToRecord = true;
       recordConversationScrollState(cidLower, viewport);
       return;
     }
 
-    if (state.activeScrollRestore && state.activeScrollRestore.viewport !== viewport) {
-      cancelActiveScrollRestore({ markReady: true });
-    }
-
-    const prevVpCid = viewport.__aqCid || '';
-    const initTop = Math.max(0, Number(viewport.scrollTop) || 0);
-    const initMax = Math.max(
-      0,
-      (Number(viewport.scrollHeight) || 0) - (Number(viewport.clientHeight) || 0)
-    );
-    viewport.__aqCid = cidLower;
-    viewport.__aqScrollChecked = cidLower;
-    viewport.__aqLastScrollTop = initTop;
-    viewport.__aqLastMaxScroll = initMax;
-
-    const saved = state.convScrollMemory.get(cidLower) || null;
-    const isUnread = isConversationUnreadOnOpen(cidLower, saved);
-    const restoreMode = isUnread
-      ? 'user-prompt'
-      : saved && saved.userScrolled && !saved.atBottom && !didSavedConversationAdvance(cidLower, saved)
-        ? 'saved'
-        : '';
-
-    viewport.__aqUserScrolled = restoreMode === 'saved';
-
-    if (!restoreMode) {
-      viewport.__aqReadyToRecord = true;
-      if (!prevVpCid || prevVpCid === cidLower) {
-        recordConversationScrollState(cidLower, viewport);
-      }
-      return;
-    }
-
+    // Lock recording while restore runs so initial mount bottom-scroll never overwrites saved entry
     viewport.__aqReadyToRecord = false;
     const restore = {
       cidLower,
@@ -14637,54 +14802,51 @@
       mode: restoreMode,
       saved: saved ? { ...saved } : null,
       applied: false,
+      requestedOlderSlice: false,
       userInteracted: false,
-      resizeObserver: null,
-      observedWrap: null,
+      settleRaf: 0,
       timer: null,
     };
-    if (typeof ResizeObserver === 'function') {
-      try {
-        const ro = new ResizeObserver(() => {
-          if (state.activeScrollRestore === restore) {
-            applyPendingScrollRestore();
-          }
-        });
-        ro.observe(viewport);
-        const contentWrap = viewport.firstElementChild;
-        if (contentWrap) {
-          ro.observe(contentWrap);
-          if (contentWrap.firstElementChild) {
-            ro.observe(contentWrap.firstElementChild);
-          }
-          restore.observedWrap = contentWrap;
-        }
-        restore.resizeObserver = ro;
-      } catch {}
-    }
     restore.timer = setTimeout(() => {
       if (state.activeScrollRestore === restore) {
-        applyPendingScrollRestore();
+        applyPendingScrollRestore(true);
         if (state.activeScrollRestore === restore) {
-          cancelActiveScrollRestore({ markReady: true });
-          if (restore.applied) {
-            recordConversationScrollState(cidLower, viewport);
-          } else {
-            viewport.__aqUserScrolled = false;
-          }
+          finalizeScrollRestore(restore);
         }
       }
-    }, SCROLL_RESTORE_STABILIZE_MS + 16);
+    }, SCROLL_MOUNT_WAIT_MS);
 
     state.activeScrollRestore = restore;
-    applyPendingScrollRestore();
+    applyPendingScrollRestore(false);
   }
 
   function syncCascadeRoute() {
     const cid = extractCascadeId();
+    if (!state.initialRouteSynced) {
+      state.initialRouteSynced = true;
+      state.cascadeId = cid;
+      state.routeEnterUnread = null;
+      if (cid) {
+        const cidLower = cid.toLowerCase();
+        state.localViewedAtById[cidLower] = Date.now();
+        if (typeof window.__aqRequestTurns === 'function') {
+          try {
+            window.__aqRequestTurns(cid);
+          } catch {}
+        }
+      }
+      syncConversationViewportScroll();
+      return Boolean(cid);
+    }
     if (cid !== state.cascadeId) {
       const prevCid = state.cascadeId;
       if (prevCid) {
         const prevLower = prevCid.toLowerCase();
+        // Freeze outgoing viewport so unmount layout cleanup cannot overwrite saved scroll memory
+        const { viewport: outVp } = findConversationScrollViewport(null);
+        if (outVp && outVp.__aqCid === prevLower) {
+          outVp.__aqReadyToRecord = false;
+        }
         const leaveNow = Date.now();
         state.localViewedAtById[prevLower] = leaveNow;
         const prevMeta = state.trajMetaById[prevLower];
@@ -14706,19 +14868,18 @@
             ? state.routeEnterUnread
             : null;
         const savedIncoming = state.convScrollMemory.get(incomingLower) || null;
-        state.routeEnterUnread = {
-          cidLower: incomingLower,
-          isUnread:
-            Boolean(preclick?.isUnread) || isConversationUnreadNow(incomingLower, savedIncoming),
-          at: Date.now(),
-        };
+        const incomingUnread =
+          Boolean(preclick?.isUnread) || isConversationUnreadNow(incomingLower, savedIncoming);
+        state.routeEnterUnread = null;
+        state.unreadOnEnterByCid.set(incomingLower, incomingUnread);
       } else {
         state.routeEnterUnread = null;
+        state.mountedViewportCid = '';
       }
       state.cascadeId = cid;
       stopLiveTurnTimer();
       if (!cid) {
-        cancelActiveScrollRestore({ markReady: true });
+        cancelActiveScrollRestore({ markReady: false });
         state.turnsPayload = null;
       } else {
         const cidLower = cid.toLowerCase();
@@ -14908,11 +15069,12 @@
         if (activeRestore && activeRestore.cidLower === cidLowerForScroll) {
           if (
             activeRestore.mode === 'saved' &&
-            hasTurnsPayloadNewTurn(nextPayload, cidLowerForScroll, activeRestore.saved)
+            hasTurnsPayloadAdvanced(nextPayload, cidLowerForScroll, activeRestore.saved)
           ) {
             const vp = activeRestore.viewport;
             cancelActiveScrollRestore({ markReady: true });
             if (vp?.isConnected) {
+              vp.__aqUserScrolled = false;
               forceNativeScrollToBottom(vp);
               recordConversationScrollState(cidLowerForScroll, vp);
             }
@@ -15518,21 +15680,36 @@
     state.historyTimers.add(id);
   }
 
-  // Hook history API
+  // Hook history API: snapshot outgoing live DOM BEFORE route change, then sync route immediately (before microtasks)
   const origPush = history.pushState;
   const origReplace = history.replaceState;
   history.pushState = function (...args) {
+    if (!state.disposed) {
+      snapshotActiveConversationScrollBeforeLeave();
+    }
     const r = origPush.apply(this, args);
-    scheduleHistoryRouteCheck(0);
+    if (!state.disposed) {
+      checkRoute();
+    }
     scheduleHistoryRouteCheck(120);
     return r;
   };
   history.replaceState = function (...args) {
+    if (!state.disposed) {
+      snapshotActiveConversationScrollBeforeLeave();
+    }
     const r = origReplace.apply(this, args);
-    scheduleHistoryRouteCheck(0);
+    if (!state.disposed) {
+      checkRoute();
+    }
     return r;
   };
-  const onPopState = () => checkRoute();
+  const onPopState = () => {
+    if (!state.disposed) {
+      snapshotActiveConversationScrollBeforeLeave();
+      checkRoute();
+    }
+  };
   const onVisChange = () => {
     if (document.hidden) {
       stopLiveTurnTimer();
@@ -15602,20 +15779,35 @@
     if (t?.closest?.('[data-testid="conversation-navigator"]')) {
       const navView = t.closest('[data-testid="conversation-view"]');
       const navVp = navView?.querySelector?.('[data-testid="autoscroll-viewport"]');
-      if (navVp) {
-        navVp.__aqNavJumpUntil = Date.now() + 500;
+      if (navVp && state.activeScrollRestore?.viewport === navVp) {
+        state.activeScrollRestore.userInteracted = true;
+        cancelActiveScrollRestore({ markReady: true });
       }
     }
-    const hitVp = t?.closest?.('[data-testid="autoscroll-viewport"]');
-    if (hitVp && t === hitVp && typeof hitVp.getBoundingClientRect === 'function') {
-      const vpRect = hitVp.getBoundingClientRect();
-      if (vpRect.width > 0 && Number(ev.clientX) >= vpRect.right - 20) {
-        hitVp.__aqNavJumpUntil = Date.now() + 800;
+    const overlayHost = t?.closest?.('[data-autoscroll-overlay-host]');
+    const overlayVp = overlayHost?.querySelector?.('[data-testid="autoscroll-viewport"]') || null;
+    if (overlayVp) {
+      const hitScrollbar = Boolean(t?.closest?.('[data-testid="overlay-scrollbar"]'));
+      const hitVp = t?.closest?.('[data-testid="autoscroll-viewport"]');
+      const hitOverlayJumpBtn = Boolean(!hitVp && !hitScrollbar && t?.closest?.('button'));
+      if (hitOverlayJumpBtn) {
+        if (state.activeScrollRestore?.viewport === overlayVp) {
+          cancelActiveScrollRestore({ markReady: true });
+        }
+        if (overlayVp.__aqCid) {
+          const existing = state.convScrollMemory.get(overlayVp.__aqCid);
+          if (existing) {
+            existing.atBottom = true;
+            existing.userScrolled = false;
+            existing.anchorStepIndex = '';
+            existing.anchorOffset = 0;
+            schedulePersistConvScrollMemory();
+          }
+        }
+      } else if (state.activeScrollRestore?.viewport === overlayVp) {
+        state.activeScrollRestore.userInteracted = true;
+        cancelActiveScrollRestore({ markReady: true });
       }
-    }
-    if (state.activeScrollRestore && hitVp === state.activeScrollRestore.viewport) {
-      state.activeScrollRestore.userInteracted = true;
-      cancelActiveScrollRestore({ markReady: true });
     }
     if (state.quotaTooltipPinned && !t?.closest?.('#aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-quota-chip')) {
       closeQuotaTooltip();
@@ -16218,12 +16410,16 @@
   };
   const onDocWheelOrTouchCapture = (ev) => {
     if (!isInstanceAlive()) return;
-    const vp = ev.target?.closest?.('[data-testid="autoscroll-viewport"]');
+    const host = ev.target?.closest?.('[data-autoscroll-overlay-host]');
+    const vp =
+      ev.target?.closest?.('[data-testid="autoscroll-viewport"]') ||
+      host?.querySelector?.('[data-testid="autoscroll-viewport"]') ||
+      null;
     if (!vp) return;
     if (
       state.activeScrollRestore &&
       vp === state.activeScrollRestore.viewport &&
-      (ev.type === 'wheel' || ev.type === 'touchmove')
+      (ev.type === 'wheel' || ev.type === 'touchstart' || ev.type === 'touchmove')
     ) {
       state.activeScrollRestore.userInteracted = true;
       cancelActiveScrollRestore({ markReady: true });
@@ -16298,7 +16494,7 @@
       }
     }
   };
-  registerGlobalListener(window, 'popstate', onPopState);
+  registerGlobalListener(window, 'popstate', onPopState, true);
   registerGlobalListener(window, 'click', onWinClickCapture, true);
   registerGlobalListener(window, 'contextmenu', onWinContextMenuCapture, true);
   registerGlobalListener(window, 'pointermove', onWinPointerMoveCapture, true);
