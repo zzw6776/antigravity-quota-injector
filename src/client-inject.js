@@ -35,6 +35,22 @@
     return;
   }
 
+  function clearRegisteredListeners() {
+    if (!Array.isArray(window.__aqRegisteredListeners)) return;
+    while (window.__aqRegisteredListeners.length > 0) {
+      const rec = window.__aqRegisteredListeners.pop();
+      try {
+        rec?.target?.removeEventListener?.(rec.type, rec.fn, rec.capture);
+      } catch {}
+    }
+  }
+
+  if (Array.isArray(window.__aqRegisteredListeners)) {
+    clearRegisteredListeners();
+  } else {
+    window.__aqRegisteredListeners = [];
+  }
+
   if (Array.isArray(window.__aqCleanupRegistry)) {
     while (window.__aqCleanupRegistry.length > 0) {
       const fn = window.__aqCleanupRegistry.pop();
@@ -184,6 +200,7 @@
     groupCreateParentId: '',
     groupCreateInitialItem: null,
     groupRenamingId: '',
+    convRenaming: null,
     groupDeleteConfirmId: '',
     groupDeleteConfirmTimer: null,
     groupMenuTarget: null,
@@ -235,6 +252,7 @@
     hiddenKeepAliveCids: new Set(),
     localViewedAtById: Object.create(null),
     localUserInputAtById: Object.create(null),
+    localRenamedTitleById: Object.create(null),
     sidebarTab: (() => {
       try {
         return localStorage.getItem('aq_sidebar_tab_v1') === 'projects' ? 'projects' : 'groups';
@@ -269,6 +287,64 @@
     groupResizeSnapTimer: null,
     convWidthMode: initConvWidthPref.mode,
     convMaxWidth: initConvWidthPref.width,
+    showCollapsedGroupCount: (() => {
+      try {
+        return localStorage.getItem('aq_show_collapsed_grp_count_v1') !== '0';
+      } catch {
+        return true;
+      }
+    })(),
+    fileOpenDefault: (() => {
+      try {
+        const v = String(localStorage.getItem('aq_file_open_default_v1') || '').trim().toLowerCase();
+        return [
+          'idea-project',
+          'idea-light',
+          'vscode',
+          'cursor',
+          'notepad--',
+          'notepad++',
+          'sublime',
+          'zed',
+          'system-text',
+        ].includes(v)
+          ? v
+          : 'builtin';
+      } catch {
+        return 'builtin';
+      }
+    })(),
+    externalEditors: (() => {
+      const plat =
+        typeof window.process?.platform === 'string' && window.process.platform
+          ? window.process.platform
+          : /Win/i.test(String(globalThis.navigator?.userAgent || ''))
+            ? 'win32'
+            : 'darwin';
+      return {
+        platform: plat,
+        options: [
+          plat === 'win32'
+            ? {
+                id: 'system-text',
+                label: '记事本',
+                menuLabel: '在记事本中打开',
+                supportsLine: false,
+                supportsDirectory: false,
+              }
+            : {
+                id: 'system-text',
+                label: '文本编辑',
+                menuLabel: '在文本编辑中打开',
+                supportsLine: false,
+                supportsDirectory: false,
+              },
+        ],
+      };
+    })(),
+    fileCtxMenuTarget: null,
+    bypassFileClickInterceptOnce: false,
+    fileToastTimer: null,
     uiPrefsLoaded: false,
     uiPrefsMigrated: false,
     convLastCustomWidth: (() => {
@@ -288,12 +364,19 @@
     convDragExpandTimer: null,
     convDragHoverGroupTimer: null,
     convDragHoverGroupId: '',
+    lastPathname: '',
     convScrollMemory: (() => {
       const map = new Map();
       try {
+        if (typeof sessionStorage !== 'undefined') {
+          try {
+            sessionStorage.removeItem('aq_conv_scroll_v1');
+            sessionStorage.removeItem('aq_conv_scroll_v2');
+          } catch {}
+        }
         const raw =
           typeof sessionStorage !== 'undefined'
-            ? sessionStorage.getItem('aq_conv_scroll_v1')
+            ? sessionStorage.getItem('aq_conv_scroll_v3')
             : null;
         const parsed = raw ? JSON.parse(raw) : null;
         if (Array.isArray(parsed)) {
@@ -315,7 +398,7 @@
     })(),
     convScrollPersistTimer: null,
     activeScrollRestore: null,
-    routeEnterNewReply: null,
+    routeEnterUnread: null,
     initialScrollBootstrapped: false,
     autoUnpinnedCids: (() => {
       try {
@@ -402,8 +485,22 @@
     },
   };
 
+  function isInstanceAlive() {
+    return !state.disposed && window.__aq_active_token === INSTANCE_TOKEN;
+  }
+
+  function registerGlobalListener(target, type, fn, optionsOrCapture = false) {
+    const capture =
+      typeof optionsOrCapture === 'boolean'
+        ? optionsOrCapture
+        : Boolean(optionsOrCapture?.capture);
+    target.addEventListener(type, fn, optionsOrCapture);
+    if (Array.isArray(window.__aqRegisteredListeners)) {
+      window.__aqRegisteredListeners.push({ target, type, fn, capture });
+    }
+  }
+
   window.__aqCleanupRegistry.push(() => {
-    state.disposed = true;
     state.domObserver?.disconnect();
     state.footerObserver?.disconnect();
     state.footerResizeObserver?.disconnect();
@@ -500,6 +597,18 @@
       [style*="--max-conversation-width"],
       [style*="--max-artifact-width"] {
         max-width: min(100%, var(--aq-conv-max-width, 768px)) !important;
+      }
+      [data-testid="conversation-navigator"] {
+        left: -14px !important;
+        width: 0px !important;
+        overflow: visible !important;
+      }
+      [data-testid="conversation-navigator"] > div {
+        transform: translateX(28px);
+      }
+      [data-testid="conversation-view"]:has([data-testid="conversation-navigator"]) [style*="--max-conversation-width"],
+      [data-testid="conversation-view"]:has([data-testid="conversation-navigator"]) [style*="--max-artifact-width"] {
+        max-width: max(min(100%, 480px), min(calc(100% - 24px), var(--aq-conv-max-width, 768px))) !important;
       }
 
       .aq-conv-width-resizer {
@@ -974,6 +1083,7 @@
       #aq-turn-tooltip {
         min-width: min(340px, calc(100vw - 24px));
         max-width: min(460px, calc(100vw - 24px));
+        font-size: 10px;
       }
       #aq-context-tooltip {
         width: auto;
@@ -1020,7 +1130,7 @@
         justify-content: space-between;
         gap: 16px;
         font-weight: 650;
-        font-size: 11.5px;
+        font-size: 11px;
         margin-bottom: 8px;
       }
       .aq-tt-sub {
@@ -1059,7 +1169,7 @@
       }
       .aq-tt-row-ter {
         color: #71717a;
-        font-size: 10px;
+        font-size: 9px;
       }
       :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-tt-row-ter {
         color: #9a9aa4;
@@ -1087,7 +1197,7 @@
       .aq-tt-details summary {
         cursor: pointer;
         color: #71717a;
-        font-size: 10px;
+        font-size: 9px;
         user-select: none;
         list-style-position: inside;
       }
@@ -1098,6 +1208,7 @@
         display: grid;
         gap: 5px;
         margin-top: 5px;
+        font-size: 9px;
         max-height: 240px;
         overflow-x: hidden;
         overflow-y: auto;
@@ -1108,7 +1219,7 @@
         grid-template-columns: minmax(0, 1fr) auto;
         align-items: baseline;
         gap: 12px;
-        font-size: 10px;
+        font-size: 9px;
       }
       .aq-tt-req-name {
         min-width: 0;
@@ -1170,7 +1281,7 @@
         background: transparent;
         color: #71717a;
         font: inherit;
-        font-size: 10px;
+        font-size: 9px;
         text-align: left;
         cursor: pointer;
       }
@@ -1193,8 +1304,8 @@
         gap: 2px;
         margin-top: 6px;
         color: #71717a;
-        font-size: 10px;
-        line-height: 14px;
+        font-size: 9px;
+        line-height: 13px;
       }
       :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-tt-meta {
         color: #9a9aa4;
@@ -2104,6 +2215,145 @@
         flex-direction: column;
         gap: 4px;
       }
+      .aq-ks-toggle-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 2px 0;
+      }
+      .aq-ks-toggle-copy {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+      }
+      .aq-ks-toggle-title {
+        font-size: 11.5px;
+        font-weight: 500;
+        color: inherit;
+      }
+      .aq-ks-switch {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        width: 32px;
+        height: 18px;
+        padding: 0;
+        border: none;
+        border-radius: 999px;
+        background: rgba(113, 113, 122, 0.28);
+        cursor: pointer;
+        flex-shrink: 0;
+        transition: background-color 0.16s ease;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-ks-switch {
+        background: rgba(161, 161, 170, 0.28);
+      }
+      .aq-ks-switch.is-on {
+        background: #10b981;
+      }
+      .aq-ks-switch-thumb {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: #ffffff;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+        transform: translateX(2px);
+        transition: transform 0.16s ease;
+      }
+      .aq-ks-switch.is-on .aq-ks-switch-thumb {
+        transform: translateX(16px);
+      }
+      .aq-ks-sep {
+        height: 1px;
+        background: rgba(0, 0, 0, 0.08);
+        margin: 2px 0;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-ks-sep {
+        background: rgba(255, 255, 255, 0.09);
+      }
+      .aq-ks-select,
+      .aq-stg-select {
+        appearance: none;
+        -webkit-appearance: none;
+        box-sizing: border-box;
+        border-radius: 7px;
+        border: 1px solid rgba(0, 0, 0, 0.14);
+        background-color: #fafafa;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none' stroke='%2371717a' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 6.5L8 10l3.5-3.5'/%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: right 8px center;
+        color: inherit;
+        font: inherit;
+        font-size: 11.5px;
+        font-weight: 500;
+        line-height: 1.3;
+        padding: 5px 26px 5px 9px;
+        min-width: 132px;
+        cursor: pointer;
+        outline: none;
+        transition: border-color 0.14s ease, background-color 0.14s ease;
+      }
+      .aq-stg-select {
+        font-size: 12.5px;
+        padding: 6px 28px 6px 10px;
+        min-width: 148px;
+        border-radius: 8px;
+      }
+      .aq-ks-select:hover,
+      .aq-stg-select:hover {
+        border-color: rgba(0, 0, 0, 0.24);
+      }
+      .aq-ks-select:focus,
+      .aq-stg-select:focus {
+        border-color: #10b981;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-ks-select,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-stg-select {
+        border-color: rgba(255, 255, 255, 0.14);
+        background-color: #27272a;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none' stroke='%23a1a1aa' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 6.5L8 10l3.5-3.5'/%3E%3C/svg%3E");
+        color: #f4f4f5;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-ks-select:hover,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-stg-select:hover {
+        border-color: rgba(255, 255, 255, 0.26);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-ks-select:focus,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-stg-select:focus {
+        border-color: #34d399;
+      }
+      #aq-file-toast {
+        position: fixed;
+        top: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 2147483647;
+        padding: 6px 12px;
+        border-radius: 9999px;
+        background: #ffffff;
+        color: #18181b;
+        border: 1px solid rgba(24, 24, 27, 0.12);
+        box-shadow: 0 10px 26px rgba(15, 23, 42, 0.16);
+        font: 500 11.5px/1.35 var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+        pointer-events: none;
+        white-space: nowrap;
+      }
+      #aq-file-toast.is-error {
+        border-color: rgba(220, 38, 38, 0.35);
+        color: #dc2626;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-file-toast {
+        background: #1c1c22;
+        color: #f4f4f7;
+        border-color: rgba(255, 255, 255, 0.14);
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.55);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-file-toast.is-error {
+        border-color: rgba(248, 113, 113, 0.38);
+        color: #f87171;
+      }
       .aq-ks-row2 {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -2570,6 +2820,81 @@
       }
       .bg-sidebar [data-testid="sidebar-navigation-items"] {
         gap: 2px !important;
+      }
+      .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] {
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: center !important;
+        gap: 2px !important;
+        height: 30px !important;
+        min-height: 30px !important;
+      }
+      .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] > [data-testid="new-conversation-button"] {
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
+        width: auto !important;
+        height: 30px !important;
+        padding: 0 8px !important;
+        gap: 6px !important;
+        border-radius: 8px !important;
+        background-color: transparent !important;
+        border: 0 !important;
+        box-shadow: none !important;
+      }
+      .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] > [data-testid="new-conversation-button"]:hover {
+        background-color: var(--sidebar-muted, rgba(24, 24, 27, 0.045)) !important;
+        color: var(--foreground, #18181b) !important;
+      }
+      .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] > a:not([data-testid="new-conversation-button"]),
+      .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] > button:not([data-testid="new-conversation-button"]) {
+        flex: 0 0 26px !important;
+        width: 26px !important;
+        min-width: 26px !important;
+        max-width: 26px !important;
+        height: 26px !important;
+        padding: 0 !important;
+        gap: 0 !important;
+        justify-content: center !important;
+        align-items: center !important;
+        border-radius: 7px !important;
+        color: var(--muted-foreground, #71717a) !important;
+        transition: background-color 120ms ease, color 120ms ease;
+      }
+      .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] > a:not([data-testid="new-conversation-button"]) > span.truncate,
+      .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] > button:not([data-testid="new-conversation-button"]) > span.truncate {
+        display: none !important;
+      }
+      .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] > a:not([data-testid="new-conversation-button"]) svg,
+      .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] > button:not([data-testid="new-conversation-button"]) svg {
+        width: 15px !important;
+        height: 15px !important;
+        display: block;
+      }
+      .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] > a:not([data-testid="new-conversation-button"]):hover,
+      .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] > button:not([data-testid="new-conversation-button"]):hover {
+        background-color: var(--sidebar-muted, rgba(24, 24, 27, 0.055)) !important;
+        color: var(--foreground, #18181b) !important;
+      }
+      .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] > [data-aq-nav-active="1"] {
+        background-color: rgba(24, 24, 27, 0.075) !important;
+        color: var(--foreground, #18181b) !important;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] > [data-testid="new-conversation-button"]:hover {
+        background-color: rgba(255, 255, 255, 0.055) !important;
+        color: #f4f4f7 !important;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] > a:not([data-testid="new-conversation-button"]),
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] > button:not([data-testid="new-conversation-button"]) {
+        color: #9a9aa6 !important;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] > a:not([data-testid="new-conversation-button"]):hover,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] > button:not([data-testid="new-conversation-button"]):hover {
+        background-color: rgba(255, 255, 255, 0.075) !important;
+        color: #f4f4f7 !important;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .bg-sidebar [data-testid="sidebar-navigation-items"][data-aq-nav-inline="1"] > [data-aq-nav-active="1"] {
+        background-color: rgba(255, 255, 255, 0.11) !important;
+        color: #ffffff !important;
       }
       .bg-sidebar > .px-2 + div.h-px,
       .bg-sidebar > div.h-px:has(+ div > [data-testid="settings-button"]) {
@@ -3062,6 +3387,7 @@
       .aq-grp-block.aq-grp-drag-inside > .aq-grp-hdr .aq-grp-chev,
       .aq-grp-block.aq-grp-drag-inside > .aq-grp-hdr .aq-grp-count {
         color: #2563eb;
+        opacity: 0.9;
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-block.aq-grp-drop-target > .aq-grp-hdr,
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-block.aq-grp-drag-inside > .aq-grp-hdr {
@@ -3076,6 +3402,7 @@
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-block.aq-grp-drag-inside > .aq-grp-hdr .aq-grp-chev,
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-block.aq-grp-drag-inside > .aq-grp-hdr .aq-grp-count {
         color: #60a5fa;
+        opacity: 0.9;
       }
       .aq-grp-hdr {
         display: flex;
@@ -3134,9 +3461,18 @@
       }
       .aq-grp-count {
         font-size: 11px;
-        color: var(--muted-foreground, #71717a);
+        font-weight: 400;
+        font-variant-numeric: tabular-nums;
+        color: var(--muted-foreground, #94a3b8);
+        opacity: 0.28;
         flex-shrink: 0;
         margin-right: 2px;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-grp-count {
+        opacity: 0.26;
+      }
+      html[data-aq-hide-collapsed-grp-count] .aq-grp-count {
+        display: none !important;
       }
       .aq-grp-fold-hint {
         font-size: 11px;
@@ -3698,7 +4034,8 @@
         border-top: 1px solid rgba(127, 127, 127, 0.16);
       }
 
-      #aq-grp-ctx-menu {
+      #aq-grp-ctx-menu,
+      #aq-file-ctx-menu {
         position: fixed;
         z-index: 999999;
         min-width: 152px;
@@ -3713,16 +4050,37 @@
         display: none;
         user-select: none;
       }
-      #aq-grp-ctx-menu.is-visible {
+      #aq-file-ctx-menu {
+        z-index: 2147483647;
+        min-width: 176px;
+        max-width: 264px;
+      }
+      #aq-grp-ctx-menu.is-visible,
+      #aq-file-ctx-menu.is-visible {
         display: flex;
         flex-direction: column;
         gap: 1px;
       }
-      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-grp-ctx-menu {
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-grp-ctx-menu,
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-file-ctx-menu {
         background: #1c1c22;
         border-color: rgba(255, 255, 255, 0.12);
         box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
         color: #f4f4f7;
+      }
+      .aq-ctx-item-label {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .aq-ctx-item-sub {
+        font-size: 11px;
+        color: var(--muted-foreground, #71717a);
+        font-variant-numeric: tabular-nums;
+        flex-shrink: 0;
+        margin-left: 6px;
       }
       .aq-ctx-item {
         appearance: none;
@@ -6049,7 +6407,7 @@
         ? `<button type="button" class="aq-update-open${updAvailable || updInstalling ? '' : ' aq-panel-version-text'}" data-aq-update-open="1" ${updOpening || updInstalling ? 'disabled aria-busy="true"' : ''}>${versionLabel}</button>`
         : `<span class="aq-panel-version-text">${versionLabel}</span>`;
 
-    const settingsBtnHtml = '<button type="button" class="aq-key-settings-btn" data-aq-key-settings-open="1" title="AI 简述 / 翻译设置" aria-label="AI 简述 / 翻译设置"><svg class="aq-key-settings-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M13.2 8a5.2 5.2 0 0 0-.08-.88l1.42-1.1-1.35-2.34-1.72.66a5.2 5.2 0 0 0-1.52-.88L9.68 1.6H6.32l-.27 1.86c-.55.21-1.06.51-1.52.88l-1.72-.66L1.46 6.02l1.42 1.1a5.3 5.3 0 0 0 0 1.76l-1.42 1.1 1.35 2.34 1.72-.66c.46.37.97.67 1.52.88l.27 1.86h3.36l.27-1.86c.55-.21 1.06-.51 1.52-.88l1.72.66 1.35-2.34-1.42-1.1c.05-.29.08-.58.08-.88Z"/></svg></button>';
+    const settingsBtnHtml = '<button type="button" class="aq-key-settings-btn" data-aq-key-settings-open="1" title="注入器设置" aria-label="注入器设置"><svg class="aq-key-settings-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M13.2 8a5.2 5.2 0 0 0-.08-.88l1.42-1.1-1.35-2.34-1.72.66a5.2 5.2 0 0 0-1.52-.88L9.68 1.6H6.32l-.27 1.86c-.55.21-1.06.51-1.52.88l-1.72-.66L1.46 6.02l1.42 1.1a5.3 5.3 0 0 0 0 1.76l-1.42 1.1 1.35 2.34 1.72-.66c.46.37.97.67 1.52.88l.27 1.86h3.36l.27-1.86c.55-.21 1.06-.51 1.52-.88l1.72.66 1.35-2.34-1.42-1.1c.05-.29.08-.58.08-.88Z"/></svg></button>';
 
     const updateHtml = `
       <div class="aq-q-update">
@@ -7383,6 +7741,432 @@
     }
   }
 
+  const VALID_CLIENT_FILE_OPEN_MODES = new Set([
+    'builtin',
+    'idea-project',
+    'idea-light',
+    'vscode',
+    'cursor',
+    'notepad--',
+    'notepad++',
+    'sublime',
+    'zed',
+    'system-text',
+  ]);
+
+  function sanitizeClientFileOpenDefault(raw) {
+    const clean = String(raw || '').trim().toLowerCase();
+    return VALID_CLIENT_FILE_OPEN_MODES.has(clean) ? clean : 'builtin';
+  }
+
+  function getDetectedEditorOptions() {
+    return Array.isArray(state.externalEditors?.options) ? state.externalEditors.options : [];
+  }
+
+  function isExternalEditorModeAvailable(mode) {
+    if (mode === 'builtin') return true;
+    return getDetectedEditorOptions().some((opt) => opt?.id === mode);
+  }
+
+  function getEffectiveFileOpenDefault() {
+    const pref = sanitizeClientFileOpenDefault(state.fileOpenDefault);
+    return isExternalEditorModeAvailable(pref) ? pref : 'builtin';
+  }
+
+  function sendFileAction(payload) {
+    if (typeof window.__aqFileAction !== 'function') return false;
+    try {
+      window.__aqFileAction(JSON.stringify(payload || {}));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function showFileActionToast(message, isError = false) {
+    if (typeof document === 'undefined' || !document.body) return;
+    const clean = String(message || '').trim();
+    if (!clean) return;
+    if (state.fileToastTimer) {
+      clearTimeout(state.fileToastTimer);
+      state.fileToastTimer = null;
+    }
+    let toast = document.getElementById('aq-file-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'aq-file-toast';
+      document.body.appendChild(toast);
+    }
+    toast.classList.toggle('is-error', Boolean(isError));
+    toast.textContent = clean;
+    state.fileToastTimer = setTimeout(() => {
+      state.fileToastTimer = null;
+      document.getElementById('aq-file-toast')?.remove();
+    }, isError ? 3600 : 2000);
+  }
+
+  window.__aqShowFileToast = function (payload) {
+    if (!isInstanceAlive()) return;
+    if (payload?.message) {
+      showFileActionToast(payload.message, payload.ok === false);
+    }
+  };
+
+  function renderFileOpenSelectOptionsHtml() {
+    const cur = getEffectiveFileOpenDefault();
+    const list = [{ id: 'builtin', label: '内置预览' }, ...getDetectedEditorOptions()];
+    return list
+      .map((opt) => {
+        const id = String(opt?.id || '');
+        const label = String(opt?.label || id);
+        if (!id) return '';
+        return `<option value="${escapeHtml(id)}"${id === cur ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+      })
+      .join('');
+  }
+
+  function syncFileOpenDefaultControlsInPlace() {
+    const cur = getEffectiveFileOpenDefault();
+    const optionsHtml = renderFileOpenSelectOptionsHtml();
+    const selects = document.querySelectorAll('select[data-aq-file-open-select]');
+    for (let i = 0; i < selects.length; i++) {
+      const sel = selects[i];
+      if (sel.dataset.aqOptSig !== optionsHtml) {
+        sel.innerHTML = optionsHtml;
+        sel.dataset.aqOptSig = optionsHtml;
+      }
+      if (sel.value !== cur) {
+        sel.value = cur;
+      }
+    }
+  }
+
+  function setFileOpenDefaultPref(nextMode, { notifyDaemon = true } = {}) {
+    const cleanMode = sanitizeClientFileOpenDefault(nextMode);
+    state.fileOpenDefault = cleanMode;
+    try {
+      localStorage.setItem('aq_file_open_default_v1', cleanMode);
+    } catch {}
+    syncFileOpenDefaultControlsInPlace();
+    if (notifyDaemon) {
+      sendUiPrefsAction({ type: 'set-file-open-default', target: cleanMode });
+    }
+  }
+
+  function parseFileUriForClient(rawUri) {
+    const raw = String(rawUri || '').trim();
+    if (!/^file:\/\//i.test(raw)) return null;
+    let cleanUri = raw;
+    let fragment = '';
+    const hashIdx = raw.indexOf('#');
+    if (hashIdx >= 0) {
+      cleanUri = raw.slice(0, hashIdx);
+      fragment = raw.slice(hashIdx + 1);
+    }
+    let line = null;
+    let column = null;
+    if (fragment) {
+      const m = /^L?(\d+)(?:(?:-L?\d+)|(?::(\d+))|(?:C(\d+)))?/i.exec(fragment.trim());
+      if (m) {
+        const ln = Number.parseInt(m[1], 10);
+        const col = m[2] || m[3] ? Number.parseInt(m[2] || m[3], 10) : null;
+        if (Number.isInteger(ln) && ln > 0) line = ln;
+        if (Number.isInteger(col) && col > 0) column = col;
+      }
+    }
+    let localPath = cleanUri;
+    try {
+      const u = new URL(cleanUri);
+      let decoded = decodeURIComponent(u.pathname || '');
+      if (state.externalEditors?.platform === 'win32' || /^\/[A-Za-z]:\//.test(decoded)) {
+        if (/^\/[A-Za-z]:\//.test(decoded)) {
+          decoded = decoded.slice(1);
+        }
+        if (state.externalEditors?.platform === 'win32') {
+          decoded = decoded.replace(/\//g, '\\');
+        }
+      }
+      if (decoded) localPath = decoded;
+    } catch {}
+    return { rawUri: raw, cleanUri, localPath, line, column };
+  }
+
+  const FILE_TARGET_SKIP_SELECTOR =
+    '#aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-file-ctx-menu, #aq-key-settings-modal, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-context-tooltip, #aq-turn-tooltip, .settings-modal-container, [data-aq-settings-ext], [data-lexical-editor]';
+
+  function resolveFileTargetFromNode(node) {
+    const el = node?.nodeType === 1 ? node : node?.parentElement;
+    if (!el || typeof el.closest !== 'function') return null;
+    if (el.closest(FILE_TARGET_SKIP_SELECTOR)) return null;
+
+    let hitEl = null;
+    let rawUri = '';
+    let isReviewRow = false;
+
+    const dataUriEl = el.closest('[data-uri]');
+    if (dataUriEl) {
+      const candidate = String(dataUriEl.getAttribute('data-uri') || '').trim();
+      if (/^file:\/\//i.test(candidate)) {
+        hitEl = dataUriEl;
+        rawUri = candidate;
+      }
+    }
+    if (!hitEl) {
+      const fileUriEl = el.closest('[data-file-uri]');
+      if (fileUriEl) {
+        const candidate = String(fileUriEl.getAttribute('data-file-uri') || '').trim();
+        if (/^file:\/\//i.test(candidate)) {
+          hitEl = fileUriEl;
+          rawUri = candidate;
+          isReviewRow = true;
+        }
+      }
+    }
+    if (!hitEl) {
+      const anchorEl = el.closest('a[href]');
+      if (anchorEl) {
+        const candidate = String(anchorEl.getAttribute('href') || '').trim();
+        if (/^file:\/\//i.test(candidate)) {
+          hitEl = anchorEl;
+          rawUri = candidate;
+        }
+      }
+    }
+    if (!hitEl || !rawUri) return null;
+
+    const parsed = parseFileUriForClient(rawUri);
+    if (!parsed) return null;
+
+    const isArtifactCard = Boolean(
+      hitEl.closest('[data-testid="artifact-card"], [data-testid="bubble-artifact-card"]')
+    );
+    const isBreadcrumb = Boolean(hitEl.closest('[aria-label="File path breadcrumbs"]'));
+    const symText = String(hitEl.querySelector?.('.google-symbols')?.textContent || '').trim();
+    const isDirectory =
+      parsed.cleanUri.endsWith('/') ||
+      Boolean(hitEl.querySelector?.('[data-project-glyph="folder"]')) ||
+      symText === 'folder' ||
+      symText === 'folder_open';
+
+    return {
+      element: hitEl,
+      ...parsed,
+      isArtifactCard,
+      isReviewRow,
+      isBreadcrumb,
+      isDirectory,
+    };
+  }
+
+  function triggerExternalFileOpen(mode, fileTarget) {
+    if (!fileTarget?.rawUri) return;
+    const sent = sendFileAction({
+      type: 'open',
+      mode,
+      uri: fileTarget.rawUri,
+      line: fileTarget.line,
+      column: fileTarget.column,
+    });
+    if (!sent) {
+      showFileActionToast('后台守护进程未就绪，请稍后重试', true);
+    }
+  }
+
+  function openFileTargetInBuiltinPanel(fileTarget) {
+    const el = fileTarget?.element;
+    if (!el || typeof el.click !== 'function') return;
+    state.bypassFileClickInterceptOnce = true;
+    try {
+      el.click();
+    } finally {
+      state.bypassFileClickInterceptOnce = false;
+    }
+  }
+
+  function revealFileTargetInSystem(fileTarget) {
+    if (!fileTarget) return;
+    const nativeReveal = window.electronNative?.revealInFilePicker;
+    if (typeof nativeReveal === 'function') {
+      try {
+        Promise.resolve(nativeReveal(fileTarget.cleanUri)).catch(() => {
+          sendFileAction({ type: 'reveal', uri: fileTarget.rawUri });
+        });
+        return;
+      } catch {}
+    }
+    sendFileAction({ type: 'reveal', uri: fileTarget.rawUri });
+  }
+
+  async function copyFileTargetPath(fileTarget) {
+    const text = String(fileTarget?.localPath || '').trim();
+    if (!text) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        showFileActionToast('已复制文件路径');
+        return;
+      }
+    } catch {}
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select?.();
+      document.execCommand?.('copy');
+      ta.remove();
+      showFileActionToast('已复制文件路径');
+    } catch {}
+  }
+
+  function closeFileCtxMenu() {
+    state.fileCtxMenuTarget = null;
+    const el = document.getElementById('aq-file-ctx-menu');
+    if (el) el.classList.remove('is-visible');
+  }
+
+  function ensureFileCtxMenuEl() {
+    let menu = document.getElementById('aq-file-ctx-menu');
+    if (menu && menu.dataset.aqOwner !== INSTANCE_TOKEN) {
+      menu.remove();
+      menu = null;
+    }
+    if (!menu) {
+      menu = document.createElement('div');
+      menu.id = 'aq-file-ctx-menu';
+      menu.dataset.aqOwner = INSTANCE_TOKEN;
+      menu.addEventListener('click', (ev) => {
+        const btn = ev.target?.closest?.('[data-aq-fctx]');
+        if (!btn) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        const act = btn.getAttribute('data-aq-fctx') || '';
+        const target = state.fileCtxMenuTarget;
+        closeFileCtxMenu();
+        if (!target) return;
+        if (act === 'builtin') {
+          openFileTargetInBuiltinPanel(target);
+        } else if (act === 'reveal') {
+          revealFileTargetInSystem(target);
+        } else if (act === 'copy-path') {
+          void copyFileTargetPath(target);
+        } else if (isExternalEditorModeAvailable(act)) {
+          triggerExternalFileOpen(act, target);
+        }
+      });
+      document.body.appendChild(menu);
+    }
+    return menu;
+  }
+
+  function openFileCtxMenu(clientX, clientY, fileTarget) {
+    if (!fileTarget) return;
+    closeGroupMenu();
+    closeGroupCtxMenu();
+    const openNativeMenus = findActiveNativeMenus();
+    for (let i = 0; i < openNativeMenus.length; i++) {
+      closeNativeBaseUiMenu(openNativeMenus[i]);
+    }
+
+    state.fileCtxMenuTarget = fileTarget;
+    const menu = ensureFileCtxMenuEl();
+    const lineHint =
+      !fileTarget.isDirectory && fileTarget.line
+        ? `<span class="aq-ctx-item-sub">:${fileTarget.line}</span>`
+        : '';
+    const openRows = [];
+
+    if (getEffectiveFileOpenDefault() !== 'builtin' && !fileTarget.isReviewRow) {
+      openRows.push(
+        '<button type="button" class="aq-ctx-item" data-aq-fctx="builtin"><span class="aq-ctx-item-label">在内置面板打开</span></button>'
+      );
+    }
+
+    const editorOpts = getDetectedEditorOptions();
+    for (let i = 0; i < editorOpts.length; i++) {
+      const opt = editorOpts[i];
+      if (!opt?.id || !opt.menuLabel) continue;
+      if (fileTarget.isDirectory && !opt.supportsDirectory) continue;
+      openRows.push(
+        `<button type="button" class="aq-ctx-item" data-aq-fctx="${escapeHtml(opt.id)}"><span class="aq-ctx-item-label">${escapeHtml(opt.menuLabel)}</span>${opt.supportsLine ? lineHint : ''}</button>`
+      );
+    }
+
+    const revealLabel =
+      state.externalEditors?.platform === 'win32' ? '在资源管理器中显示' : '在访达中显示';
+    const utilRows = [
+      `<button type="button" class="aq-ctx-item" data-aq-fctx="reveal"><span class="aq-ctx-item-label">${revealLabel}</span></button>`,
+      '<button type="button" class="aq-ctx-item" data-aq-fctx="copy-path"><span class="aq-ctx-item-label">复制路径</span></button>',
+    ];
+
+    menu.innerHTML =
+      openRows.length > 0
+        ? `${openRows.join('')}<div class="aq-ctx-sep"></div>${utilRows.join('')}`
+        : utilRows.join('');
+    menu.classList.add('is-visible');
+
+    const rect = menu.getBoundingClientRect();
+    const mw = rect.width || 196;
+    const mh = rect.height || 156;
+    const x = Math.max(8, Math.min(Number(clientX) || 0, window.innerWidth - mw - 8));
+    const y = Math.max(8, Math.min(Number(clientY) || 0, window.innerHeight - mh - 8));
+    menu.style.left = `${Math.round(x)}px`;
+    menu.style.top = `${Math.round(y)}px`;
+  }
+
+  function applyShowCollapsedGroupCountDom(show) {
+    const root = document.documentElement;
+    if (!root) return;
+    const hide = show === false;
+    if (typeof root.toggleAttribute === 'function') {
+      root.toggleAttribute('data-aq-hide-collapsed-grp-count', hide);
+    } else if (hide) {
+      root.setAttribute?.('data-aq-hide-collapsed-grp-count', '');
+    } else {
+      root.removeAttribute?.('data-aq-hide-collapsed-grp-count');
+    }
+  }
+
+  function syncCollapsedGroupCountSwitchesInPlace() {
+    const isOn = state.showCollapsedGroupCount !== false;
+    const ksBtn = document.querySelector('#aq-key-settings-modal [data-aq-ks-collapsed-count]');
+    if (ksBtn) {
+      ksBtn.classList.toggle('is-on', isOn);
+      ksBtn.setAttribute('aria-checked', isOn ? 'true' : 'false');
+    }
+    const stgBtns = document.querySelectorAll('[data-aq-stg-collapsed-count]');
+    for (let i = 0; i < stgBtns.length; i++) {
+      const btn = stgBtns[i];
+      btn.setAttribute('aria-checked', isOn ? 'true' : 'false');
+      btn.classList.toggle('bg-primary', isOn);
+      btn.classList.toggle('bg-secondary', !isOn);
+      const thumb = btn.firstElementChild;
+      if (thumb?.style) {
+        thumb.style.transform = isOn ? 'translateX(24px)' : 'translateX(4px)';
+      }
+    }
+  }
+
+  function setShowCollapsedGroupCountPref(nextShow, { notifyDaemon = true } = {}) {
+    const cleanShow = nextShow !== false;
+    const changed = state.showCollapsedGroupCount !== cleanShow;
+    state.showCollapsedGroupCount = cleanShow;
+    try {
+      localStorage.setItem('aq_show_collapsed_grp_count_v1', cleanShow ? '1' : '0');
+    } catch {}
+    applyShowCollapsedGroupCountDom(cleanShow);
+    syncCollapsedGroupCountSwitchesInPlace();
+    if (changed) {
+      renderSidebarGroupsPanel(false);
+    }
+    if (notifyDaemon) {
+      sendUiPrefsAction({ type: 'set-show-collapsed-group-count', show: cleanShow });
+    }
+  }
+
+  applyShowCollapsedGroupCountDom(state.showCollapsedGroupCount);
+
   function closeKeySettingsModal() {
     if (state.keySettingsTimer) {
       clearTimeout(state.keySettingsTimer);
@@ -7404,21 +8188,37 @@
     overlay.id = 'aq-key-settings-modal';
     overlay.setAttribute('role', 'dialog');
     overlay.setAttribute('aria-modal', 'true');
-    overlay.setAttribute('aria-label', 'AI Key 设置');
+    overlay.setAttribute('aria-label', '注入器设置');
 
     const keyPlaceholder =
       !aiCfg.apiKey && aiCfg.hasEnvKey
         ? '当前正使用环境变量 Key，填写后优先使用此处配置'
         : '粘贴智谱 BigModel 或 OpenAI 兼容 API Key';
+    const showCollapsedCount = state.showCollapsedGroupCount !== false;
 
     overlay.innerHTML = `
       <div class="aq-ks-dialog">
         <div class="aq-ks-hdr">
           <span class="aq-ks-title-wrap">
-            <span class="aq-ks-title">AI 简述 / 翻译设置</span>
+            <span class="aq-ks-title">注入器设置</span>
           </span>
           <button type="button" class="aq-ks-close" data-aq-ks-close="1" title="关闭" aria-label="关闭">×</button>
         </div>
+        <div class="aq-ks-toggle-row">
+          <div class="aq-ks-toggle-copy">
+            <span class="aq-ks-toggle-title">点击文件名默认打开</span>
+            <span class="aq-ks-note">仅展示本机已识别软件，右键始终可自选</span>
+          </div>
+          <select class="aq-ks-select" data-aq-file-open-select="1" aria-label="点击文件名默认打开方式">${renderFileOpenSelectOptionsHtml()}</select>
+        </div>
+        <div class="aq-ks-toggle-row">
+          <div class="aq-ks-toggle-copy">
+            <span class="aq-ks-toggle-title">显示收起文件夹数字</span>
+            <span class="aq-ks-note">文件夹收起时在右侧淡化显示包含的对话数</span>
+          </div>
+          <button type="button" role="switch" class="aq-ks-switch ${showCollapsedCount ? 'is-on' : ''}" data-aq-ks-collapsed-count="1" aria-checked="${showCollapsedCount ? 'true' : 'false'}" aria-label="显示收起文件夹数字"><span class="aq-ks-switch-thumb"></span></button>
+        </div>
+        <div class="aq-ks-sep"></div>
         <div class="aq-ks-field">
           <label class="aq-ks-lbl">API Key（默认免费支持智谱 glm-4-flash-250414）</label>
           <input type="text" class="aq-ks-input" data-aq-ks-key="1" autocomplete="off" spellcheck="false" placeholder="${escapeHtml(keyPlaceholder)}" value="${escapeHtml(aiCfg.apiKey || '')}" />
@@ -7513,6 +8313,11 @@
       }, 4000);
     };
 
+    const ksFileOpenSelect = overlay.querySelector('select[data-aq-file-open-select]');
+    ksFileOpenSelect?.addEventListener?.('change', () => {
+      setFileOpenDefaultPref(ksFileOpenSelect.value || 'builtin', { notifyDaemon: true });
+    });
+
     overlay.addEventListener('pointerdown', (ev) => {
       ev.stopPropagation();
     });
@@ -7520,6 +8325,10 @@
       ev.stopPropagation();
       if (ev.target === overlay || ev.target?.closest?.('[data-aq-ks-close], [data-aq-ks-cancel]')) {
         closeKeySettingsModal();
+        return;
+      }
+      if (ev.target?.closest?.('[data-aq-ks-collapsed-count]')) {
+        setShowCollapsedGroupCountPref(!state.showCollapsedGroupCount, { notifyDaemon: true });
         return;
       }
       if (ev.target?.closest?.('[data-aq-ks-save]')) {
@@ -7531,7 +8340,7 @@
       if (ev.key === 'Escape') {
         ev.preventDefault();
         closeKeySettingsModal();
-      } else if (ev.key === 'Enter') {
+      } else if (ev.key === 'Enter' && ev.target?.tagName === 'INPUT') {
         ev.preventDefault();
         submitConfig();
       }
@@ -7902,7 +8711,7 @@
   }
 
   const TRANSLATE_SKIP_SELECTOR =
-    '[data-markdown-root], [data-testid="user-message"], [data-testid="user-message-content"], [data-lexical-editor], [data-testid="model-selector-trigger"], [data-aq-turn-usage], [data-aq-thinking-btn], [data-aq-thinking-card], [data-aq-native-menu-ext], .aq-conv-width-resizer, #aq-turn-tooltip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-key-settings-modal, #aq-batch-wake-panel, #aq-batch-toast, #aq-context-chip, #aq-quota-chip, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost, code, pre, script, style, .codicon, .google-symbols, .agy-sidebar-row';
+    '[data-markdown-root], [data-testid="user-message"], [data-testid="user-message-content"], [data-lexical-editor], [data-testid="model-selector-trigger"], [data-aq-turn-usage], [data-aq-thinking-btn], [data-aq-thinking-card], [data-aq-native-menu-ext], [data-aq-settings-ext], .aq-conv-width-resizer, #aq-turn-tooltip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-key-settings-modal, #aq-batch-wake-panel, #aq-batch-toast, #aq-file-toast, #aq-context-chip, #aq-quota-chip, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-file-ctx-menu, #aq-conv-drag-ghost, code, pre, script, style, .codicon, .google-symbols, .agy-sidebar-row';
 
   const CHROME_ROOT_SELECTOR = [
     '.settings-modal-container',
@@ -8247,6 +9056,180 @@
       }
     } catch {}
     return false;
+  }
+
+  async function updateConversationAnnotationTitleRpc(cascadeId, title) {
+    try {
+      const csrf = window.__APP_CONFIG__?.csrfToken || '';
+      const res = await fetch('/exa.language_server_pb.LanguageServerService/UpdateConversationAnnotations', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(csrf ? { 'x-codeium-csrf-token': csrf } : {}),
+        },
+        body: JSON.stringify({
+          cascadeIds: [cascadeId],
+          annotations: { title },
+          mergeAnnotations: true,
+        }),
+      });
+      return Boolean(res.ok);
+    } catch {}
+    return false;
+  }
+
+  function getGroupConvRowScope(rowEl) {
+    if (!rowEl) return '';
+    if (rowEl.hasAttribute?.('data-aq-smart-item')) return 'active';
+    if (rowEl.hasAttribute?.('data-aq-recent-cid')) return 'recent';
+    const gid = rowEl.getAttribute?.('data-aq-grp-gid') || '';
+    return gid ? `group:${gid}` : '';
+  }
+
+  function renderConvRenameFormHtml(cid, title, extraAttr = '') {
+    return `
+      <div class="aq-grp-inline-form aq-conv-rename-form" data-aq-conv-rename-form="${escapeHtml(cid)}"${extraAttr ? ` ${extraAttr}` : ''}>
+        <input type="text" class="aq-grp-input" data-aq-conv-rename-input="${escapeHtml(cid)}" maxlength="120" value="${escapeHtml(title)}" />
+        <button type="button" class="aq-grp-mini-btn is-primary" data-aq-conv-rename-ok="${escapeHtml(cid)}">保存</button>
+        <button type="button" class="aq-grp-mini-btn" data-aq-conv-rename-cancel="1">取消</button>
+      </div>
+    `;
+  }
+
+  function resolveFallbackConvRenameScope(cidLower) {
+    if (!cidLower) return 'recent';
+    for (let i = 0; i < state.groups.length; i++) {
+      const g = state.groups[i];
+      if (g.collapsed) continue;
+      const items = Array.isArray(g.items) ? g.items : [];
+      if (items.some((it) => String(it?.cascadeId || '').toLowerCase() === cidLower)) {
+        return `group:${g.id}`;
+      }
+    }
+    const panel = document.getElementById('aq-conv-groups');
+    if (panel?.querySelector?.(`[data-aq-smart-cid="${cidLower}"]`)) {
+      return 'active';
+    }
+    return 'recent';
+  }
+
+  function isConvRenamingRow(cidLower, scope) {
+    const cur = state.convRenaming;
+    if (!cur || !cidLower || cur.cidLower !== cidLower) return false;
+    return cur.scope === scope;
+  }
+
+  function startGroupConversationRename(cascadeId, scope = '', fallbackTitle = '') {
+    const cid = String(cascadeId || '').trim();
+    const cidLower = cid.toLowerCase();
+    if (!/^[0-9a-f-]{36}$/i.test(cidLower)) return false;
+    const info = buildConversationInfoById(cidLower);
+    const initialTitle = String(
+      (info?.title && info.title !== '未命名对话' ? info.title : '') ||
+        fallbackTitle ||
+        info?.title ||
+        ''
+    ).trim();
+    const resolvedScope = scope || resolveFallbackConvRenameScope(cidLower);
+    state.groupsError = '';
+    state.groupCreating = false;
+    state.groupCreateParentId = '';
+    state.groupCreateInitialItem = null;
+    state.groupRenamingId = '';
+    clearGroupDeleteConfirm();
+    state.convRenaming = {
+      cid: info?.cascadeId || cid,
+      cidLower,
+      scope: resolvedScope,
+      initialTitle,
+    };
+    renderSidebarGroupsPanel(true);
+    return true;
+  }
+
+  function cancelGroupConversationRename() {
+    if (!state.convRenaming && !state.groupsError) return;
+    state.convRenaming = null;
+    state.groupsError = '';
+    renderSidebarGroupsPanel(true);
+  }
+
+  function getOptimisticRenamedTitle(cidLower) {
+    if (!cidLower) return '';
+    const entry = state.localRenamedTitleById[cidLower];
+    if (!entry || Date.now() - entry.at >= 120_000) return '';
+    return entry.title || '';
+  }
+
+  async function submitGroupConversationRename(cascadeId, rawTitle) {
+    const cid = String(cascadeId || state.convRenaming?.cid || '').trim();
+    const cidLower = cid.toLowerCase();
+    if (!/^[0-9a-f-]{36}$/i.test(cidLower)) return;
+    const nextTitle = String(rawTitle || '').replace(/\s+/g, ' ').trim();
+    if (!nextTitle) {
+      state.groupsError = '请输入对话名称';
+      renderSidebarGroupsPanel(true);
+      return;
+    }
+    const prevTarget = state.convRenaming;
+    state.convRenaming = null;
+    state.groupsError = '';
+    if (prevTarget && prevTarget.cidLower === cidLower && nextTitle === prevTarget.initialTitle) {
+      renderSidebarGroupsPanel(true);
+      return;
+    }
+
+    const prevLocalRename = state.localRenamedTitleById[cidLower] || null;
+    state.localRenamedTitleById[cidLower] = { title: nextTitle, at: Date.now() };
+    renderSidebarGroupsPanel(true);
+
+    const ok = await updateConversationAnnotationTitleRpc(cid, nextTitle);
+    if (!isInstanceAlive()) return;
+    if (!ok) {
+      if (prevLocalRename) state.localRenamedTitleById[cidLower] = prevLocalRename;
+      else delete state.localRenamedTitleById[cidLower];
+      state.groupsError = '重命名对话失败，请稍后重试';
+      renderSidebarGroupsPanel(true);
+      return;
+    }
+
+    if (state.trajMetaById[cidLower]) {
+      state.trajMetaById[cidLower].title = nextTitle;
+    } else {
+      state.trajMetaById[cidLower] = { cascadeId: cid, title: nextTitle, isPrimary: true };
+    }
+
+    const nativeRows = document.querySelectorAll(
+      '.bg-sidebar [data-testid="conversation-row-sidebar"][data-cascade-id]'
+    );
+    for (let i = 0; i < nativeRows.length; i++) {
+      const row = nativeRows[i];
+      if (String(row.getAttribute('data-cascade-id') || '').trim().toLowerCase() !== cidLower) continue;
+      const anchor = row.querySelector('a[aria-label]');
+      if (anchor) anchor.setAttribute('aria-label', nextTitle);
+      const titleSpan = row.querySelector('span.truncate');
+      if (titleSpan) titleSpan.textContent = nextTitle;
+    }
+
+    const groupDiff = {};
+    let touchedGroups = false;
+    for (let i = 0; i < state.groups.length; i++) {
+      const items = state.groups[i]?.items || [];
+      for (let j = 0; j < items.length; j++) {
+        const it = items[j];
+        if (String(it?.cascadeId || '').toLowerCase() === cidLower) {
+          it.title = nextTitle;
+          groupDiff[it.cascadeId] = { title: nextTitle, project: it.project || '' };
+          touchedGroups = true;
+        }
+      }
+    }
+    if (touchedGroups) {
+      state.lastMetaSyncKey = JSON.stringify(groupDiff);
+      sendGroupAction({ type: 'sync-meta', metadata: groupDiff });
+    }
+    renderSidebarGroupsPanel(true);
+    void refreshTrajectoryMetadata(true, 0);
   }
 
   function findConversationSidebarRow(cidLower) {
@@ -8797,10 +9780,18 @@
     if (!/^[0-9a-f-]{36}$/i.test(cascadeId)) return null;
     const anchor = row.querySelector('a[aria-label]');
     const titleSpan = row.querySelector('span.truncate');
-    const cached = state.trajMetaById[cascadeId.toLowerCase()] || null;
-    const title = String(
-      anchor?.getAttribute('aria-label') || titleSpan?.textContent || cached?.title || ''
-    )
+    const cidLower = cascadeId.toLowerCase();
+    const cached = state.trajMetaById[cidLower] || null;
+    const localRename = state.localRenamedTitleById[cidLower] || null;
+    const domTitle = String(anchor?.getAttribute('aria-label') || titleSpan?.textContent || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (localRename && domTitle === localRename.title) {
+      delete state.localRenamedTitleById[cidLower];
+    }
+    const freshLocalTitle =
+      localRename && Date.now() - localRename.at < 120_000 ? localRename.title : '';
+    const title = String(freshLocalTitle || domTitle || cached?.title || '')
       .replace(/\s+/g, ' ')
       .trim();
     const project = String(
@@ -9064,8 +10055,11 @@
     const padL = parseFloat(pcs.paddingLeft) || 0;
     const padR = parseFloat(pcs.paddingRight) || 0;
     const availLeft = parentRect.left + padL;
-    const availWidth = Math.max(MIN_CONV_WIDTH, Math.round(parentRect.width - padL - padR));
-    const centerX = availLeft + availWidth / 2;
+    const innerSpan = parentRect.width - padL - padR;
+    const hasNavRail = Boolean(viewEl.querySelector?.('[data-testid="conversation-navigator"]'));
+    const navReserve = hasNavRail ? 24 : 0;
+    const availWidth = Math.max(MIN_CONV_WIDTH, Math.round(innerSpan - navReserve));
+    const centerX = availLeft + innerSpan / 2;
     return { viewRect, availLeft, availWidth, centerX };
   }
 
@@ -9474,11 +10468,12 @@
           body: JSON.stringify({}),
         }).catch(() => null),
       ]);
-      if (!res.ok) return;
+      if (!res.ok || !isInstanceAlive()) return;
       const [json, bgJson] = await Promise.all([
         res.json().catch(() => null),
         bgRes && bgRes.ok ? bgRes.json().catch(() => null) : Promise.resolve(null),
       ]);
+      if (!isInstanceAlive()) return;
       const bgTasks = Array.isArray(bgJson?.tasks) ? bgJson.tasks : [];
       const nonDaemonTaskCids = new Set();
       for (let i = 0; i < bgTasks.length; i++) {
@@ -9489,14 +10484,21 @@
         nonDaemonTaskCids.add(taskCid);
       }
       const map = json?.trajectorySummaries || {};
+      const activeCidLower = extractCascadeId().toLowerCase();
       const nextById = Object.create(null);
       for (const [cid, entry] of Object.entries(map)) {
         if (!/^[0-9a-f-]{36}$/i.test(cid) || !entry || typeof entry !== 'object') continue;
         const key = cid.toLowerCase();
         if (state.hiddenKeepAliveCids.has(key)) continue;
-        const title = String(entry.annotations?.title || entry.summary || '')
+        const serverTitle = String(entry.annotations?.title || entry.summary || '')
           .replace(/\s+/g, ' ')
           .trim();
+        const localRename = state.localRenamedTitleById[key] || null;
+        if (localRename && entry.annotations?.title === localRename.title) {
+          delete state.localRenamedTitleById[key];
+        }
+        const title =
+          localRename && Date.now() - localRename.at < 30_000 ? localRename.title : serverTitle;
         const wsList = Array.isArray(entry.workspaces) ? entry.workspaces : [];
         const project = wsList.length ? extractProjectBasenameFromWorkspace(wsList[0]) : '';
         const tMeta = entry.trajectoryMetadata || {};
@@ -9535,9 +10537,11 @@
         let lastUserViewMs = Date.parse(entry.annotations?.lastUserViewTime || '') || 0;
         let markedAsUnread = Boolean(entry.annotations?.markedAsUnread);
         const localViewedAt = state.localViewedAtById[key] || 0;
-        if (localViewedAt && Date.now() - localViewedAt < 60_000) {
+        if (localViewedAt) {
           if (localViewedAt > lastUserViewMs) lastUserViewMs = localViewedAt;
-          if (lastModifiedMs <= localViewedAt) markedAsUnread = false;
+          if (key === activeCidLower && lastModifiedMs <= localViewedAt) {
+            markedAsUnread = false;
+          }
         }
         const prev = state.trajMetaById[key] || {};
         const localInputAt = state.localUserInputAtById[key] || 0;
@@ -9637,6 +10641,7 @@
     return {
       cascadeId: meta?.cascadeId || String(cascadeId || '').trim(),
       title:
+        getOptimisticRenamedTitle(cidLower) ||
         meta?.title ||
         anchorEl?.querySelector?.('.aq-grp-item-title')?.textContent?.trim() ||
         '未命名对话',
@@ -9644,7 +10649,26 @@
     };
   }
 
-  function openNativeConversationContextMenu(cascadeId, clientX, clientY) {
+  function findActiveNativeMenus() {
+    const all = document.querySelectorAll('[role="menu"]');
+    const out = [];
+    for (let i = 0; i < all.length; i++) {
+      const m = all[i];
+      if (m.hasAttribute('data-aq-owner') || (m.id && m.id.startsWith('aq-'))) continue;
+      if (m.matches('[data-testid="context-menu-submenu-popup"]')) continue;
+      if (m.hasAttribute('data-ending-style') || m.hasAttribute('data-closed')) continue;
+      if (typeof m.getClientRects === 'function' && m.getClientRects().length === 0) continue;
+      out.push(m);
+    }
+    return out;
+  }
+
+  function openNativeConversationContextMenu(
+    cascadeId,
+    clientX,
+    clientY,
+    { anchorEl = null, scope = '', itemGroupId = '' } = {}
+  ) {
     const cidLower = String(cascadeId || '').trim().toLowerCase();
     if (!cidLower) return false;
     const row = findConversationSidebarRow(cidLower);
@@ -9653,13 +10677,26 @@
       return false;
     }
     state.lastNativeMenuConv = {
-      ...buildConversationInfoById(cidLower),
+      ...buildConversationInfoById(cidLower, anchorEl),
+      scope: scope || '',
+      itemGroupId: itemGroupId || '',
       at: Date.now(),
     };
-    kebab.click();
+
+    const isSameKebabOpen =
+      kebab.getAttribute('aria-expanded') === 'true' || kebab.hasAttribute('data-popup-open');
+    const existingMenus = findActiveNativeMenus();
+    if (!(isSameKebabOpen && existingMenus.length > 0)) {
+      for (let i = 0; i < existingMenus.length; i++) {
+        closeNativeBaseUiMenu(existingMenus[i]);
+      }
+      kebab.click();
+    }
+
     let tries = 0;
     const positionMenu = () => {
-      const menu = document.querySelector('[role="menu"]');
+      const activeMenus = findActiveNativeMenus();
+      const menu = activeMenus.length > 0 ? activeMenus[activeMenus.length - 1] : null;
       if (menu) {
         const posEl = menu.closest('[style*="transform"]') || menu.parentElement;
         if (posEl) {
@@ -9673,6 +10710,7 @@
           posEl.style.transform = `translate(${left}px, ${top}px)`;
         }
         syncNativeConversationMenus();
+        refreshOpenNativeMenuFolders();
         applyUiTranslations();
         return;
       }
@@ -9715,6 +10753,7 @@
         } else if (act === 'new-child' && gid) {
           state.groupsError = '';
           state.groupRenamingId = '';
+          state.convRenaming = null;
           clearGroupDeleteConfirm();
           state.groupCreateInitialItem = null;
           state.groupCreateParentId = gid;
@@ -9725,9 +10764,13 @@
           state.groupCreating = false;
           state.groupCreateParentId = '';
           state.groupCreateInitialItem = null;
+          state.convRenaming = null;
           clearGroupDeleteConfirm();
           state.groupRenamingId = gid;
           renderSidebarGroupsPanel(true);
+        } else if (act === 'rename-conv' && cid) {
+          const scope = btn.getAttribute('data-aq-ctx-scope') || '';
+          startGroupConversationRename(cid, scope);
         } else if (act === 'delete' && gid) {
           state.groupsError = '';
           sendGroupAction({ type: 'delete', groupId: gid });
@@ -9760,6 +10803,7 @@
     } else {
       if (item?.cascadeId) {
         actionsHtml.push(
+          `<button type="button" class="aq-ctx-item" data-aq-ctx-act="rename-conv" data-aq-ctx-cid="${escapeHtml(item.cascadeId)}" data-aq-ctx-scope="${escapeHtml(item.scope || '')}">${SVG_EDIT}<span>重命名</span></button>`,
           `<button type="button" class="aq-ctx-item" data-aq-ctx-act="item-menu" data-aq-ctx-cid="${escapeHtml(item.cascadeId)}">${SVG_FOLDER_PLUS}<span>加入文件夹</span></button>`
         );
         if (itemGroupId) {
@@ -9932,19 +10976,49 @@
   }
 
   function resolveNativeMenuConversation() {
-    const expandedKebab = document.querySelector(
+    const recentTarget =
+      state.lastNativeMenuConv?.cascadeId && Date.now() - (state.lastNativeMenuConv.at || 0) < 8000
+        ? state.lastNativeMenuConv
+        : null;
+    const expandedKebabs = document.querySelectorAll(
       '.bg-sidebar [data-testid="conversation-kebab"][aria-expanded="true"], .bg-sidebar [data-testid="conversation-kebab"][data-popup-open]'
     );
-    const expandedRow = expandedKebab?.closest?.('[data-testid="conversation-row-sidebar"][data-cascade-id]');
+    let expandedRow = null;
+    if (recentTarget) {
+      const targetLower = String(recentTarget.cascadeId).toLowerCase();
+      for (let i = 0; i < expandedKebabs.length; i++) {
+        const r = expandedKebabs[i]?.closest?.('[data-testid="conversation-row-sidebar"][data-cascade-id]');
+        if (r && String(r.getAttribute('data-cascade-id') || '').trim().toLowerCase() === targetLower) {
+          expandedRow = r;
+          break;
+        }
+      }
+    }
+    if (!expandedRow && expandedKebabs.length > 0 && (!recentTarget || Date.now() - (recentTarget.at || 0) > 1500)) {
+      expandedRow = expandedKebabs[expandedKebabs.length - 1]?.closest?.(
+        '[data-testid="conversation-row-sidebar"][data-cascade-id]'
+      );
+    }
     if (expandedRow) {
       const info = extractRowConversationInfo(expandedRow);
-      if (info?.cascadeId) return info;
+      if (info?.cascadeId) {
+        const sameTarget =
+          recentTarget &&
+          String(recentTarget.cascadeId).toLowerCase() === String(info.cascadeId).toLowerCase();
+        return {
+          ...info,
+          scope: sameTarget ? recentTarget.scope || '' : '',
+          itemGroupId: sameTarget ? recentTarget.itemGroupId || '' : '',
+        };
+      }
     }
-    if (state.lastNativeMenuConv?.cascadeId && Date.now() - (state.lastNativeMenuConv.at || 0) < 8000) {
+    if (recentTarget) {
       return {
-        cascadeId: state.lastNativeMenuConv.cascadeId,
-        title: state.lastNativeMenuConv.title || '未命名对话',
-        project: state.lastNativeMenuConv.project || '',
+        cascadeId: recentTarget.cascadeId,
+        title: recentTarget.title || '未命名对话',
+        project: recentTarget.project || '',
+        scope: recentTarget.scope || '',
+        itemGroupId: recentTarget.itemGroupId || '',
       };
     }
     return null;
@@ -9955,7 +11029,7 @@
       const portal = menu?.closest?.('[data-base-ui-portal]');
       const backdrop = portal?.querySelector?.('[data-base-ui-inert]');
       if (backdrop) {
-        backdrop.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }));
+        backdrop.dispatchEvent?.(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }));
         backdrop.click?.();
       }
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
@@ -9981,6 +11055,8 @@
 
   function renderNativeFolderEntryContent(entryEl, rmEl, convInfo) {
     if (!entryEl || !convInfo?.cascadeId) return;
+    entryEl.setAttribute('data-aq-nmf-cid', convInfo.cascadeId);
+    entryEl.setAttribute('data-aq-nmf-gid', convInfo.itemGroupId || '');
     const assigned = getConversationAssignedGroups(convInfo.cascadeId);
     const labelText = assigned.length > 0 ? '管理文件夹' : '加入文件夹';
     const countBadge = assigned.length > 0 ? `<span class="aq-nmf-count">${assigned.length}</span>` : '';
@@ -10024,8 +11100,12 @@
         rmEl.style.display = '';
         rmEl.removeAttribute('aria-hidden');
         rmEl.setAttribute('role', 'menuitem');
-        const rmTxt =
-          assigned.length === 1
+        const currentGroup = convInfo.itemGroupId
+          ? assigned.find((g) => g.id === convInfo.itemGroupId) || null
+          : null;
+        const rmTxt = currentGroup
+          ? `移出「${currentGroup.name}」`
+          : assigned.length === 1
             ? `移出「${assigned[0].name}」`
             : `移出全部文件夹 (${assigned.length})`;
         const rmSpan = rmEl.querySelector('.aq-nmf-rm-label');
@@ -10039,14 +11119,20 @@
   }
 
   function refreshOpenNativeMenuFolders() {
-    const menus = document.querySelectorAll('[role="menu"]');
+    const menus = findActiveNativeMenus();
+    const activeTarget = resolveNativeMenuConversation();
     for (let i = 0; i < menus.length; i++) {
       const menu = menus[i];
       const entryEl = menu.querySelector('.aq-native-folder-entry');
       if (!entryEl) continue;
-      const cid = entryEl.getAttribute('data-aq-nmf-cid') || '';
+      const cid = activeTarget?.cascadeId || entryEl.getAttribute('data-aq-nmf-cid') || '';
       if (!cid) continue;
-      const convInfo = buildConversationInfoById(cid);
+      const sameActive =
+        activeTarget && String(activeTarget.cascadeId).toLowerCase() === cid.toLowerCase();
+      const convInfo = {
+        ...buildConversationInfoById(cid),
+        itemGroupId: sameActive ? activeTarget.itemGroupId || '' : '',
+      };
       const rmEl = menu.querySelector('.aq-native-folder-rm-btn');
       renderNativeFolderEntryContent(entryEl, rmEl, convInfo);
     }
@@ -10057,7 +11143,23 @@
     for (let i = 0; i < menus.length; i++) {
       const menu = menus[i];
       if (menu.matches('[data-testid="context-menu-submenu-popup"]')) continue;
-      if (menu.querySelector('[data-aq-native-menu-ext]')) continue;
+      if (menu.hasAttribute('data-ending-style') || menu.hasAttribute('data-closed')) continue;
+      const existingEntry = menu.querySelector('.aq-native-folder-entry');
+      if (existingEntry) {
+        const curConv = resolveNativeMenuConversation();
+        if (
+          curConv?.cascadeId &&
+          (existingEntry.getAttribute('data-aq-nmf-cid') !== curConv.cascadeId ||
+            (existingEntry.getAttribute('data-aq-nmf-gid') || '') !== (curConv.itemGroupId || ''))
+        ) {
+          renderNativeFolderEntryContent(
+            existingEntry,
+            menu.querySelector('.aq-native-folder-rm-btn'),
+            curConv
+          );
+        }
+        continue;
+      }
       const isConvMenu = Boolean(
         menu.querySelector(
           '[data-testid="conversation-rename-menu-item"], [data-testid="conversation-pin-menu-item"], [data-testid="conversation-delete-menu-item"]'
@@ -10079,6 +11181,7 @@
       entryEl.setAttribute('tabindex', '-1');
       entryEl.setAttribute('data-aq-native-menu-ext', '1');
       entryEl.setAttribute('data-aq-nmf-cid', convInfo.cascadeId);
+      entryEl.setAttribute('data-aq-nmf-gid', convInfo.itemGroupId || '');
       entryEl.className =
         'agy-overlay-item group w-full pr-2 pl-1.5 text-left text-compact cursor-pointer outline-none no-focus-ring transition-colors select-none flex items-center rounded-md py-1 gap-1.5 hover:bg-secondary hover:text-foreground text-secondary-foreground justify-between aq-native-folder-entry';
       entryEl.innerHTML = `
@@ -10137,12 +11240,14 @@
           });
         }
         subEl.addEventListener('click', (ev) => {
+          const curCid = entryEl.getAttribute('data-aq-nmf-cid') || '';
+          if (!curCid) return;
           const opt = ev.target?.closest?.('[data-aq-nmf-toggle]');
           if (opt) {
             ev.preventDefault();
             const groupId = opt.getAttribute('data-aq-nmf-toggle') || '';
             if (!groupId) return;
-            const latestConv = buildConversationInfoById(convInfo.cascadeId);
+            const latestConv = buildConversationInfoById(curCid);
             if (opt.classList.contains('is-checked')) {
               sendGroupAction({ type: 'remove-item', groupId, cascadeId: latestConv.cascadeId });
             } else {
@@ -10159,7 +11264,7 @@
               inp?.focus();
               return;
             }
-            sendGroupAction({ type: 'create', name, item: buildConversationInfoById(convInfo.cascadeId) });
+            sendGroupAction({ type: 'create', name, item: buildConversationInfoById(curCid) });
             if (inp) inp.value = '';
           }
         });
@@ -10168,9 +11273,10 @@
           if (!inp) return;
           if (ev.key === 'Enter') {
             ev.preventDefault();
+            const curCid = entryEl.getAttribute('data-aq-nmf-cid') || '';
             const name = String(inp.value || '').trim();
-            if (!name) return;
-            sendGroupAction({ type: 'create', name, item: buildConversationInfoById(convInfo.cascadeId) });
+            if (!name || !curCid) return;
+            sendGroupAction({ type: 'create', name, item: buildConversationInfoById(curCid) });
             inp.value = '';
           }
         });
@@ -10180,9 +11286,17 @@
       rmEl.addEventListener('click', (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
-        const assigned = getConversationAssignedGroups(convInfo.cascadeId);
-        for (let j = 0; j < assigned.length; j++) {
-          sendGroupAction({ type: 'remove-item', groupId: assigned[j].id, cascadeId: convInfo.cascadeId });
+        const curCid = entryEl.getAttribute('data-aq-nmf-cid') || '';
+        const curGid = entryEl.getAttribute('data-aq-nmf-gid') || '';
+        if (!curCid) return;
+        const assigned = getConversationAssignedGroups(curCid);
+        const targetGroupId = curGid && assigned.some((g) => g.id === curGid) ? curGid : '';
+        if (targetGroupId) {
+          sendGroupAction({ type: 'remove-item', groupId: targetGroupId, cascadeId: curCid });
+        } else {
+          for (let j = 0; j < assigned.length; j++) {
+            sendGroupAction({ type: 'remove-item', groupId: assigned[j].id, cascadeId: curCid });
+          }
         }
         closeNativeBaseUiMenu(menu);
       });
@@ -10204,6 +11318,116 @@
           subEl?.classList.remove('is-open');
         }
       });
+    }
+  }
+
+  function syncNativeSettingsModal() {
+    if (!isInstanceAlive()) return;
+    const modal = document.querySelector('.settings-modal-container');
+    if (!modal) return;
+    const headings = modal.querySelectorAll('h2');
+    let appearanceHeading = null;
+    for (let i = 0; i < headings.length; i++) {
+      const text = String(headings[i]?.textContent || '').trim();
+      if (text === 'Appearance' || text === '外观') {
+        appearanceHeading = headings[i];
+        break;
+      }
+    }
+    if (!appearanceHeading) {
+      modal.querySelectorAll('[data-aq-settings-ext]').forEach((el) => el.remove());
+      return;
+    }
+
+    let screenWrap = appearanceHeading.parentElement;
+    let bodyStack = null;
+    while (screenWrap && screenWrap !== modal) {
+      const chList = screenWrap.children || [];
+      for (let i = 0; i < chList.length; i++) {
+        const ch = chList[i];
+        if (
+          ch?.classList?.contains?.('flex') &&
+          ch.classList.contains('flex-col') &&
+          ch.classList.contains('gap-8')
+        ) {
+          bodyStack = ch;
+          break;
+        }
+      }
+      if (bodyStack) break;
+      screenWrap = screenWrap.parentElement;
+    }
+    if (!bodyStack || !screenWrap) return;
+
+    let extEl = null;
+    const wrapChildren = screenWrap.children || [];
+    for (let i = 0; i < wrapChildren.length; i++) {
+      if (wrapChildren[i]?.getAttribute?.('data-aq-settings-ext') === 'sidebar-groups') {
+        extEl = wrapChildren[i];
+        break;
+      }
+    }
+    if (extEl && extEl.dataset.aqOwner !== INSTANCE_TOKEN) {
+      extEl.remove();
+      extEl = null;
+    }
+    const isOn = state.showCollapsedGroupCount !== false;
+    if (!extEl) {
+      extEl = document.createElement('div');
+      extEl.className = 'mt-8 w-full space-y-2';
+      extEl.dataset.aqOwner = INSTANCE_TOKEN;
+      extEl.setAttribute('data-aq-settings-ext', 'sidebar-groups');
+      extEl.innerHTML = `
+        <div class="flex flex-col gap-1">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-1.5">
+              <h3 class="m-0 font-medium">侧边栏与文件交互</h3>
+            </div>
+          </div>
+        </div>
+        <div class="agy-card bg-transparent rounded-xl border border-border overflow-hidden divide-y divide-border">
+          <div class="py-2 px-3 w-full bg-transparent flex justify-between gap-4 items-center flex-wrap">
+            <div class="flex-1 flex flex-col gap-0.5 min-w-[200px]">
+              <div class="flex items-center gap-1.5">
+                <span>点击文件名默认打开方式</span>
+              </div>
+              <span class="text-sm text-muted-foreground whitespace-pre-wrap">自动识别本机已安装的文本/代码软件，配置左键默认打开工具（右键始终可自选）。</span>
+            </div>
+            <div class="shrink-0">
+              <select class="aq-stg-select" data-aq-file-open-select="1" aria-label="点击文件名默认打开方式">${renderFileOpenSelectOptionsHtml()}</select>
+            </div>
+          </div>
+          <div class="py-2 px-3 w-full bg-transparent flex justify-between gap-4 items-center">
+            <div class="flex-1 flex flex-col gap-0.5">
+              <div class="flex items-center gap-1.5">
+                <span id="aq-stg-collapsed-count-lbl">显示收起文件夹数字</span>
+              </div>
+              <span class="text-sm text-muted-foreground whitespace-pre-wrap">文件夹收起时，在右侧淡化显示其包含的对话数量。</span>
+            </div>
+            <div class="shrink-0">
+              <button type="button" role="switch" data-aq-stg-collapsed-count="1" aria-checked="${isOn ? 'true' : 'false'}" aria-labelledby="aq-stg-collapsed-count-lbl" class="relative inline-flex items-center rounded-full transition-colors duration-200 ease-in-out shrink-0 h-6 w-11 ${isOn ? 'bg-primary' : 'bg-secondary'} cursor-pointer">
+                <span class="inline-block rounded-full bg-white transition-transform duration-200 ease-in-out shadow-sm h-4 w-4" style="transform: ${isOn ? 'translateX(24px)' : 'translateX(4px)'};"></span>
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+      const stgSelect = extEl.querySelector('select[data-aq-file-open-select]');
+      stgSelect?.addEventListener?.('change', () => {
+        setFileOpenDefaultPref(stgSelect.value || 'builtin', { notifyDaemon: true });
+      });
+      extEl.addEventListener('click', (ev) => {
+        const switchBtn = ev.target?.closest?.('[data-aq-stg-collapsed-count]');
+        if (switchBtn) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          setShowCollapsedGroupCountPref(!state.showCollapsedGroupCount, { notifyDaemon: true });
+        }
+      });
+      screenWrap.appendChild(extEl);
+    } else {
+      syncCollapsedGroupCountSwitchesInPlace();
+      syncFileOpenDefaultControlsInPlace();
     }
   }
 
@@ -11326,15 +12550,15 @@
     }
   }
 
-  function createSmartSlotEl(it, activeCid, animateEnter) {
+  function buildSmartSlotInnerHtml(it, activeCid) {
     const cid = String(it.cascadeId || '');
     const cidLower = cid.toLowerCase();
+    if (isConvRenamingRow(cidLower, 'active')) {
+      return `<div class="aq-smart-slot-inner">${renderConvRenameFormHtml(cid, it.title)}</div>`;
+    }
     const isActive = Boolean(activeCid && cidLower === activeCid);
     const tipText = it.project ? `${it.title} · ${it.project}` : it.title;
-    const slot = document.createElement('div');
-    slot.className = animateEnter ? 'aq-smart-slot is-entering' : 'aq-smart-slot';
-    slot.setAttribute('data-aq-smart-cid', cidLower);
-    slot.innerHTML = `
+    return `
       <div class="aq-smart-slot-inner">
         <div class="aq-grp-item ${isActive ? 'is-active' : ''}" data-aq-grp-open="${escapeHtml(cid)}" data-aq-smart-item="active" data-aq-status="${escapeHtml(it.status || '')}" data-aq-project="${escapeHtml(it.project || '')}" title="${escapeHtml(tipText)}">
           <div class="aq-grp-item-main">
@@ -11348,6 +12572,15 @@
         </div>
       </div>
     `;
+  }
+
+  function createSmartSlotEl(it, activeCid, animateEnter) {
+    const cid = String(it.cascadeId || '');
+    const cidLower = cid.toLowerCase();
+    const slot = document.createElement('div');
+    slot.className = animateEnter ? 'aq-smart-slot is-entering' : 'aq-smart-slot';
+    slot.setAttribute('data-aq-smart-cid', cidLower);
+    slot.innerHTML = buildSmartSlotInnerHtml(it, activeCid);
     return slot;
   }
 
@@ -11359,9 +12592,21 @@
     if (slot.classList.contains('is-leaving')) {
       slot.classList.remove('is-leaving');
     }
+    const cidLower = String(it.cascadeId || '').toLowerCase();
+    const wantRename = isConvRenamingRow(cidLower, 'active');
+    const hasRenameForm = Boolean(slot.querySelector('[data-aq-conv-rename-form]'));
+    if (wantRename) {
+      if (!hasRenameForm) {
+        slot.innerHTML = buildSmartSlotInnerHtml(it, activeCid);
+      }
+      return;
+    }
+    if (hasRenameForm) {
+      slot.innerHTML = buildSmartSlotInnerHtml(it, activeCid);
+      return;
+    }
     const itemEl = slot.querySelector('.aq-grp-item');
     if (!itemEl) return;
-    const cidLower = String(it.cascadeId || '').toLowerCase();
     itemEl.classList.toggle('is-active', Boolean(activeCid && cidLower === activeCid));
     const tipText = it.project ? `${it.title} · ${it.project}` : it.title;
     if (itemEl.getAttribute('title') !== tipText) {
@@ -11509,7 +12754,7 @@
     if (recentChildrenEl) recentChildrenEl.classList.toggle('is-collapsed', !recentExpanded);
     if (recentListEl && Array.isArray(recentItems)) {
       const existingRecentByCid = new Map();
-      const curRecentNodes = [...recentListEl.querySelectorAll(':scope > .aq-grp-item[data-aq-recent-cid]')];
+      const curRecentNodes = [...recentListEl.querySelectorAll(':scope > [data-aq-recent-cid]')];
       for (let i = 0; i < curRecentNodes.length; i++) {
         const el = curRecentNodes[i];
         const k = el.getAttribute('data-aq-recent-cid') || '';
@@ -11526,8 +12771,24 @@
         desiredRecentKeys.add(key);
         const isActive = Boolean(activeCid && key === activeCid);
         const tipText = it.project ? `${it.title} · ${it.project}` : it.title;
+        const wantRename = isConvRenamingRow(key, 'recent');
         let itemEl = existingRecentByCid.get(key);
-        if (itemEl) {
+        const isRenameNode = Boolean(itemEl?.hasAttribute?.('data-aq-conv-rename-form'));
+        if (wantRename) {
+          if (!isRenameNode) {
+            const wrap = document.createElement('div');
+            wrap.innerHTML = renderConvRenameFormHtml(
+              cid,
+              it.title,
+              `data-aq-recent-cid="${escapeHtml(key)}"`
+            ).trim();
+            const nextEl = wrap.firstElementChild;
+            if (itemEl && nextEl) {
+              recentListEl.replaceChild(nextEl, itemEl);
+            }
+            itemEl = nextEl;
+          }
+        } else if (itemEl && !isRenameNode) {
           itemEl.classList.toggle('is-active', isActive);
           if (itemEl.getAttribute('title') !== tipText) itemEl.setAttribute('title', tipText);
           const nextProj = it.project || '';
@@ -11540,6 +12801,7 @@
           syncConvProjectSubEl(mainEl, nextProj);
           patchItemStatusBadgeInPlace(itemEl, it.status);
         } else {
+          const prevNode = itemEl;
           itemEl = document.createElement('div');
           itemEl.className = `aq-grp-item ${isActive ? 'is-active' : ''}`;
           itemEl.setAttribute('data-aq-grp-open', cid);
@@ -11557,7 +12819,11 @@
               <button type="button" class="aq-grp-icon-btn" data-aq-grp-item-menu="${escapeHtml(cid)}" title="管理所属分组">${SVG_FOLDER_PLUS}</button>
             </span>
           `;
+          if (prevNode) {
+            recentListEl.replaceChild(itemEl, prevNode);
+          }
         }
+        if (!itemEl) continue;
         const expectedNext = rCursor ? rCursor.nextElementSibling : recentListEl.firstElementChild;
         if (itemEl !== expectedNext) {
           recentListEl.insertBefore(itemEl, expectedNext || null);
@@ -11593,10 +12859,12 @@
   }
 
   function renderSidebarGroupsPanel(force = false) {
+    if (!isInstanceAlive()) return;
     const panel = document.getElementById('aq-conv-groups');
     if (!panel || !panel.isConnected) return;
+    if (panel.dataset.aqOwner && panel.dataset.aqOwner !== INSTANCE_TOKEN) return;
 
-    const editingActive = Boolean(state.groupCreating || state.groupRenamingId);
+    const editingActive = Boolean(state.groupCreating || state.groupRenamingId || state.convRenaming);
     if (!force && editingActive && panel.querySelector('input.aq-grp-input')) {
       return;
     }
@@ -11613,17 +12881,24 @@
       cp: state.groupCreateParentId,
       ci: Boolean(state.groupCreateInitialItem),
       rn: state.groupRenamingId,
+      cn: state.convRenaming,
       dc: state.groupDeleteConfirmId,
+      sc: state.showCollapsedGroupCount !== false,
     });
 
-    const needRebuild = force || structureKey !== state.groupRenderKey || !panel.querySelector('.aq-grp-body');
+    const missingDomBlocks =
+      state.groups.length > 0 && !panel.querySelector('[data-aq-grp-block]');
+    const needRebuild =
+      force ||
+      structureKey !== state.groupRenderKey ||
+      !panel.querySelector('.aq-grp-body') ||
+      missingDomBlocks;
     if (!needRebuild) {
       patchSidebarGroupsDynamicState(panel, activeCid, convStatuses, stableActiveItems, recentItems);
       return;
     }
 
     const prevScrollTop = panel.querySelector('.aq-grp-body')?.scrollTop || 0;
-    state.groupRenderKey = structureKey;
 
     const smartExpanded = !state.smartActiveCollapsed;
     const smartGroupsHtml = `
@@ -11678,9 +12953,10 @@
           : '删除分组';
 
       const totalCount = tree.totalCountById.get(g.id) ?? items.length;
-      const collapsedCountHtml = !isExpanded
-        ? `<span class="aq-grp-count" data-aq-grp-count="${escapeHtml(g.id)}" title="共 ${totalCount} 个会话">${totalCount}</span>`
-        : '';
+      const collapsedCountHtml =
+        !isExpanded && state.showCollapsedGroupCount !== false
+          ? `<span class="aq-grp-count" data-aq-grp-count="${escapeHtml(g.id)}" title="共 ${totalCount} 个会话">${totalCount}</span>`
+          : '';
 
       const hdrHtml = isRenaming
         ? `
@@ -11708,14 +12984,18 @@
         const childCreateHtml = isCreatingChildHere ? buildCreateFormHtml('输入子分组名称') : '';
         const renderItemRow = (it) => {
           const cidLower = String(it.cascadeId || '').toLowerCase();
+          const dispTitle = getOptimisticRenamedTitle(cidLower) || it.title;
+          if (isConvRenamingRow(cidLower, `group:${g.id}`)) {
+            return renderConvRenameFormHtml(it.cascadeId, dispTitle);
+          }
           const isActive = activeCid && cidLower === activeCid;
           const status = convStatuses[cidLower] || '';
           const statusHtml = renderConvStatusBadgeHtml(status);
-          const tipText = it.project ? `${it.title} · ${it.project}` : it.title;
+          const tipText = it.project ? `${dispTitle} · ${it.project}` : dispTitle;
           return `
             <div class="aq-grp-item ${isActive ? 'is-active' : ''}" data-aq-grp-open="${escapeHtml(it.cascadeId)}" data-aq-grp-gid="${escapeHtml(g.id)}" data-aq-status="${escapeHtml(status)}" data-aq-project="${escapeHtml(it.project || '')}" title="${escapeHtml(tipText)}">
               <div class="aq-grp-item-main">
-                <span class="aq-grp-item-title">${escapeHtml(it.title)}</span>
+                <span class="aq-grp-item-title">${escapeHtml(dispTitle)}</span>
                 ${renderConvProjectSubHtml(it.project)}
               </div>
               ${statusHtml}
@@ -11798,6 +13078,7 @@
     `;
 
     panel.innerHTML = bodyHtml;
+    state.groupRenderKey = structureKey;
 
     patchSidebarGroupsDynamicState(panel, activeCid, convStatuses, stableActiveItems, recentItems);
 
@@ -11855,6 +13136,12 @@
       if (inp) {
         inp.focus();
         inp.select();
+      }
+    } else if (state.convRenaming) {
+      const inp = panel.querySelector('input[data-aq-conv-rename-input]');
+      if (inp && document.activeElement !== inp) {
+        inp.focus();
+        inp.select?.();
       }
     }
   }
@@ -11997,6 +13284,29 @@
         return;
       }
 
+      const convRenameOk = target?.closest?.('[data-aq-conv-rename-ok]');
+      if (convRenameOk) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const cid = convRenameOk.getAttribute('data-aq-conv-rename-ok') || '';
+        const inp = panel.querySelector('input[data-aq-conv-rename-input]');
+        void submitGroupConversationRename(cid, inp?.value || '');
+        return;
+      }
+
+      const convRenameCancel = target?.closest?.('[data-aq-conv-rename-cancel]');
+      if (convRenameCancel) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        cancelGroupConversationRename();
+        return;
+      }
+
+      if (target?.closest?.('[data-aq-conv-rename-form]')) {
+        ev.stopPropagation();
+        return;
+      }
+
       const renameBtn = target?.closest?.('[data-aq-grp-rename]');
       if (renameBtn) {
         ev.preventDefault();
@@ -12005,6 +13315,7 @@
         state.groupCreating = false;
         state.groupCreateParentId = '';
         state.groupCreateInitialItem = null;
+        state.convRenaming = null;
         clearGroupDeleteConfirm();
         state.groupRenamingId = renameBtn.getAttribute('data-aq-grp-rename') || '';
         renderSidebarGroupsPanel(true);
@@ -12185,6 +13496,21 @@
           state.groupRenamingId = '';
           renderSidebarGroupsPanel(true);
         }
+        return;
+      }
+
+      const convRenameInp = ev.target?.closest?.('input[data-aq-conv-rename-input]');
+      if (convRenameInp) {
+        const cid = convRenameInp.getAttribute('data-aq-conv-rename-input') || '';
+        if (ev.key === 'Enter' && !ev.isComposing && ev.keyCode !== 229) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          void submitGroupConversationRename(cid, convRenameInp.value || '');
+        } else if (ev.key === 'Escape') {
+          ev.preventDefault();
+          ev.stopPropagation();
+          cancelGroupConversationRename();
+        }
       }
     });
 
@@ -12200,26 +13526,31 @@
         openGroupCtxMenu(ev.clientX, ev.clientY, { groupId: gid, depth });
         return;
       }
-      const activeOrRecent = ev.target?.closest?.('[data-aq-recent-cid], [data-aq-smart-item="active"]');
-      if (activeOrRecent) {
+      const convRowEl = ev.target?.closest?.('[data-aq-grp-open], [data-aq-recent-cid]');
+      if (convRowEl) {
         const cid =
-          activeOrRecent.getAttribute('data-aq-grp-open') ||
-          activeOrRecent.getAttribute('data-aq-recent-cid') ||
+          convRowEl.getAttribute('data-aq-grp-open') ||
+          convRowEl.getAttribute('data-aq-recent-cid') ||
           '';
+        const itemGroupId = convRowEl.getAttribute('data-aq-grp-gid') || '';
+        const scope = getGroupConvRowScope(convRowEl);
         closeGroupCtxMenu();
-        if (openNativeConversationContextMenu(cid, ev.clientX, ev.clientY)) {
+        if (
+          openNativeConversationContextMenu(cid, ev.clientX, ev.clientY, {
+            anchorEl: convRowEl,
+            scope,
+            itemGroupId,
+          })
+        ) {
           return;
         }
-        openGroupCtxMenu(ev.clientX, ev.clientY, { item: cid ? { cascadeId: cid } : null });
+        openGroupCtxMenu(ev.clientX, ev.clientY, {
+          item: cid ? { cascadeId: cid, scope } : null,
+          itemGroupId,
+        });
         return;
       }
-      const rowEl = ev.target?.closest?.('[data-aq-grp-open]');
-      const cid = rowEl?.getAttribute?.('data-aq-grp-open') || '';
-      const itemGroupId = rowEl?.getAttribute?.('data-aq-grp-gid') || '';
-      openGroupCtxMenu(ev.clientX, ev.clientY, {
-        item: cid ? { cascadeId: cid } : null,
-        itemGroupId,
-      });
+      openGroupCtxMenu(ev.clientX, ev.clientY);
     });
   }
 
@@ -12468,9 +13799,105 @@
     syncProjectSplitCards(sidebar);
   }
 
+  function getSidebarNavElements(sidebar) {
+    if (!sidebar) return { nav: null, primary: null, secondary: [] };
+    const nav = sidebar.querySelector('[data-testid="sidebar-navigation-items"]');
+    if (!nav) return { nav: null, primary: null, secondary: [] };
+    const primary = nav.querySelector(':scope > [data-testid="new-conversation-button"]');
+    const secondary = [];
+    const kids = nav.children;
+    for (let i = 0; i < kids.length; i++) {
+      const el = kids[i];
+      if (!el || el === primary) continue;
+      if (el.tagName === 'A' || el.tagName === 'BUTTON') {
+        secondary.push(el);
+      }
+    }
+    return { nav, primary, secondary };
+  }
+
+  function resolveNativeNavItemLabel(el) {
+    if (!el) return '';
+    const raw = String(el.textContent || el.getAttribute('aria-label') || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!raw) return '';
+    if (/[A-Za-z]/.test(raw) && typeof translateUiText === 'function') {
+      return translateUiText(raw, false) || raw;
+    }
+    return raw;
+  }
+
+  function isNativeSidebarNavItemActive(el) {
+    if (!el) return false;
+    if (
+      el.getAttribute('aria-current') === 'page' ||
+      el.getAttribute('data-active') === 'true' ||
+      el.getAttribute('data-selected') === 'true'
+    ) {
+      return true;
+    }
+    const href = String(el.getAttribute('href') || '').trim();
+    const pathname = String(window.location?.pathname || '').trim();
+    if (href && href !== '/' && (pathname === href || pathname.startsWith(`${href}/`))) {
+      return true;
+    }
+    const testid = String(el.getAttribute('data-testid') || '').trim();
+    if (testid === 'automations-button' && /^\/(automations|scheduled)(\/|$)/i.test(pathname)) {
+      return true;
+    }
+    const cls = typeof el.className === 'string' ? el.className : '';
+    if (
+      cls &&
+      !/\bbg-transparent\b/.test(cls) &&
+      /\b(bg-sidebar-secondary|bg-accent|bg-secondary|bg-card|bg-muted)\b/.test(cls)
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  function ensureSidebarInlineNav(sidebar) {
+    if (!isInstanceAlive() || !sidebar) return;
+    const { nav, primary, secondary } = getSidebarNavElements(sidebar);
+    if (!nav) return;
+    if (!primary || secondary.length === 0) {
+      if (nav.hasAttribute('data-aq-nav-inline')) nav.removeAttribute('data-aq-nav-inline');
+      return;
+    }
+
+    if (nav.getAttribute('data-aq-nav-inline') !== '1') {
+      nav.setAttribute('data-aq-nav-inline', '1');
+    }
+
+    for (let i = 0; i < secondary.length; i++) {
+      const el = secondary[i];
+      const label = resolveNativeNavItemLabel(el);
+      if (label) {
+        if (el.getAttribute('title') !== label) {
+          el.setAttribute('title', label);
+          el.setAttribute('data-aq-nav-title', '1');
+        }
+        if (el.getAttribute('aria-label') !== label) {
+          el.setAttribute('aria-label', label);
+        }
+      }
+      const active = isNativeSidebarNavItemActive(el);
+      if (active) {
+        if (el.getAttribute('data-aq-nav-active') !== '1') {
+          el.setAttribute('data-aq-nav-active', '1');
+        }
+      } else if (el.hasAttribute('data-aq-nav-active')) {
+        el.removeAttribute('data-aq-nav-active');
+      }
+    }
+  }
+
   function ensureSidebarGroupsPanel() {
+    if (!isInstanceAlive()) return;
     const sidebar = findSidebarRoot();
     if (!sidebar) return;
+    ensureSidebarInlineNav(sidebar);
     const convList = sidebar.querySelector('[data-testid="conversation-list-sidebar"]');
     if (!convList) return;
 
@@ -12541,50 +13968,65 @@
   const SCROLL_AT_BOTTOM_EPSILON_PX = 48;
   const SCROLL_RESTORE_STABILIZE_MS = 600;
 
-  function computeTurnsReplySig(payload, cidLower) {
-    if (!payload || !cidLower) return '';
-    if (String(payload.cascadeId || '').trim().toLowerCase() !== cidLower) return '';
-    const turns = Array.isArray(payload.turns) ? payload.turns : [];
-    if (turns.length === 0) return '0';
-    const last = turns[turns.length - 1] || {};
-    return `${turns.length}|${last.startStepIdx ?? 0}|${last.calls ?? 0}|${last.outputTokens ?? 0}|${last.responseTokens ?? 0}|${last.totalTokens ?? 0}|${last.completed ? 1 : 0}`;
-  }
-
-  function extractDomTailMarker(viewEl, precomputedTurnEls = null) {
-    let rows = Array.isArray(precomputedTurnEls) ? precomputedTurnEls : null;
-    if (!rows) {
-      const scope = viewEl || document;
-      const quotableRoot = scope.querySelector?.('[data-quotable-root]');
-      if (quotableRoot) {
-        for (const child of quotableRoot.children) {
-          if (child.tagName === 'DIV') {
-            const matched = [];
-            for (let i = 0; i < child.children.length; i++) {
-              if (isTurnRowElement(child.children[i])) matched.push(child.children[i]);
-            }
-            if (matched.length > 0) {
-              rows = matched;
-              break;
-            }
-          }
+  function isConversationUnreadNow(cidLower, saved = null) {
+    if (!cidLower) return false;
+    const row = findConversationSidebarRow(cidLower);
+    if (row) {
+      return Boolean(
+        row.querySelector?.('[data-testid="status-unread-dot"], [data-testid="attention-dot"]')
+      );
+    }
+    const leftAtMs = Number(saved?.leftAt) || 0;
+    const meta = state.trajMetaById[cidLower];
+    const grpPanel = document.getElementById('aq-conv-groups');
+    if (grpPanel) {
+      const grpItems = grpPanel.querySelectorAll('[data-aq-grp-open]');
+      for (let i = 0; i < grpItems.length; i++) {
+        const it = grpItems[i];
+        if (String(it.getAttribute('data-aq-grp-open') || '').trim().toLowerCase() !== cidLower) {
+          continue;
+        }
+        const st = it.getAttribute('data-aq-status');
+        if (st === 'waiting') return true;
+        if (
+          st === 'unread' &&
+          (!leftAtMs ||
+            !meta ||
+            meta.markedAsUnread ||
+            (!meta.running && !meta.subagentRunning && meta.lastModifiedMs > leftAtMs + 500))
+        ) {
+          return true;
         }
       }
-      if (!rows) {
-        rows = scope.querySelectorAll ? [...scope.querySelectorAll('[data-turn-content]')] : [];
+    }
+    if (meta) {
+      if (meta.markedAsUnread || (!meta.killed && (meta.waiting || meta.subagentWaiting))) {
+        return true;
+      }
+      if (!meta.killed && !meta.running && !meta.subagentRunning) {
+        const baselineMs = Math.max(leftAtMs, Number(meta.lastUserViewMs) || 0);
+        if (meta.lastModifiedMs > 0 && meta.lastModifiedMs > baselineMs + (leftAtMs ? 500 : 0)) {
+          return true;
+        }
       }
     }
-    const domTurnCount = rows.length;
-    if (domTurnCount === 0) return { domTurnCount: 0, lastTurnTextLen: 0 };
-    const lastRow = rows[domTurnCount - 1];
-    const contentNode =
-      lastRow?.querySelector?.(
-        '[data-testid="agent-response"], [data-turn-content], [data-testid="user-message"]'
-      ) || lastRow;
-    const lastTurnTextLen = contentNode?.textContent ? contentNode.textContent.length : 0;
-    return { domTurnCount, lastTurnTextLen };
+    return false;
   }
 
-  function hasTurnsPayloadNewReply(payload, cidLower, saved) {
+  function isConversationUnreadOnOpen(cidLower, saved = null) {
+    if (!cidLower) return false;
+    if (
+      state.routeEnterUnread &&
+      state.routeEnterUnread.cidLower === cidLower &&
+      Date.now() - state.routeEnterUnread.at < 2_500 &&
+      state.routeEnterUnread.isUnread
+    ) {
+      return true;
+    }
+    return isConversationUnreadNow(cidLower, saved);
+  }
+
+  function hasTurnsPayloadNewTurn(payload, cidLower, saved) {
     if (!payload || !cidLower || !saved) return false;
     if (String(payload.cascadeId || '').trim().toLowerCase() !== cidLower) return false;
     const turns = Array.isArray(payload.turns) ? payload.turns : [];
@@ -12594,12 +14036,8 @@
     if (leftAt > 0 && Number(lastTurn.startTsMs) > leftAt + 500) {
       return true;
     }
-    if (!saved.wasRunning && saved.turnCount > 0 && turns.length > saved.turnCount) {
+    if (saved.turnCount > 0 && turns.length > saved.turnCount) {
       return true;
-    }
-    if (saved.wasRunning && saved.turnsSig) {
-      const curSig = computeTurnsReplySig(payload, cidLower);
-      if (curSig && curSig !== saved.turnsSig) return true;
     }
     return false;
   }
@@ -12640,53 +14078,21 @@
     return false;
   }
 
-  function didConversationReceiveNewReply(cidLower, saved, viewEl = null) {
+  function didSavedConversationAdvance(cidLower, saved) {
     if (!cidLower || !saved) return false;
+    const row = findConversationSidebarRow(cidLower);
     if (
-      state.routeEnterNewReply &&
-      state.routeEnterNewReply.cidLower === cidLower &&
-      Date.now() - state.routeEnterNewReply.at < 2_500 &&
-      state.routeEnterNewReply.hasNewReply
+      row &&
+      !saved.wasRunning &&
+      row.querySelector('[data-testid="status-loading-spinner"], [data-testid="status-task-running"]')
     ) {
       return true;
     }
-    const row = findConversationSidebarRow(cidLower);
-    if (row) {
-      if (row.querySelector('[data-testid="status-unread-dot"], [data-testid="attention-dot"]')) {
-        return true;
-      }
-      if (
-        !saved.wasRunning &&
-        row.querySelector('[data-testid="status-loading-spinner"], [data-testid="status-task-running"]')
-      ) {
-        return true;
-      }
-    }
     const meta = state.trajMetaById[cidLower];
-    if (meta) {
-      if (meta.markedAsUnread || (!meta.killed && (meta.waiting || meta.subagentWaiting))) {
-        return true;
-      }
-      if (!saved.wasRunning && !meta.killed && (meta.running || meta.subagentRunning)) {
-        return true;
-      }
-      const baselineMs = Math.max(Number(saved.leftAt) || 0, Number(meta.lastUserViewMs) || 0);
-      if (baselineMs > 0 && meta.lastModifiedMs > baselineMs + 500) {
-        return true;
-      }
+    if (meta && !saved.wasRunning && !meta.killed && (meta.running || meta.subagentRunning)) {
+      return true;
     }
-    if (saved.domTurnCount > 0 && viewEl) {
-      const { domTurnCount, lastTurnTextLen } = extractDomTailMarker(viewEl);
-      if (domTurnCount > saved.domTurnCount) return true;
-      if (
-        domTurnCount === saved.domTurnCount &&
-        saved.lastTurnTextLen > 0 &&
-        lastTurnTextLen > saved.lastTurnTextLen
-      ) {
-        return true;
-      }
-    }
-    if (hasTurnsPayloadNewReply(state.turnsPayload, cidLower, saved)) {
+    if (hasTurnsPayloadNewTurn(state.turnsPayload, cidLower, saved)) {
       return true;
     }
     return false;
@@ -12698,9 +14104,26 @@
       state.convScrollPersistTimer = null;
     }
     try {
+      const { viewport, cidLower } = findConversationScrollViewport(null);
+      if (
+        cidLower &&
+        viewport?.isConnected &&
+        viewport.__aqReadyToRecord &&
+        viewport.__aqCid === cidLower &&
+        viewport.__aqUserScrolled
+      ) {
+        const existing = state.convScrollMemory.get(cidLower);
+        if (existing && existing.userScrolled) {
+          const anchor = captureViewportStepAnchor(viewport);
+          existing.anchorStepIndex = anchor ? anchor.anchorStepIndex : '';
+          existing.anchorOffset = anchor ? anchor.anchorOffset : 0;
+        }
+      }
+    } catch {}
+    try {
       if (typeof sessionStorage === 'undefined') return;
       const entries = [...state.convScrollMemory.entries()].slice(-MAX_CONV_SCROLL_MEMORY);
-      sessionStorage.setItem('aq_conv_scroll_v1', JSON.stringify(entries));
+      sessionStorage.setItem('aq_conv_scroll_v3', JSON.stringify(entries));
     } catch {}
   }
 
@@ -12768,15 +14191,14 @@
   function forceNativeScrollToBottom(viewport) {
     if (!viewport) return;
     const handle = getAutoScrollHandle(viewport);
-    if (handle?.forceScrollToBottom) {
-      try {
-        handle.forceScrollToBottom();
-        return;
-      } catch {}
-    }
     try {
-      viewport.scrollTop = viewport.scrollHeight;
+      handle?.forceScrollToBottom?.();
     } catch {}
+    const maxScroll = Math.max(
+      0,
+      (Number(viewport.scrollHeight) || 0) - (Number(viewport.clientHeight) || 0)
+    );
+    viewport.scrollTop = maxScroll;
   }
 
   function cancelActiveScrollRestore({ markReady = true } = {}) {
@@ -12794,6 +14216,58 @@
     }
   }
 
+  function isViewportVisuallyAtBottom(viewport, scrollTop, maxScroll) {
+    if (maxScroll - scrollTop <= SCROLL_AT_BOTTOM_EPSILON_PX) return true;
+    const latestEl = viewport?.querySelector?.('[data-turn-content="latest"]');
+    if (latestEl && typeof latestEl.getBoundingClientRect === 'function') {
+      const vpRect = viewport.getBoundingClientRect();
+      const lRect = latestEl.getBoundingClientRect();
+      if (vpRect.height > 0 && lRect.height > 0) {
+        return lRect.bottom - vpRect.bottom <= SCROLL_AT_BOTTOM_EPSILON_PX;
+      }
+    }
+    return false;
+  }
+
+  const MIN_PAGINATED_SAFE_TOP_PX = 32;
+
+  function captureViewportStepAnchor(viewport) {
+    if (
+      !viewport ||
+      typeof viewport.querySelectorAll !== 'function' ||
+      typeof viewport.getBoundingClientRect !== 'function'
+    ) {
+      return null;
+    }
+    const steps = viewport.querySelectorAll('[data-step-index]');
+    if (!steps || steps.length === 0) return null;
+    const vpRect = viewport.getBoundingClientRect();
+    if (vpRect.height <= 0) return null;
+    let chosen = null;
+    let chosenRect = null;
+    for (let i = 0; i < steps.length; i++) {
+      const el = steps[i];
+      const r = el.getBoundingClientRect();
+      if (r.height <= 0) continue;
+      if (r.bottom > vpRect.top + 4) {
+        chosen = el;
+        chosenRect = r;
+        break;
+      }
+    }
+    if (!chosen) {
+      chosen = steps[steps.length - 1];
+      chosenRect = chosen.getBoundingClientRect();
+      if (chosenRect.height <= 0) return null;
+    }
+    const rawIdx = chosen.getAttribute('data-step-index');
+    if (rawIdx === null || rawIdx === '') return null;
+    return {
+      anchorStepIndex: String(rawIdx),
+      anchorOffset: Math.round(chosenRect.top - vpRect.top),
+    };
+  }
+
   function recordViewportScrollPositionOnly(cidLower, viewport) {
     if (!cidLower || !viewport || !viewport.isConnected) return;
     const scrollTop = Math.max(0, Number(viewport.scrollTop) || 0);
@@ -12801,14 +14275,40 @@
     const clientHeight = Math.max(0, Number(viewport.clientHeight) || 0);
     if (clientHeight <= 0 && scrollHeight <= 0) return;
     const maxScroll = Math.max(0, scrollHeight - clientHeight);
-    const atBottom = maxScroll - scrollTop <= SCROLL_AT_BOTTOM_EPSILON_PX;
-    const roundedTop = Math.round(scrollTop);
+    const prevTop =
+      typeof viewport.__aqLastScrollTop === 'number' ? viewport.__aqLastScrollTop : scrollTop;
+    const prevMax =
+      typeof viewport.__aqLastMaxScroll === 'number' ? viewport.__aqLastMaxScroll : maxScroll;
+    viewport.__aqLastScrollTop = scrollTop;
+    viewport.__aqLastMaxScroll = maxScroll;
+
+    const nearBottom = maxScroll - scrollTop <= 240;
+    const atBottomNow = nearBottom
+      ? isViewportVisuallyAtBottom(viewport, scrollTop, maxScroll)
+      : false;
+    if (atBottomNow) {
+      viewport.__aqUserScrolled = false;
+    } else if (
+      (scrollTop < prevTop - 0.5 && maxScroll >= prevMax - 1) ||
+      (viewport.__aqNavJumpUntil && Date.now() < viewport.__aqNavJumpUntil)
+    ) {
+      viewport.__aqUserScrolled = true;
+    }
+
+    const userScrolled = Boolean(viewport.__aqUserScrolled) && !atBottomNow;
+    const atBottom = !userScrolled;
+    const roundedTop = userScrolled ? Math.round(scrollTop) : Math.round(maxScroll);
     const roundedMax = Math.round(maxScroll);
     const existing = state.convScrollMemory.get(cidLower);
     if (existing) {
       existing.scrollTop = roundedTop;
       existing.maxScroll = roundedMax;
       existing.atBottom = atBottom;
+      existing.userScrolled = userScrolled;
+      if (!userScrolled) {
+        existing.anchorStepIndex = '';
+        existing.anchorOffset = 0;
+      }
       existing.leftAt = Date.now();
       schedulePersistConvScrollMemory();
       return;
@@ -12817,23 +14317,31 @@
       scrollTop: roundedTop,
       maxScroll: roundedMax,
       atBottom,
+      userScrolled,
+      anchorStepIndex: '',
+      anchorOffset: 0,
       leftAt: Date.now(),
-      domTurnCount: 0,
-      lastTurnTextLen: 0,
       turnCount: 0,
-      turnsSig: '',
       wasRunning: false,
     });
   }
 
-  function recordConversationScrollState(cidLower, viewport, viewEl = null, precomputedTurnEls = null) {
+  function recordConversationScrollState(cidLower, viewport) {
     if (!cidLower || !viewport || !viewport.isConnected) return;
     const scrollTop = Math.max(0, Number(viewport.scrollTop) || 0);
     const scrollHeight = Math.max(0, Number(viewport.scrollHeight) || 0);
     const clientHeight = Math.max(0, Number(viewport.clientHeight) || 0);
     if (clientHeight <= 0 && scrollHeight <= 0) return;
     const maxScroll = Math.max(0, scrollHeight - clientHeight);
-    const atBottom = maxScroll - scrollTop <= SCROLL_AT_BOTTOM_EPSILON_PX;
+    viewport.__aqLastScrollTop = scrollTop;
+    viewport.__aqLastMaxScroll = maxScroll;
+    const visuallyAtBottom = isViewportVisuallyAtBottom(viewport, scrollTop, maxScroll);
+    if (visuallyAtBottom) {
+      viewport.__aqUserScrolled = false;
+    }
+    const userScrolled = Boolean(viewport.__aqUserScrolled) && !visuallyAtBottom;
+    const atBottom = !userScrolled;
+    const anchor = userScrolled ? captureViewportStepAnchor(viewport) : null;
     const prev = state.convScrollMemory.get(cidLower) || null;
     const payloadMatches =
       String(state.turnsPayload?.cascadeId || '').trim().toLowerCase() === cidLower;
@@ -12842,25 +14350,20 @@
         ? state.turnsPayload.turns.length
         : 0
       : prev?.turnCount || 0;
-    const turnsSig = computeTurnsReplySig(state.turnsPayload, cidLower) || prev?.turnsSig || '';
-    const hostView =
-      viewEl || viewport.closest?.('[data-testid="conversation-view"]') || null;
-    const marker = extractDomTailMarker(hostView, precomputedTurnEls);
     setConvScrollMemoryEntry(cidLower, {
-      scrollTop: Math.round(scrollTop),
+      scrollTop: userScrolled ? Math.round(scrollTop) : Math.round(maxScroll),
       maxScroll: Math.round(maxScroll),
       atBottom,
+      userScrolled,
+      anchorStepIndex: anchor ? anchor.anchorStepIndex : '',
+      anchorOffset: anchor ? anchor.anchorOffset : 0,
       leftAt: Date.now(),
-      domTurnCount: marker.domTurnCount || prev?.domTurnCount || 0,
-      lastTurnTextLen:
-        marker.domTurnCount > 0 ? marker.lastTurnTextLen : prev?.lastTurnTextLen || 0,
       turnCount,
-      turnsSig,
       wasRunning: isConversationCurrentlyRunning(cidLower),
     });
   }
 
-  function refreshSavedConversationReplyMarkers(cidLower, precomputedTurnEls = null) {
+  function refreshSavedConversationReplyMarkers(cidLower) {
     if (!cidLower) return;
     const prev = state.convScrollMemory.get(cidLower);
     if (!prev) return;
@@ -12871,30 +14374,11 @@
         ? state.turnsPayload.turns.length
         : 0
       : prev.turnCount || 0;
-    const turnsSig = computeTurnsReplySig(state.turnsPayload, cidLower) || prev.turnsSig || '';
     const wasRunning = isConversationCurrentlyRunning(cidLower);
-    let domTurnCount = prev.domTurnCount || 0;
-    let lastTurnTextLen = prev.lastTurnTextLen || 0;
-    if (Array.isArray(precomputedTurnEls)) {
-      const marker = extractDomTailMarker(null, precomputedTurnEls);
-      if (marker.domTurnCount > 0) {
-        domTurnCount = marker.domTurnCount;
-        lastTurnTextLen = marker.lastTurnTextLen;
-      }
-    }
-    if (
-      turnsSig !== prev.turnsSig ||
-      turnCount !== prev.turnCount ||
-      wasRunning !== prev.wasRunning ||
-      domTurnCount !== prev.domTurnCount ||
-      lastTurnTextLen !== prev.lastTurnTextLen
-    ) {
+    if (turnCount !== prev.turnCount || wasRunning !== prev.wasRunning) {
       setConvScrollMemoryEntry(cidLower, {
         ...prev,
         turnCount,
-        turnsSig,
-        domTurnCount,
-        lastTurnTextLen,
         wasRunning,
         leftAt: Date.now(),
       });
@@ -12902,7 +14386,7 @@
   }
 
   function snapshotActiveConversationScrollBeforeLeave() {
-    const { viewEl, viewport, cidLower } = findConversationScrollViewport(null);
+    const { viewport, cidLower } = findConversationScrollViewport(null);
     if (!cidLower) return;
     if (
       viewport &&
@@ -12911,20 +14395,104 @@
       viewport.__aqCid === cidLower &&
       state.activeScrollRestore?.viewport !== viewport
     ) {
-      recordConversationScrollState(cidLower, viewport, viewEl);
+      recordConversationScrollState(cidLower, viewport);
     } else {
       refreshSavedConversationReplyMarkers(cidLower);
     }
   }
 
-  function computeRestoredScrollTop(saved, currentMaxScroll) {
+  function resolveSavedScrollTarget(viewport, saved, currentMaxScroll) {
     const savedMax = Math.max(0, Number(saved?.maxScroll) || 0);
     const savedTop = Math.max(0, Number(saved?.scrollTop) || 0);
-    if (savedMax > 0 && currentMaxScroll + 400 < savedMax) {
-      const distFromBottom = Math.max(0, savedMax - savedTop);
-      return Math.max(0, Math.round(currentMaxScroll - distFromBottom));
+    const isPaginatedSlice = savedMax > 0 && currentMaxScroll + 400 < savedMax;
+    const anchorIdx = String(saved?.anchorStepIndex || '').trim();
+    const anchorNum = /^\d+$/.test(anchorIdx) ? Number.parseInt(anchorIdx, 10) : NaN;
+    if (anchorIdx && typeof viewport?.querySelectorAll === 'function') {
+      const steps = viewport.querySelectorAll('[data-step-index]');
+      if (steps && steps.length > 0) {
+        let matchEl = null;
+        let minStepNum = Infinity;
+        let maxStepNum = -Infinity;
+        let nearestAfterEl = null;
+        let nearestAfterNum = Infinity;
+        for (let i = 0; i < steps.length; i++) {
+          const el = steps[i];
+          const raw = String(el.getAttribute('data-step-index') || '').trim();
+          if (raw === anchorIdx && !matchEl) {
+            matchEl = el;
+          }
+          if (/^\d+$/.test(raw)) {
+            const n = Number.parseInt(raw, 10);
+            if (n < minStepNum) minStepNum = n;
+            if (n > maxStepNum) maxStepNum = n;
+            if (Number.isFinite(anchorNum) && n >= anchorNum && n < nearestAfterNum) {
+              nearestAfterNum = n;
+              nearestAfterEl = el;
+            }
+          }
+        }
+        if (!matchEl) {
+          if (Number.isFinite(anchorNum) && Number.isFinite(minStepNum)) {
+            if (anchorNum < minStepNum) {
+              return { mode: 'abandon-bottom', scrollTop: currentMaxScroll };
+            }
+            if (anchorNum > maxStepNum) {
+              return { mode: 'pending', scrollTop: currentMaxScroll };
+            }
+            if (nearestAfterEl) {
+              matchEl = nearestAfterEl;
+            }
+          }
+          if (!matchEl) {
+            return { mode: 'abandon-bottom', scrollTop: currentMaxScroll };
+          }
+        }
+        const vpRect = viewport.getBoundingClientRect();
+        const mRect = matchEl.getBoundingClientRect();
+        if (vpRect.height <= 0 || mRect.height <= 0) {
+          return { mode: 'pending', scrollTop: currentMaxScroll };
+        }
+        const curTop = Math.max(0, Number(viewport.scrollTop) || 0);
+        const stepTopInScroll = mRect.top - vpRect.top + curTop;
+        const rawTarget = Math.round(stepTopInScroll - (Number(saved?.anchorOffset) || 0));
+        const minTop = isPaginatedSlice ? Math.min(currentMaxScroll, MIN_PAGINATED_SAFE_TOP_PX) : 0;
+        return {
+          mode: 'restore',
+          scrollTop: Math.max(minTop, Math.min(currentMaxScroll, rawTarget)),
+        };
+      }
+      return { mode: 'pending', scrollTop: currentMaxScroll };
     }
-    return Math.min(currentMaxScroll, Math.round(savedTop));
+    if (isPaginatedSlice) {
+      return { mode: 'abandon-bottom', scrollTop: currentMaxScroll };
+    }
+    return { mode: 'restore', scrollTop: Math.min(currentMaxScroll, Math.round(savedTop)) };
+  }
+
+  function computeUnreadUserMessageTarget(viewport, viewEl, currentMaxScroll, clientH) {
+    const scope = viewEl || viewport;
+    const userEls = scope?.querySelectorAll
+      ? scope.querySelectorAll('[data-testid="user-message"]')
+      : null;
+    if (!userEls || userEls.length === 0) return null;
+    const targetEl = userEls[userEls.length - 1];
+    if (!targetEl) return null;
+    const vpRect = viewport.getBoundingClientRect();
+    const uRect = targetEl.getBoundingClientRect();
+    if (uRect.height <= 0 || vpRect.height <= 0) return null;
+    const curTop = Math.max(0, Number(viewport.scrollTop) || 0);
+    const userTopInScroll = uRect.top - vpRect.top + curTop;
+    let rawDesiredTop;
+    if (clientH > 0 && uRect.height > clientH * 0.6) {
+      rawDesiredTop = userTopInScroll + uRect.height - Math.round(clientH * 0.35);
+    } else {
+      rawDesiredTop = userTopInScroll - 16;
+    }
+    const desiredTop = Math.max(0, Math.round(rawDesiredTop));
+    return {
+      scrollTop: Math.min(currentMaxScroll, desiredTop),
+      overflowsBottom: currentMaxScroll > desiredTop + 2,
+    };
   }
 
   function applyPendingScrollRestore() {
@@ -12938,20 +14506,57 @@
       cancelActiveScrollRestore({ markReady: true });
       return;
     }
-    if (Date.now() >= r.until || r.userInteracted) {
-      cancelActiveScrollRestore({ markReady: true });
-      recordConversationScrollState(r.cidLower, vp);
-      return;
+    if (r.resizeObserver) {
+      const contentWrap = vp.firstElementChild;
+      if (contentWrap && contentWrap !== r.observedWrap) {
+        try {
+          r.resizeObserver.observe(contentWrap);
+          if (contentWrap.firstElementChild) {
+            r.resizeObserver.observe(contentWrap.firstElementChild);
+          }
+          r.observedWrap = contentWrap;
+        } catch {}
+      }
     }
-    stopNativeAutoScroll(vp);
     const clientH = Number(vp.clientHeight) || 0;
     const scrollH = Number(vp.scrollHeight) || 0;
     if (clientH <= 0 && scrollH <= 0) return;
     const currentMaxScroll = Math.max(0, scrollH - clientH);
-    const targetTop = computeRestoredScrollTop(r.saved, currentMaxScroll);
-    if (Math.abs((Number(vp.scrollTop) || 0) - targetTop) >= 1) {
-      vp.scrollTop = targetTop;
+    if (r.mode === 'user-prompt') {
+      const target = computeUnreadUserMessageTarget(vp, r.viewEl, currentMaxScroll, clientH);
+      if (target !== null) {
+        r.applied = true;
+        if (target.overflowsBottom) {
+          stopNativeAutoScroll(vp);
+        }
+        if (Math.abs((Number(vp.scrollTop) || 0) - target.scrollTop) >= 1) {
+          vp.scrollTop = target.scrollTop;
+        }
+        vp.__aqLastScrollTop = Math.max(0, Number(vp.scrollTop) || 0);
+        vp.__aqLastMaxScroll = currentMaxScroll;
+      }
+      return;
     }
+    const resolved = resolveSavedScrollTarget(vp, r.saved, currentMaxScroll);
+    if (resolved.mode === 'pending') {
+      return;
+    }
+    if (resolved.mode === 'abandon-bottom') {
+      vp.__aqUserScrolled = false;
+      forceNativeScrollToBottom(vp);
+      vp.__aqLastScrollTop = Math.max(0, Number(vp.scrollTop) || 0);
+      vp.__aqLastMaxScroll = currentMaxScroll;
+      cancelActiveScrollRestore({ markReady: true });
+      recordConversationScrollState(r.cidLower, vp);
+      return;
+    }
+    r.applied = true;
+    stopNativeAutoScroll(vp);
+    if (Math.abs((Number(vp.scrollTop) || 0) - resolved.scrollTop) >= 1) {
+      vp.scrollTop = resolved.scrollTop;
+    }
+    vp.__aqLastScrollTop = Math.max(0, Number(vp.scrollTop) || 0);
+    vp.__aqLastMaxScroll = currentMaxScroll;
   }
 
   function syncConversationViewportScroll() {
@@ -12970,13 +14575,24 @@
       return;
     }
 
-    // First boot/hot-reload while a conversation is already open on screen: adopt its current scroll
+    // First boot/hot-reload while a conversation is already open on screen: adopt existing v3 scroll state only
     if (!state.initialScrollBootstrapped) {
       state.initialScrollBootstrapped = true;
+      const bootScrollTop = Math.max(0, Number(viewport.scrollTop) || 0);
+      const bootMaxScroll = Math.max(
+        0,
+        (Number(viewport.scrollHeight) || 0) - (Number(viewport.clientHeight) || 0)
+      );
+      const existingBootSaved = state.convScrollMemory.get(cidLower) || null;
       viewport.__aqCid = cidLower;
       viewport.__aqScrollChecked = cidLower;
+      viewport.__aqLastScrollTop = bootScrollTop;
+      viewport.__aqLastMaxScroll = bootMaxScroll;
+      viewport.__aqUserScrolled =
+        Boolean(existingBootSaved?.userScrolled && !existingBootSaved?.atBottom) &&
+        !isViewportVisuallyAtBottom(viewport, bootScrollTop, bootMaxScroll);
       viewport.__aqReadyToRecord = true;
-      recordConversationScrollState(cidLower, viewport, viewEl);
+      recordConversationScrollState(cidLower, viewport);
       return;
     }
 
@@ -12984,26 +14600,46 @@
       cancelActiveScrollRestore({ markReady: true });
     }
 
+    const prevVpCid = viewport.__aqCid || '';
+    const initTop = Math.max(0, Number(viewport.scrollTop) || 0);
+    const initMax = Math.max(
+      0,
+      (Number(viewport.scrollHeight) || 0) - (Number(viewport.clientHeight) || 0)
+    );
     viewport.__aqCid = cidLower;
     viewport.__aqScrollChecked = cidLower;
+    viewport.__aqLastScrollTop = initTop;
+    viewport.__aqLastMaxScroll = initMax;
 
     const saved = state.convScrollMemory.get(cidLower) || null;
-    if (!saved || saved.atBottom || didConversationReceiveNewReply(cidLower, saved, viewEl)) {
+    const isUnread = isConversationUnreadOnOpen(cidLower, saved);
+    const restoreMode = isUnread
+      ? 'user-prompt'
+      : saved && saved.userScrolled && !saved.atBottom && !didSavedConversationAdvance(cidLower, saved)
+        ? 'saved'
+        : '';
+
+    viewport.__aqUserScrolled = restoreMode === 'saved';
+
+    if (!restoreMode) {
       viewport.__aqReadyToRecord = true;
-      recordConversationScrollState(cidLower, viewport, viewEl);
+      if (!prevVpCid || prevVpCid === cidLower) {
+        recordConversationScrollState(cidLower, viewport);
+      }
       return;
     }
 
     viewport.__aqReadyToRecord = false;
-    const now = Date.now();
     const restore = {
       cidLower,
       viewport,
-      saved: { ...saved },
-      startedAt: now,
-      until: now + SCROLL_RESTORE_STABILIZE_MS,
+      viewEl,
+      mode: restoreMode,
+      saved: saved ? { ...saved } : null,
+      applied: false,
       userInteracted: false,
       resizeObserver: null,
+      observedWrap: null,
       timer: null,
     };
     if (typeof ResizeObserver === 'function') {
@@ -13020,6 +14656,7 @@
           if (contentWrap.firstElementChild) {
             ro.observe(contentWrap.firstElementChild);
           }
+          restore.observedWrap = contentWrap;
         }
         restore.resizeObserver = ro;
       } catch {}
@@ -13027,8 +14664,14 @@
     restore.timer = setTimeout(() => {
       if (state.activeScrollRestore === restore) {
         applyPendingScrollRestore();
-        cancelActiveScrollRestore({ markReady: true });
-        recordConversationScrollState(cidLower, viewport, viewEl);
+        if (state.activeScrollRestore === restore) {
+          cancelActiveScrollRestore({ markReady: true });
+          if (restore.applied) {
+            recordConversationScrollState(cidLower, viewport);
+          } else {
+            viewport.__aqUserScrolled = false;
+          }
+        }
       }
     }, SCROLL_RESTORE_STABILIZE_MS + 16);
 
@@ -13041,18 +14684,36 @@
     if (cid !== state.cascadeId) {
       const prevCid = state.cascadeId;
       if (prevCid) {
-        refreshSavedConversationReplyMarkers(prevCid.toLowerCase());
+        const prevLower = prevCid.toLowerCase();
+        const leaveNow = Date.now();
+        state.localViewedAtById[prevLower] = leaveNow;
+        const prevMeta = state.trajMetaById[prevLower];
+        if (prevMeta && !prevMeta.markedAsUnread) {
+          prevMeta.lastUserViewMs = Math.max(
+            prevMeta.lastUserViewMs || 0,
+            prevMeta.lastModifiedMs || 0,
+            leaveNow
+          );
+        }
+        refreshSavedConversationReplyMarkers(prevLower);
       }
       if (cid) {
         const incomingLower = cid.toLowerCase();
+        const preclick =
+          state.routeEnterUnread &&
+          state.routeEnterUnread.cidLower === incomingLower &&
+          Date.now() - state.routeEnterUnread.at < 1_500
+            ? state.routeEnterUnread
+            : null;
         const savedIncoming = state.convScrollMemory.get(incomingLower) || null;
-        state.routeEnterNewReply = {
+        state.routeEnterUnread = {
           cidLower: incomingLower,
-          hasNewReply: savedIncoming ? didConversationReceiveNewReply(incomingLower, savedIncoming) : false,
+          isUnread:
+            Boolean(preclick?.isUnread) || isConversationUnreadNow(incomingLower, savedIncoming),
           at: Date.now(),
         };
       } else {
-        state.routeEnterNewReply = null;
+        state.routeEnterUnread = null;
       }
       state.cascadeId = cid;
       stopLiveTurnTimer();
@@ -13142,15 +14803,16 @@
         renderRunningThinkingHelper(sharedCid, sharedTurnEls, sharedLiveCtx);
       }
       syncConversationViewportScroll();
-      if (needTurnRows && sharedCid && !state.activeScrollRestore) {
-        refreshSavedConversationReplyMarkers(sharedCid.toLowerCase(), sharedTurnEls);
-      }
     }
     if (runMenus) {
       syncNativeConversationMenus();
+      syncNativeSettingsModal();
     }
     if (runI18n) {
       applyUiTranslations({ includeSidebar: runI18nSidebar || runSidebar });
+      if (!runMenus) {
+        syncNativeSettingsModal();
+      }
     }
   };
   renderAllRafCallback.__aqToken = INSTANCE_TOKEN;
@@ -13184,9 +14846,15 @@
 
   function checkRoute() {
     if (state.disposed) return;
+    const curPath = String(window.location?.pathname || '');
+    const pathChanged = curPath !== state.lastPathname;
+    if (pathChanged) {
+      state.lastPathname = curPath;
+    }
     const routeChanged = syncCascadeRoute();
     if (
       routeChanged ||
+      pathChanged ||
       (!document.hidden && (!document.getElementById('aq-quota-chip') || !document.getElementById('aq-conv-groups')))
     ) {
       scheduleRenderAll();
@@ -13238,7 +14906,10 @@
         const cidLowerForScroll = cid.toLowerCase();
         const activeRestore = state.activeScrollRestore;
         if (activeRestore && activeRestore.cidLower === cidLowerForScroll) {
-          if (hasTurnsPayloadNewReply(nextPayload, cidLowerForScroll, activeRestore.saved)) {
+          if (
+            activeRestore.mode === 'saved' &&
+            hasTurnsPayloadNewTurn(nextPayload, cidLowerForScroll, activeRestore.saved)
+          ) {
             const vp = activeRestore.viewport;
             cancelActiveScrollRestore({ markReady: true });
             if (vp?.isConnected) {
@@ -13539,6 +15210,33 @@
           }
         }
       }
+      if (payload && typeof payload.externalEditors === 'object' && payload.externalEditors) {
+        const nextOpts = Array.isArray(payload.externalEditors.options)
+          ? payload.externalEditors.options
+              .filter((o) => o && typeof o.id === 'string' && typeof o.label === 'string')
+              .map((o) => ({
+                id: o.id,
+                label: o.label,
+                menuLabel: typeof o.menuLabel === 'string' && o.menuLabel ? o.menuLabel : `在 ${o.label} 中打开`,
+                supportsLine: Boolean(o.supportsLine),
+                supportsDirectory: Boolean(o.supportsDirectory),
+              }))
+          : state.externalEditors.options;
+        state.externalEditors = {
+          platform:
+            typeof payload.externalEditors.platform === 'string' && payload.externalEditors.platform
+              ? payload.externalEditors.platform
+              : state.externalEditors.platform,
+          options: nextOpts,
+        };
+        syncFileOpenDefaultControlsInPlace();
+      }
+      if (payload && typeof payload.fileOpenDefault === 'string') {
+        setFileOpenDefaultPref(payload.fileOpenDefault, { notifyDaemon: false });
+      }
+      if (payload && typeof payload.showCollapsedGroupCount === 'boolean') {
+        setShowCollapsedGroupCountPref(payload.showCollapsedGroupCount, { notifyDaemon: false });
+      }
       const mode =
         payload?.convWidthMode === 'full'
           ? 'full'
@@ -13667,7 +15365,7 @@
   injectStyles();
 
   const SELF_MUTATION_IGNORE_SELECTOR =
-    '[data-aq-turn-usage], [data-aq-thinking-btn], [data-aq-thinking-card], [data-aq-native-menu-ext], [data-aq-proj-card], [data-aq-row-grp-btn], .aq-conv-width-resizer, #aq-context-chip, #aq-quota-chip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-key-settings-modal, #aq-batch-wake-panel, #aq-batch-toast, #aq-turn-tooltip, #aq-sidebar-tabs, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-conv-drag-ghost';
+    '[data-aq-turn-usage], [data-aq-thinking-btn], [data-aq-thinking-card], [data-aq-native-menu-ext], [data-aq-settings-ext], [data-aq-proj-card], [data-aq-row-grp-btn], .aq-conv-width-resizer, #aq-context-chip, #aq-quota-chip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-key-settings-modal, #aq-batch-wake-panel, #aq-batch-toast, #aq-file-toast, #aq-turn-tooltip, #aq-sidebar-tabs, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-file-ctx-menu, #aq-conv-drag-ghost';
 
   const POPUP_CHROME_SELECTOR = [
     '.settings-modal-container',
@@ -13788,6 +15486,7 @@
     }
     if (shouldFlushNow) {
       syncNativeConversationMenus();
+      syncNativeSettingsModal();
     }
     if (dirtyTurns || dirtyChip) {
       syncConversationViewportScroll();
@@ -13855,19 +15554,66 @@
       }
     }
   };
+  const onWinContextMenuCapture = (ev) => {
+    if (!isInstanceAlive()) return;
+    const fileTarget = resolveFileTargetFromNode(ev.target);
+    if (fileTarget) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (typeof ev.stopImmediatePropagation === 'function') {
+        ev.stopImmediatePropagation();
+      }
+      openFileCtxMenu(ev.clientX, ev.clientY, fileTarget);
+    }
+  };
   const onDocContextMenuCapture = (ev) => {
+    if (!isInstanceAlive()) return;
     recordNativeMenuTargetFromEvent(ev);
   };
   const onDocPointerDown = (ev) => {
+    if (!isInstanceAlive()) return;
     const t = ev.target;
     if (t?.closest?.('.bg-sidebar, #aq-conv-groups')) {
       snapshotActiveConversationScrollBeforeLeave();
+      if (ev.button === 0 && !t.closest?.('button')) {
+        const grpOpenEl = t.closest?.('#aq-conv-groups [data-aq-grp-open]');
+        const nativeRowEl = !grpOpenEl
+          ? t.closest?.('.bg-sidebar [data-testid="conversation-row-sidebar"][data-cascade-id]')
+          : null;
+        const clickedCidRaw = (
+          grpOpenEl?.getAttribute('data-aq-grp-open') ||
+          nativeRowEl?.getAttribute('data-cascade-id') ||
+          ''
+        ).trim();
+        if (/^[0-9a-f-]{36}$/i.test(clickedCidRaw)) {
+          const clickedLower = clickedCidRaw.toLowerCase();
+          if (clickedLower !== extractCascadeId().toLowerCase()) {
+            const savedTarget = state.convScrollMemory.get(clickedLower) || null;
+            state.routeEnterUnread = {
+              cidLower: clickedLower,
+              isUnread: isConversationUnreadNow(clickedLower, savedTarget),
+              at: Date.now(),
+            };
+          }
+        }
+      }
     }
     recordNativeMenuTargetFromEvent(ev);
-    if (
-      state.activeScrollRestore &&
-      t?.closest?.('[data-testid="autoscroll-viewport"]') === state.activeScrollRestore.viewport
-    ) {
+    if (t?.closest?.('[data-testid="conversation-navigator"]')) {
+      const navView = t.closest('[data-testid="conversation-view"]');
+      const navVp = navView?.querySelector?.('[data-testid="autoscroll-viewport"]');
+      if (navVp) {
+        navVp.__aqNavJumpUntil = Date.now() + 500;
+      }
+    }
+    const hitVp = t?.closest?.('[data-testid="autoscroll-viewport"]');
+    if (hitVp && t === hitVp && typeof hitVp.getBoundingClientRect === 'function') {
+      const vpRect = hitVp.getBoundingClientRect();
+      if (vpRect.width > 0 && Number(ev.clientX) >= vpRect.right - 20) {
+        hitVp.__aqNavJumpUntil = Date.now() + 800;
+      }
+    }
+    if (state.activeScrollRestore && hitVp === state.activeScrollRestore.viewport) {
       state.activeScrollRestore.userInteracted = true;
       cancelActiveScrollRestore({ markReady: true });
     }
@@ -13879,6 +15625,9 @@
     }
     if (!t?.closest?.('#aq-grp-ctx-menu')) {
       closeGroupCtxMenu();
+    }
+    if (!t?.closest?.('#aq-file-ctx-menu')) {
+      closeFileCtxMenu();
     }
     if (ev.button !== 0) return;
     const convResizer = t?.closest?.('[data-aq-conv-resizer]');
@@ -14015,7 +15764,7 @@
       }
       return;
     }
-    if (document.querySelector('[role="menu"]')) return;
+    if (findActiveNativeMenus().length > 0) return;
     const row = t?.closest?.('.bg-sidebar [data-testid="conversation-row-sidebar"][data-cascade-id]');
     if (row && !row.closest('[aria-hidden="true"]')) {
       const info = extractRowConversationInfo(row);
@@ -14058,7 +15807,11 @@
           const active = state.convWidthDrag;
           if (!active) return;
           const w = active.currentWidth;
-          const maxWExpr = w > 0 ? `min(100%, ${Math.round(w)}px)` : '100%';
+          const hasNavRail = Boolean(
+            active.viewEl?.querySelector?.('[data-testid="conversation-navigator"]')
+          );
+          const capExpr = hasNavRail ? 'calc(100% - 24px)' : '100%';
+          const maxWExpr = w > 0 ? `min(${capExpr}, ${Math.round(w)}px)` : capExpr;
           for (let i = 0; i < active.targetCols.length; i++) {
             active.targetCols[i].el.style.setProperty('max-width', maxWExpr, 'important');
           }
@@ -14378,12 +16131,69 @@
   };
   const onWinBlur = () => {
     closeGroupCtxMenu();
+    closeFileCtxMenu();
     if (state.acctDrag) cleanupAccountDrag();
     if (state.convWidthDrag) cleanupConversationWidthDrag();
     if (state.groupResizeDrag) cleanupGroupResizeDrag();
     if (state.convDrag) cleanupConversationPointerDrag();
   };
+  const interceptNativeRenameMenuAction = (ev, renameItem) => {
+    if (!isInstanceAlive() || !renameItem) return false;
+    if (state.sidebarTab !== 'groups') return false;
+    const sb = findSidebarRoot();
+    if (sb?.getAttribute?.('data-aq-tab') === 'projects') return false;
+    const convInfo = resolveNativeMenuConversation();
+    if (!convInfo?.cascadeId) return false;
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (typeof ev.stopImmediatePropagation === 'function') {
+      ev.stopImmediatePropagation();
+    }
+    const menu = renameItem.closest?.('[role="menu"]') || null;
+    closeNativeBaseUiMenu(menu);
+    startGroupConversationRename(convInfo.cascadeId, convInfo.scope || '', convInfo.title || '');
+    return true;
+  };
+  const onWinClickCapture = (ev) => {
+    if (!isInstanceAlive()) return;
+    const renameItem = ev.target?.closest?.('[data-testid="conversation-rename-menu-item"]');
+    if (renameItem) {
+      interceptNativeRenameMenuAction(ev, renameItem);
+      return;
+    }
+    if (
+      ev.button === 0 &&
+      !state.bypassFileClickInterceptOnce &&
+      !ev.metaKey &&
+      !ev.ctrlKey &&
+      !ev.shiftKey &&
+      !ev.altKey
+    ) {
+      const defMode = getEffectiveFileOpenDefault();
+      if (defMode !== 'builtin') {
+        const fileTarget = resolveFileTargetFromNode(ev.target);
+        if (
+          fileTarget &&
+          !fileTarget.isArtifactCard &&
+          !fileTarget.isReviewRow &&
+          !fileTarget.isBreadcrumb &&
+          !fileTarget.isDirectory
+        ) {
+          const innerBtn = ev.target?.closest?.('button');
+          if (!innerBtn || innerBtn === fileTarget.element || !fileTarget.element.contains(innerBtn)) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            if (typeof ev.stopImmediatePropagation === 'function') {
+              ev.stopImmediatePropagation();
+            }
+            triggerExternalFileOpen(defMode, fileTarget);
+          }
+        }
+      }
+    }
+  };
   const onDocClickCapture = (ev) => {
+    if (!isInstanceAlive()) return;
     const composerBox = ev.target?.closest?.('#antigravity\\.agentSidePanelInputBox');
     if (!composerBox) return;
     const sendBtn = ev.target?.closest?.('[data-testid="send-button"]');
@@ -14396,6 +16206,7 @@
     }
   };
   const onDocScrollCapture = (ev) => {
+    if (!isInstanceAlive()) return;
     const t = ev.target;
     if (!t || t.nodeType !== 1 || t.getAttribute?.('data-testid') !== 'autoscroll-viewport') return;
     if (state.activeScrollRestore?.viewport === t && !state.activeScrollRestore.userInteracted) {
@@ -14406,23 +16217,30 @@
     }
   };
   const onDocWheelOrTouchCapture = (ev) => {
-    if (!state.activeScrollRestore) return;
+    if (!isInstanceAlive()) return;
     const vp = ev.target?.closest?.('[data-testid="autoscroll-viewport"]');
-    if (vp && vp === state.activeScrollRestore.viewport) {
+    if (!vp) return;
+    if (
+      state.activeScrollRestore &&
+      vp === state.activeScrollRestore.viewport &&
+      (ev.type === 'wheel' || ev.type === 'touchmove')
+    ) {
       state.activeScrollRestore.userInteracted = true;
       cancelActiveScrollRestore({ markReady: true });
     }
   };
   const onDocKeyDown = (ev) => {
+    if (!isInstanceAlive()) return;
     if (ev.metaKey || ev.ctrlKey || ev.altKey) {
       snapshotActiveConversationScrollBeforeLeave();
     } else if (
-      state.activeScrollRestore &&
       ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(ev.key) &&
       !ev.target?.closest?.('input, textarea, [contenteditable="true"], [data-lexical-editor]')
     ) {
-      state.activeScrollRestore.userInteracted = true;
-      cancelActiveScrollRestore({ markReady: true });
+      if (state.activeScrollRestore) {
+        state.activeScrollRestore.userInteracted = true;
+        cancelActiveScrollRestore({ markReady: true });
+      }
     }
     if (
       ev.key === 'Enter' &&
@@ -14434,7 +16252,9 @@
       !ev.metaKey
     ) {
       const editor = ev.target?.closest?.('#antigravity\\.agentSidePanelInputBox [data-lexical-editor="true"]');
-      const hasOpenComposerPopup = Boolean(document.querySelector('[data-mention-menu], [role="listbox"], [role="menu"]'));
+      const hasOpenComposerPopup = Boolean(
+        document.querySelector('[data-mention-menu], [role="listbox"]') || findActiveNativeMenus().length > 0
+      );
       if (editor && editor.getAttribute('aria-expanded') !== 'true' && !hasOpenComposerPopup) {
         const composerBox = document.getElementById('antigravity.agentSidePanelInputBox');
         const sendBtn = composerBox?.querySelector?.('[data-testid="send-button"]');
@@ -14445,6 +16265,7 @@
     }
     if (ev.key === 'Escape') {
       closeGroupCtxMenu();
+      closeFileCtxMenu();
       if (state.acctDrag) {
         cleanupAccountDrag();
         ev.preventDefault();
@@ -14468,21 +16289,31 @@
       if (state.keySettingsOpen) closeKeySettingsModal();
       if (state.quotaTooltipPinned) closeQuotaTooltip();
       if (state.groupMenuTarget) closeGroupMenu();
+      if (state.convRenaming) cancelGroupConversationRename();
+    }
+    if ((ev.key === 'Enter' || ev.key === ' ') && !ev.isComposing && ev.keyCode !== 229) {
+      const renameItem = ev.target?.closest?.('[data-testid="conversation-rename-menu-item"]');
+      if (renameItem && interceptNativeRenameMenuAction(ev, renameItem)) {
+        return;
+      }
     }
   };
-  window.addEventListener('popstate', onPopState);
-  window.addEventListener('pointermove', onWinPointerMoveCapture, true);
-  window.addEventListener('pointerup', onWinPointerUpCapture, true);
-  window.addEventListener('pointercancel', onWinPointerCancelCapture, true);
-  window.addEventListener('blur', onWinBlur);
-  document.addEventListener('visibilitychange', onVisChange);
-  document.addEventListener('contextmenu', onDocContextMenuCapture, true);
-  document.addEventListener('pointerdown', onDocPointerDown, true);
-  document.addEventListener('scroll', onDocScrollCapture, { capture: true, passive: true });
-  document.addEventListener('wheel', onDocWheelOrTouchCapture, { capture: true, passive: true });
-  document.addEventListener('touchstart', onDocWheelOrTouchCapture, { capture: true, passive: true });
-  document.addEventListener('click', onDocClickCapture, true);
-  document.addEventListener('keydown', onDocKeyDown, true);
+  registerGlobalListener(window, 'popstate', onPopState);
+  registerGlobalListener(window, 'click', onWinClickCapture, true);
+  registerGlobalListener(window, 'contextmenu', onWinContextMenuCapture, true);
+  registerGlobalListener(window, 'pointermove', onWinPointerMoveCapture, true);
+  registerGlobalListener(window, 'pointerup', onWinPointerUpCapture, true);
+  registerGlobalListener(window, 'pointercancel', onWinPointerCancelCapture, true);
+  registerGlobalListener(window, 'blur', onWinBlur);
+  registerGlobalListener(document, 'visibilitychange', onVisChange);
+  registerGlobalListener(document, 'contextmenu', onDocContextMenuCapture, true);
+  registerGlobalListener(document, 'pointerdown', onDocPointerDown, true);
+  registerGlobalListener(document, 'scroll', onDocScrollCapture, { capture: true, passive: true });
+  registerGlobalListener(document, 'wheel', onDocWheelOrTouchCapture, { capture: true, passive: true });
+  registerGlobalListener(document, 'touchstart', onDocWheelOrTouchCapture, { capture: true, passive: true });
+  registerGlobalListener(document, 'touchmove', onDocWheelOrTouchCapture, { capture: true, passive: true });
+  registerGlobalListener(document, 'click', onDocClickCapture, true);
+  registerGlobalListener(document, 'keydown', onDocKeyDown, true);
 
   state.routeTimer = setInterval(checkRoute, 2000);
   state.trajStatusTimer = setInterval(() => {
@@ -14547,6 +16378,7 @@
     if (state.pendingBatchConfirmTimer) clearTimeout(state.pendingBatchConfirmTimer);
     if (state.batchReadyRetryTimer) clearTimeout(state.batchReadyRetryTimer);
     if (state.batchToastTimer) clearTimeout(state.batchToastTimer);
+    if (state.fileToastTimer) clearTimeout(state.fileToastTimer);
     if (state.groupDeleteConfirmTimer) clearTimeout(state.groupDeleteConfirmTimer);
     if (state.smartGraceTimer) clearTimeout(state.smartGraceTimer);
     if (state.groupResizeSnapTimer) clearTimeout(state.groupResizeSnapTimer);
@@ -14556,6 +16388,7 @@
     if (state.optimisticExpiryTimer) clearTimeout(state.optimisticExpiryTimer);
     if (state.keepAliveDeadlineTimer) clearTimeout(state.keepAliveDeadlineTimer);
     if (state.keySettingsTimer) clearTimeout(state.keySettingsTimer);
+    if (state.thinkingAutoTimer) clearInterval(state.thinkingAutoTimer);
     try {
       clearPostSendRefreshTimers();
     } catch {}
@@ -14572,19 +16405,7 @@
       history.pushState = origPush;
       history.replaceState = origReplace;
     } catch {}
-    window.removeEventListener('popstate', onPopState);
-    window.removeEventListener('pointermove', onWinPointerMoveCapture, true);
-    window.removeEventListener('pointerup', onWinPointerUpCapture, true);
-    window.removeEventListener('pointercancel', onWinPointerCancelCapture, true);
-    window.removeEventListener('blur', onWinBlur);
-    document.removeEventListener('visibilitychange', onVisChange);
-    document.removeEventListener('contextmenu', onDocContextMenuCapture, true);
-    document.removeEventListener('pointerdown', onDocPointerDown, true);
-    document.removeEventListener('scroll', onDocScrollCapture, true);
-    document.removeEventListener('wheel', onDocWheelOrTouchCapture, true);
-    document.removeEventListener('touchstart', onDocWheelOrTouchCapture, true);
-    document.removeEventListener('click', onDocClickCapture, true);
-    document.removeEventListener('keydown', onDocKeyDown, true);
+    clearRegisteredListeners();
     try {
       cleanupAccountDrag();
     } catch {}
@@ -14600,6 +16421,7 @@
     try {
       closeGroupMenu();
       closeGroupCtxMenu();
+      closeFileCtxMenu();
     } catch {}
     document.documentElement.style.removeProperty('--aq-conv-max-width');
     document.querySelectorAll('[data-testid="conversation-view"].aq-conv-width-armed').forEach((el) => {
@@ -14616,6 +16438,7 @@
     state.trajMetaById = Object.create(null);
     state.localViewedAtById = Object.create(null);
     state.localUserInputAtById = Object.create(null);
+    state.localRenamedTitleById = Object.create(null);
     state.groups = [];
     state.accounts = [];
     state.turnsPayload = null;
@@ -14640,13 +16463,23 @@
     document.getElementById('aq-acct-quota-tooltip')?.remove();
     document.getElementById('aq-batch-wake-panel')?.remove();
     document.getElementById('aq-batch-toast')?.remove();
+    document.getElementById('aq-file-toast')?.remove();
     document.getElementById('aq-turn-tooltip')?.remove();
+    document.querySelectorAll('[data-testid="sidebar-navigation-items"]').forEach((el) => {
+      el.removeAttribute('data-aq-nav-inline');
+    });
+    document.querySelectorAll('[data-aq-nav-active]').forEach((el) => el.removeAttribute('data-aq-nav-active'));
+    document.querySelectorAll('[data-aq-nav-title]').forEach((el) => {
+      el.removeAttribute('title');
+      el.removeAttribute('data-aq-nav-title');
+    });
     document.getElementById('aq-sidebar-tabs-row')?.remove();
     document.getElementById('aq-sidebar-tabs')?.remove();
     document.getElementById('aq-conv-groups')?.remove();
     document.getElementById('aq-group-row-btn')?.remove();
     document.getElementById('aq-group-menu')?.remove();
     document.getElementById('aq-grp-ctx-menu')?.remove();
+    document.getElementById('aq-file-ctx-menu')?.remove();
     document.getElementById('aq-conv-drag-ghost')?.remove();
     if (state.projScrollEl) {
       state.projScrollEl.classList.remove('aq-proj-scrolled');
@@ -14666,6 +16499,8 @@
     document.querySelectorAll('[data-aq-row-grp-btn]').forEach((el) => el.remove());
     document.querySelectorAll('[data-aq-no-project]').forEach((el) => el.removeAttribute('data-aq-no-project'));
     document.querySelectorAll('[data-aq-native-menu-ext]').forEach((el) => el.remove());
+    document.querySelectorAll('[data-aq-settings-ext]').forEach((el) => el.remove());
+    document.documentElement?.removeAttribute?.('data-aq-hide-collapsed-grp-count');
     document.querySelectorAll('[data-aq-menu-open]').forEach((el) => el.removeAttribute('data-aq-menu-open'));
     document.querySelectorAll('[data-aq-turn-usage]').forEach((el) => el.remove());
     resetThinkingTranslateState();
@@ -14680,6 +16515,7 @@
       delete window.__aqResolveThinkingTranslate;
       delete window.__aqRenderBatchKeepAlive;
       delete window.__aqRenderUiPrefs;
+      delete window.__aqShowFileToast;
       delete window.__aqRenderGroups;
       delete window.__aqHydrated;
       delete window.__aq_version;

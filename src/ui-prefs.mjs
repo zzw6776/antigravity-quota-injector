@@ -25,10 +25,28 @@ export const VALID_THINKING_SOURCES = new Set([
   'youdao',
 ]);
 
+export const VALID_FILE_OPEN_DEFAULTS = new Set([
+  'builtin',
+  'idea-project',
+  'idea-light',
+  'vscode',
+  'cursor',
+  'notepad--',
+  'notepad++',
+  'sublime',
+  'zed',
+  'system-text',
+]);
+
 export function sanitizeThinkingSourcePref(raw) {
   const clean = String(raw || '').trim().toLowerCase();
   const mapped = LEGACY_THINKING_SOURCE_ALIASES[clean] || clean;
   return VALID_THINKING_SOURCES.has(mapped) ? mapped : 'auto';
+}
+
+export function sanitizeFileOpenDefaultPref(raw) {
+  const clean = String(raw || '').trim().toLowerCase();
+  return VALID_FILE_OPEN_DEFAULTS.has(clean) ? clean : 'builtin';
 }
 
 function atomicWriteJson(filePath, data) {
@@ -72,6 +90,23 @@ export function sanitizeConvWidthPref({ mode, width } = {}) {
   return { convWidthMode: 'unset', convMaxWidth: 0 };
 }
 
+function buildStoreObject({
+  conv,
+  thinkingSource = 'auto',
+  showCollapsedGroupCount = true,
+  fileOpenDefault = 'builtin',
+}) {
+  const cleanThinking = sanitizeThinkingSourcePref(thinkingSource);
+  const cleanFileOpen = sanitizeFileOpenDefaultPref(fileOpenDefault);
+  return {
+    version: STORE_VERSION,
+    ...conv,
+    ...(cleanThinking !== 'auto' ? { thinkingTranslateSource: cleanThinking } : {}),
+    ...(showCollapsedGroupCount === false ? { showCollapsedGroupCount: false } : {}),
+    ...(cleanFileOpen !== 'builtin' ? { fileOpenDefault: cleanFileOpen } : {}),
+  };
+}
+
 /**
  * 读取守护进程本地持久化的 UI 偏好，文件缺失或损坏时回退为空状态。
  */
@@ -86,12 +121,12 @@ export function readUiPrefsStore(filePath) {
       mode: parsed.convWidthMode,
       width: parsed.convMaxWidth,
     });
-    const thinkingSource = sanitizeThinkingSourcePref(parsed.thinkingTranslateSource);
-    return {
-      version: STORE_VERSION,
-      ...conv,
-      ...(thinkingSource !== 'auto' ? { thinkingTranslateSource: thinkingSource } : {}),
-    };
+    return buildStoreObject({
+      conv,
+      thinkingSource: parsed.thinkingTranslateSource,
+      showCollapsedGroupCount: parsed.showCollapsedGroupCount !== false,
+      fileOpenDefault: parsed.fileOpenDefault,
+    });
   } catch {
     return emptyStore();
   }
@@ -103,11 +138,12 @@ export function readUiPrefsStore(filePath) {
 export function updateConversationWidthPref(filePath, { mode, width } = {}) {
   const current = readUiPrefsStore(filePath);
   const conv = sanitizeConvWidthPref({ mode, width });
-  const next = {
-    ...current,
-    version: STORE_VERSION,
-    ...conv,
-  };
+  const next = buildStoreObject({
+    conv,
+    thinkingSource: current.thinkingTranslateSource,
+    showCollapsedGroupCount: current.showCollapsedGroupCount !== false,
+    fileOpenDefault: current.fileOpenDefault,
+  });
   if (filePath) {
     atomicWriteJson(filePath, next);
   }
@@ -119,13 +155,46 @@ export function updateConversationWidthPref(filePath, { mode, width } = {}) {
  */
 export function updateThinkingSourcePref(filePath, source) {
   const current = readUiPrefsStore(filePath);
-  const cleanSource = sanitizeThinkingSourcePref(source);
-  const next = {
-    version: STORE_VERSION,
-    convWidthMode: current.convWidthMode,
-    convMaxWidth: current.convMaxWidth,
-    ...(cleanSource !== 'auto' ? { thinkingTranslateSource: cleanSource } : {}),
-  };
+  const next = buildStoreObject({
+    conv: { convWidthMode: current.convWidthMode, convMaxWidth: current.convMaxWidth },
+    thinkingSource: source,
+    showCollapsedGroupCount: current.showCollapsedGroupCount !== false,
+    fileOpenDefault: current.fileOpenDefault,
+  });
+  if (filePath) {
+    atomicWriteJson(filePath, next);
+  }
+  return next;
+}
+
+/**
+ * 更新并原子落盘收起文件夹右侧是否展示对话数量偏好（默认开启）。
+ */
+export function updateShowCollapsedGroupCountPref(filePath, show) {
+  const current = readUiPrefsStore(filePath);
+  const next = buildStoreObject({
+    conv: { convWidthMode: current.convWidthMode, convMaxWidth: current.convMaxWidth },
+    thinkingSource: current.thinkingTranslateSource,
+    showCollapsedGroupCount: show !== false,
+    fileOpenDefault: current.fileOpenDefault,
+  });
+  if (filePath) {
+    atomicWriteJson(filePath, next);
+  }
+  return next;
+}
+
+/**
+ * 更新并原子落盘点击文件名的默认打开方式偏好（默认 builtin 内置预览）。
+ */
+export function updateFileOpenDefaultPref(filePath, target) {
+  const current = readUiPrefsStore(filePath);
+  const next = buildStoreObject({
+    conv: { convWidthMode: current.convWidthMode, convMaxWidth: current.convMaxWidth },
+    thinkingSource: current.thinkingTranslateSource,
+    showCollapsedGroupCount: current.showCollapsedGroupCount !== false,
+    fileOpenDefault: target,
+  });
   if (filePath) {
     atomicWriteJson(filePath, next);
   }

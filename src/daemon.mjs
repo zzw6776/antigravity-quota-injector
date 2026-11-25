@@ -52,10 +52,16 @@ import {
   createThinkingTranslator,
   normalizeThinkingTranslateSource,
 } from './thinking-translator.mjs';
+import {
+  detectExternalEditors,
+  executeExternalFileAction,
+} from './external-editors.mjs';
 import { TokenPricingManager } from './token-pricing.mjs';
 import {
   readUiPrefsStore,
   updateConversationWidthPref,
+  updateFileOpenDefaultPref,
+  updateShowCollapsedGroupCountPref,
   updateThinkingSourcePref,
 } from './ui-prefs.mjs';
 
@@ -171,6 +177,8 @@ const DEFAULT_USER_CONFIG = {
   aiEndpoint: '',
   aiModel: '',
   aiBriefPrompt: '',
+  ideaPath: '',
+  notepadPath: '',
 };
 
 export function maskSecretKey(rawKey) {
@@ -195,6 +203,8 @@ export function readUserConfig(stateDir) {
       aiEndpoint: typeof parsed?.aiEndpoint === 'string' ? parsed.aiEndpoint.trim() : '',
       aiModel: typeof parsed?.aiModel === 'string' ? parsed.aiModel.trim() : '',
       aiBriefPrompt: typeof parsed?.aiBriefPrompt === 'string' ? parsed.aiBriefPrompt.trim() : '',
+      ideaPath: typeof parsed?.ideaPath === 'string' ? parsed.ideaPath.trim() : '',
+      notepadPath: typeof parsed?.notepadPath === 'string' ? parsed.notepadPath.trim() : '',
     };
   } catch {
     return { ...DEFAULT_USER_CONFIG };
@@ -215,7 +225,7 @@ export function writeUserConfig(stateDir, patch = {}) {
     }
   } catch {}
 
-  const stringFields = ['aiApiKey', 'aiEndpoint', 'aiModel', 'aiBriefPrompt', 'antigravityExe'];
+  const stringFields = ['aiApiKey', 'aiEndpoint', 'aiModel', 'aiBriefPrompt', 'antigravityExe', 'ideaPath', 'notepadPath'];
   for (let i = 0; i < stringFields.length; i++) {
     const key = stringFields[i];
     if (Object.prototype.hasOwnProperty.call(patch, key)) {
@@ -408,6 +418,61 @@ export async function stopRunningDaemon(channel = 'stable') {
   return stopped;
 }
 
+const TARGET_PROBE_BACKOFF_MS = [0, 0, 2_000, 3_000, 5_000, 10_000, 60_000];
+const TARGET_LOADING_GRACE_LIMIT = 20;
+
+export function createTargetAttachTracker({
+  nowFn = () => Date.now(),
+  backoffScheduleMs = TARGET_PROBE_BACKOFF_MS,
+  loadingGraceLimit = TARGET_LOADING_GRACE_LIMIT,
+} = {}) {
+  const states = new Map(); // targetId -> { fails, loadingPolls, until }
+
+  return {
+    shouldSkip(targetId) {
+      const entry = states.get(targetId);
+      return Boolean(entry && entry.until > nowFn());
+    },
+    markSuccess(targetId) {
+      states.delete(targetId);
+    },
+    markFailure(targetId, { readyState = '' } = {}) {
+      const prev = states.get(targetId) || { fails: 0, loadingPolls: 0, until: 0 };
+      const isLoading = Boolean(readyState && readyState !== 'complete');
+      if (isLoading && prev.loadingPolls < loadingGraceLimit) {
+        const next = {
+          fails: prev.fails,
+          loadingPolls: prev.loadingPolls + 1,
+          until: 0,
+        };
+        states.set(targetId, next);
+        return next;
+      }
+      const nextFails = prev.fails + 1;
+      const idx = Math.min(nextFails - 1, backoffScheduleMs.length - 1);
+      const delayMs = Math.max(0, Number(backoffScheduleMs[idx] ?? 60_000));
+      const next = {
+        fails: nextFails,
+        loadingPolls: prev.loadingPolls,
+        until: delayMs > 0 ? nowFn() + delayMs : 0,
+      };
+      states.set(targetId, next);
+      return next;
+    },
+    prune(liveIds) {
+      for (const tid of states.keys()) {
+        if (!liveIds.has(tid)) states.delete(tid);
+      }
+    },
+    reset() {
+      states.clear();
+    },
+    getState(targetId) {
+      return states.get(targetId) || null;
+    },
+  };
+}
+
 export async function runDaemon({
   once = false,
   channel = 'stable',
@@ -453,7 +518,7 @@ export async function runDaemon({
   const batchStore = createBatchKeepAliveStore();
   let batchDriverInFlight = false;
   const attached = new Map(); // targetId -> session state
-  const targetCooldownUntil = new Map(); // non-host / unreachable targetId -> retry timestamp
+  const targetAttachTracker = createTargetAttachTracker();
   const turnsCache = new Map(); // dbPath -> { sig, payload }
   let stopping = false;
   let switchInFlight = false;
@@ -660,15 +725,40 @@ export async function runDaemon({
     }
   };
 
+  let cachedEditors = null;
+  let cachedEditorsAt = 0;
+  let cachedEditorsKey = '';
+  const getDetectedEditors = (force = false) => {
+    const now = Date.now();
+    const key = `${userCfg.ideaPath || ''}\0${userCfg.notepadPath || ''}`;
+    if (!force && cachedEditors && cachedEditorsKey === key && now - cachedEditorsAt < 15_000) {
+      return cachedEditors;
+    }
+    cachedEditors = detectExternalEditors({
+      customIdeaPath: userCfg.ideaPath || '',
+      customNotepadPath: userCfg.notepadPath || '',
+    });
+    cachedEditorsAt = now;
+    cachedEditorsKey = key;
+    return cachedEditors;
+  };
+
   const pushUiPrefsToSession = async (session, extra = {}) => {
     if (!session?.client?.isOpen() || !session.hostConfirmed) return;
     const store = extra.store || readUiPrefsStore(paths.uiPrefsFile);
+    const editors = getDetectedEditors(Boolean(extra.refreshEditors));
     const envAiKey = String(process.env.AQ_AI_API_KEY || process.env.ZHIPU_API_KEY || '').trim();
     const effectiveAiKey = userCfg.aiApiKey || envAiKey;
     const payload = {
       convWidthMode: store.convWidthMode,
       convMaxWidth: store.convMaxWidth,
       thinkingTranslateSource: store.thinkingTranslateSource || 'auto',
+      showCollapsedGroupCount: store.showCollapsedGroupCount !== false,
+      fileOpenDefault: store.fileOpenDefault || 'builtin',
+      externalEditors: {
+        platform: editors.platform || process.platform,
+        options: Array.isArray(editors.options) ? editors.options : [],
+      },
       aiKeyConfigured: Boolean(effectiveAiKey),
       aiApiKey: userCfg.aiApiKey || '',
       hasEnvAiKey: Boolean(envAiKey),
@@ -703,7 +793,7 @@ export async function runDaemon({
     const type = String(msg?.type || '');
     if (type === 'get') {
       userCfg = readUserConfig(paths.stateDir);
-      await pushUiPrefsToSession(session);
+      await pushUiPrefsToSession(session, { refreshEditors: true });
       return;
     }
     if (type === 'set-conv-width') {
@@ -716,6 +806,16 @@ export async function runDaemon({
     }
     if (type === 'set-thinking-source') {
       const store = updateThinkingSourcePref(paths.uiPrefsFile, msg?.source);
+      await pushUiPrefsToAllSessions({ store });
+      return;
+    }
+    if (type === 'set-show-collapsed-group-count') {
+      const store = updateShowCollapsedGroupCountPref(paths.uiPrefsFile, msg?.show !== false);
+      await pushUiPrefsToAllSessions({ store });
+      return;
+    }
+    if (type === 'set-file-open-default') {
+      const store = updateFileOpenDefaultPref(paths.uiPrefsFile, msg?.target);
       await pushUiPrefsToAllSessions({ store });
       return;
     }
@@ -745,6 +845,39 @@ export async function runDaemon({
           aiSaveError: String(err?.message || '保存本地配置失败'),
         });
       }
+    }
+  };
+
+  const handleFileAction = async (session, rawPayload) => {
+    let msg;
+    try {
+      msg = JSON.parse(String(rawPayload || '{}'));
+    } catch {
+      return;
+    }
+    const action = msg?.type === 'reveal' ? 'reveal' : 'open';
+    const res = await executeExternalFileAction(
+      {
+        action,
+        mode: String(msg?.mode || 'idea-project'),
+        uri: String(msg?.uri || ''),
+        line: msg?.line ?? null,
+        column: msg?.column ?? null,
+        customIdeaPath: userCfg.ideaPath || '',
+        customNotepadPath: userCfg.notepadPath || '',
+      },
+      { editors: getDetectedEditors() }
+    );
+    if (!res?.ok && res?.error && session?.client?.isOpen()) {
+      try {
+        await session.client.send('Runtime.evaluate', {
+          expression: `window.__aqShowFileToast && window.__aqShowFileToast(${JSON.stringify({
+            ok: false,
+            message: String(res.error),
+          })})`,
+          returnByValue: false,
+        });
+      } catch {}
     }
   };
 
@@ -1126,6 +1259,7 @@ export async function runDaemon({
         log(`[batch-keepalive] return switch failed: ${failedReturnError}`);
       } finally {
         switchInFlight = false;
+        targetAttachTracker.reset();
       }
 
       const finished = batchStore.markFinished({ failedReturnError });
@@ -1198,6 +1332,7 @@ export async function runDaemon({
         log(`[batch-keepalive] switch to ${item.email} failed: ${switchError}`);
       } finally {
         switchInFlight = false;
+        targetAttachTracker.reset();
       }
 
       if (raw.cancelRequested || stopping) {
@@ -1588,6 +1723,7 @@ export async function runDaemon({
           busy: true,
           status: '正在保存当前账号并重启 Antigravity 进入登录页…',
         });
+        let prepareErr = null;
         try {
           log('[accounts] preparing new account login (restarting Antigravity)...');
           await prepareNewAccountWithRestart({
@@ -1599,16 +1735,19 @@ export async function runDaemon({
           });
           log('[accounts] Antigravity relaunched for new account login');
         } catch (err) {
-          switchInFlight = false;
+          prepareErr = err;
           log(`[accounts] prepare-add failed: ${err?.message || err}`);
+        } finally {
+          switchInFlight = false;
+          targetAttachTracker.reset();
+        }
+        if (prepareErr) {
           await pushAccountsToAllSessions({
             activeEmail,
             busy: false,
-            error: String(err?.message || '进入新账号登录失败'),
+            error: String(prepareErr?.message || '进入新账号登录失败'),
           });
-          return;
         }
-        switchInFlight = false;
         return;
       }
       if (type === 'delete') {
@@ -1631,6 +1770,7 @@ export async function runDaemon({
           busy: true,
           status: '正在切换账号并重启 Antigravity…',
         });
+        let switchErr = null;
         try {
           log(`[accounts] switching account to ${String(msg?.id || '')} (restarting Antigravity)...`);
           await switchAccountWithRestart({
@@ -1643,16 +1783,19 @@ export async function runDaemon({
           });
           log('[accounts] Antigravity relaunched after account switch');
         } catch (err) {
-          switchInFlight = false;
+          switchErr = err;
           log(`[accounts] switch failed: ${err?.message || err}`);
+        } finally {
+          switchInFlight = false;
+          targetAttachTracker.reset();
+        }
+        if (switchErr) {
           await pushAccountsToAllSessions({
             activeEmail,
             busy: false,
-            error: String(err?.message || '切换账号失败'),
+            error: String(switchErr?.message || '切换账号失败'),
           });
-          return;
         }
-        switchInFlight = false;
       }
     } catch (err) {
       await pushAccountsToSession(session, {
@@ -1740,18 +1883,15 @@ export async function runDaemon({
     session.lastPushedRawTurns = rawTurns;
   };
 
-  const PROBE_FAIL_COOLDOWN_MS = 60_000;
-
   const attachTarget = async (target) => {
     if (attached.has(target.id) || !target.webSocketDebuggerUrl) return;
-    const cooldownUntil = targetCooldownUntil.get(target.id) || 0;
-    if (cooldownUntil > Date.now()) return;
+    if (targetAttachTracker.shouldSkip(target.id)) return;
 
     let client;
     try {
       client = await createCdpClient(target.webSocketDebuggerUrl);
     } catch {
-      targetCooldownUntil.set(target.id, Date.now() + PROBE_FAIL_COOLDOWN_MS);
+      targetAttachTracker.markFailure(target.id);
       return;
     }
 
@@ -1779,16 +1919,22 @@ export async function runDaemon({
     });
 
     const probeRes = await client.send('Runtime.evaluate', {
-      expression: `Boolean(window.__APP_CONFIG__?.productName === 'antigravity' || document.getElementById('antigravity.agentSidePanelInputBox'))`,
+      expression: `({
+        isHost: Boolean(window.__APP_CONFIG__?.productName === 'antigravity' || document.getElementById('antigravity.agentSidePanelInputBox')),
+        readyState: typeof document !== 'undefined' ? document.readyState : '',
+      })`,
       returnByValue: true,
     });
-    if (probeRes?.result?.result?.value !== true) {
+    const probeVal = probeRes?.result?.result?.value;
+    if (probeVal?.isHost !== true) {
       attached.delete(target.id);
-      targetCooldownUntil.set(target.id, Date.now() + PROBE_FAIL_COOLDOWN_MS);
+      targetAttachTracker.markFailure(target.id, {
+        readyState: typeof probeVal?.readyState === 'string' ? probeVal.readyState : '',
+      });
       client.close();
       return;
     }
-    targetCooldownUntil.delete(target.id);
+    targetAttachTracker.markSuccess(target.id);
 
     session.hostConfirmed = true;
     await client.send('Runtime.addBinding', { name: '__aqRequestTurns' });
@@ -1799,6 +1945,7 @@ export async function runDaemon({
     await client.send('Runtime.addBinding', { name: '__aqBatchKeepAliveAction' });
     await client.send('Runtime.addBinding', { name: '__aqUiPrefsAction' });
     await client.send('Runtime.addBinding', { name: '__aqThinkingAction' });
+    await client.send('Runtime.addBinding', { name: '__aqFileAction' });
 
     client.onBinding((params) => {
       if (params?.name === '__aqRequestTurns') {
@@ -1822,6 +1969,8 @@ export async function runDaemon({
         void handleUiPrefsAction(session, params.payload);
       } else if (params?.name === '__aqThinkingAction') {
         void handleThinkingAction(session, params.payload);
+      } else if (params?.name === '__aqFileAction') {
+        void handleFileAction(session, params.payload);
       }
     });
 
@@ -1851,7 +2000,10 @@ export async function runDaemon({
   const runTick = async () => {
     if (stopping) return { liveCount: 0, attachedCount: attached.size };
     const port = readDebugPort(paths.portFile);
-    if (!port) return { liveCount: 0, attachedCount: attached.size };
+    if (!port) {
+      targetAttachTracker.reset();
+      return { liveCount: 0, attachedCount: attached.size };
+    }
     const targets = await fetchCdpTargets(port);
     const liveIds = new Set();
     const targetUrlById = new Map();
@@ -1865,9 +2017,7 @@ export async function runDaemon({
         attachCandidates.push(t);
       }
     }
-    for (const tid of targetCooldownUntil.keys()) {
-      if (!liveIds.has(tid)) targetCooldownUntil.delete(tid);
-    }
+    targetAttachTracker.prune(liveIds);
     if (attachCandidates.length > 0) {
       await Promise.allSettled(attachCandidates.map((t) => attachTarget(t)));
     }
@@ -1960,6 +2110,9 @@ export async function runDaemon({
     tickNow: () => tick(),
     setRestartInFlight: (flag) => {
       externalRestartInFlight = Boolean(flag);
+      if (!externalRestartInFlight) {
+        targetAttachTracker.reset();
+      }
     },
   });
 

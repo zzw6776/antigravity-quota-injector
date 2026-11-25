@@ -19,7 +19,10 @@ function formatLocaleFixed(value, minDigits, maxDigits = minDigits) {
 
 export function formatTokenCount(value) {
   const num = Number(value);
-  if (!Number.isFinite(num) || num < 0) return '0.00M';
+  if (!Number.isFinite(num) || num <= 0) return '0 tok';
+  const rounded = Math.round(num);
+  if (rounded < 1_000) return `${rounded} tok`;
+  if (num < 100_000) return `${formatLocaleFixed(num / 1_000, 1, 2)}K`;
   return `${formatLocaleFixed(num / 1_000_000, 2, 3)}M`;
 }
 

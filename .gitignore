@@ -3,5 +3,6 @@ build/
 release/
 release-assets/
 .runtime/
+.idea/
 *.log
 .DS_Store

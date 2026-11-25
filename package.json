@@ -1,6 +1,6 @@
 {
   "name": "antigravity-quota-injector",
-  "version": "0.1.87",
+  "version": "0.1.113",
   "private": true,
   "type": "module",
   "description": "Lightweight CDP injector displaying per-turn token metrics, context usage and quota indicator in Antigravity.",
@@ -17,7 +17,7 @@
     "uninstall-service": "node src/cli.mjs uninstall-service",
     "doctor": "node src/cli.mjs doctor",
     "verify": "node src/cli.mjs verify",
-    "test": "node --test --test-concurrency=1 \"test/*.test.mjs\"",
+    "test": "node scripts/check.mjs",
     "test:dev-launch": "node scripts/test-dev-launch.mjs",
     "build:sea": "node scripts/build-sea.mjs",
     "package:macos": "node scripts/package-macos.mjs",
