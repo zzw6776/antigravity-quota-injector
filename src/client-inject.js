@@ -287,6 +287,22 @@
     groupResizeSnapTimer: null,
     convWidthMode: initConvWidthPref.mode,
     convMaxWidth: initConvWidthPref.width,
+    detachedChatMode: (() => {
+      try {
+        return sessionStorage.getItem('aq_detached_chat_v1') === '1';
+      } catch {
+        return false;
+      }
+    })(),
+    windowToastTimer: null,
+    windowToastRequestId: '',
+    quota401RetryTimer: null,
+    detachedNavTimer: null,
+    detachedNavEarlyTimer: null,
+    nativeRouter: null,
+    detachedCascadeIds: new Set(),
+    titlebarDetachBtnEl: null,
+    titlebarDetachSig: '',
     showCollapsedGroupCount: (() => {
       try {
         return localStorage.getItem('aq_show_collapsed_grp_count_v1') !== '0';
@@ -593,6 +609,7 @@
       style.id = 'aq-style';
       (document.head || document.documentElement).appendChild(style);
     }
+    document.getElementById('aq-detach-boot-style')?.remove();
     style.textContent = `
       :root,
       html,
@@ -615,6 +632,24 @@
       [data-testid="conversation-view"]:has([data-testid="conversation-navigator"]) [style*="--max-conversation-width"],
       [data-testid="conversation-view"]:has([data-testid="conversation-navigator"]) [style*="--max-artifact-width"] {
         max-width: max(min(100%, 480px), min(calc(100% - 24px), var(--aq-conv-max-width, 768px))) !important;
+      }
+      .md-table-bleed .md-table-host[data-width-mode="column"] {
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: 100% !important;
+        margin-inline: 0 !important;
+        transform: none !important;
+      }
+      [data-testid="conversation-view"]:has([data-testid="conversation-navigator"]) .md-table-bleed .md-table-host[data-width-mode="full"] {
+        width: calc(100cqw - 28px - var(--md-table-end-reserve, 0px)) !important;
+        margin-inline-start: calc((100% - 100cqw) / 2 + 18px) !important;
+      }
+      .md-table-bleed :is(.bleed-contain, blockquote, .markdown-alert, li, td, th) .md-table-host[data-width-mode] {
+        width: auto !important;
+        min-width: 0 !important;
+        max-width: 100% !important;
+        margin-inline: 0 !important;
+        transform: none !important;
       }
 
       .aq-conv-width-resizer {
@@ -2357,6 +2392,116 @@
         box-shadow: 0 12px 30px rgba(0, 0, 0, 0.55);
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-file-toast.is-error {
+        border-color: rgba(248, 113, 113, 0.38);
+        color: #f87171;
+      }
+      html[data-aq-detached-chat="1"] [data-testid="sidebar-split"] > :has(.bg-sidebar),
+      html[data-aq-detached-chat="1"] [data-testid="sidebar-split"] > :has(.bg-sidebar) + div,
+      html[data-aq-detached-chat="1"] .agy-inset-shell > div.absolute.left-0.top-0:has([data-testid="sidebar-search-button"]),
+      html[data-aq-detached-chat="1"] .agy-inset-shell > div.absolute.left-0.top-0:has([data-testid="sidebar-toggle"]) {
+        display: none !important;
+      }
+      html[data-aq-detached-chat="1"][data-aq-platform="mac"] [class*="@container/titlebar"]:not([data-aq-mac-no-inset="1"]) > :first-child {
+        padding-left: 84px !important;
+        transition: none !important;
+      }
+      .aq-titlebar-detach-btn {
+        appearance: none;
+        border: 0;
+        background: transparent;
+        color: var(--muted-foreground, #71717a);
+        height: 28px;
+        min-width: 28px;
+        padding: 0 6px;
+        border-radius: 6px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        font: 500 11.5px/1 var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+        cursor: pointer;
+        flex-shrink: 0;
+        -webkit-app-region: no-drag;
+        transition: background-color 120ms ease, color 120ms ease;
+      }
+      .aq-titlebar-detach-btn:hover {
+        background: var(--secondary, rgba(24, 24, 27, 0.06));
+        color: var(--foreground, #18181b);
+      }
+      .aq-titlebar-detach-btn.is-detached {
+        padding: 0 8px;
+        background: rgba(37, 99, 235, 0.09);
+        color: #2563eb;
+      }
+      .aq-titlebar-detach-btn.is-detached:hover {
+        background: rgba(37, 99, 235, 0.16);
+        color: #1d4ed8;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-titlebar-detach-btn:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: #f4f4f5;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-titlebar-detach-btn.is-detached {
+        background: rgba(96, 165, 250, 0.16);
+        color: #93c5fd;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-titlebar-detach-btn.is-detached:hover {
+        background: rgba(96, 165, 250, 0.24);
+        color: #bfdbfe;
+      }
+      #aq-window-toast {
+        position: fixed;
+        top: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 2147483647;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 12px;
+        border-radius: 9999px;
+        background: #ffffff;
+        color: #18181b;
+        border: 1px solid rgba(24, 24, 27, 0.12);
+        box-shadow: 0 10px 26px rgba(15, 23, 42, 0.16);
+        font: 500 12px/1.35 var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+        white-space: nowrap;
+        -webkit-app-region: no-drag;
+      }
+      #aq-window-toast.is-hint {
+        border-color: rgba(37, 99, 235, 0.32);
+      }
+      #aq-window-toast.is-error {
+        border-color: rgba(220, 38, 38, 0.35);
+        color: #dc2626;
+      }
+      #aq-window-toast .aq-wt-close {
+        appearance: none;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        opacity: 0.6;
+        padding: 2px;
+        border-radius: 4px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+      }
+      #aq-window-toast .aq-wt-close:hover {
+        opacity: 1;
+        background: rgba(127, 127, 127, 0.14);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-window-toast {
+        background: #1c1c22;
+        color: #f4f4f7;
+        border-color: rgba(255, 255, 255, 0.14);
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.55);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-window-toast.is-hint {
+        border-color: rgba(96, 165, 250, 0.42);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-window-toast.is-error {
         border-color: rgba(248, 113, 113, 0.38);
         color: #f87171;
       }
@@ -6706,7 +6851,7 @@
     state.hiddenKeepAliveCids.add(cidLower);
     refreshQuotaTooltipIfVisible();
 
-    const csrf = window.__APP_CONFIG__?.csrfToken || '';
+    const csrf = getLsCsrfToken();
     const headers = {
       'Content-Type': 'application/json',
       ...(csrf ? { 'x-codeium-csrf-token': csrf } : {}),
@@ -7818,6 +7963,411 @@
     }
   };
 
+  function getLsCsrfToken() {
+    try {
+      const fromCfg = String(window.__APP_CONFIG__?.csrfToken || '').trim();
+      if (fromCfg) return fromCfg;
+    } catch {}
+    try {
+      const fromLs = String(window.localStorage?.getItem('agy_session_csrf_token') || '').trim();
+      if (fromLs) return fromLs;
+    } catch {}
+    return '';
+  }
+
+  function isMacPlatform() {
+    try {
+      const p = String(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || '');
+      return /mac/i.test(p);
+    } catch {
+      return false;
+    }
+  }
+
+  function sendWindowAction(payload) {
+    if (typeof window.__aqWindowAction !== 'function') return false;
+    try {
+      window.__aqWindowAction(JSON.stringify(payload || {}));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function clearWindowActionToast({ cancelPending = false } = {}) {
+    if (state.windowToastTimer) {
+      clearTimeout(state.windowToastTimer);
+      state.windowToastTimer = null;
+    }
+    const reqId = state.windowToastRequestId;
+    state.windowToastRequestId = '';
+    document.getElementById('aq-window-toast')?.remove();
+    if (cancelPending && reqId) {
+      sendWindowAction({ type: 'cancel-detach', requestId: reqId });
+    }
+  }
+
+  function showWindowActionToast(payload) {
+    if (typeof document === 'undefined' || !document.body) return;
+    const status = String(payload?.status || '');
+    const message = String(payload?.message || '').trim();
+    if (!message) {
+      clearWindowActionToast();
+      return;
+    }
+    if (state.windowToastTimer) {
+      clearTimeout(state.windowToastTimer);
+      state.windowToastTimer = null;
+    }
+    const reqId = String(payload?.requestId || '').trim();
+    state.windowToastRequestId = status === 'awaiting-shortcut' ? reqId : '';
+    let toast = document.getElementById('aq-window-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'aq-window-toast';
+      document.body.appendChild(toast);
+    }
+    toast.classList.toggle('is-hint', status === 'awaiting-shortcut');
+    toast.classList.toggle('is-error', status === 'error');
+    toast.innerHTML = '';
+    const textEl = document.createElement('span');
+    textEl.textContent = message;
+    toast.appendChild(textEl);
+
+    if (status === 'awaiting-shortcut') {
+      const closeBtn = document.createElement('button');
+      closeBtn.type = 'button';
+      closeBtn.className = 'aq-wt-close';
+      closeBtn.title = '取消等待';
+      closeBtn.setAttribute('aria-label', '取消等待');
+      closeBtn.innerHTML = SVG_CLOSE;
+      closeBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        clearWindowActionToast({ cancelPending: true });
+      });
+      toast.appendChild(closeBtn);
+    }
+
+    let durationMs = 2200;
+    if (status === 'opening') {
+      durationMs = 3000;
+    } else if (status === 'error') {
+      durationMs = 3600;
+    } else if (status === 'awaiting-shortcut') {
+      const expiresAt = Number(payload?.expiresAt || 0);
+      durationMs = expiresAt > Date.now() ? Math.min(25000, Math.max(4000, expiresAt - Date.now())) : 20000;
+    }
+    state.windowToastTimer = setTimeout(() => {
+      state.windowToastTimer = null;
+      state.windowToastRequestId = '';
+      document.getElementById('aq-window-toast')?.remove();
+    }, durationMs);
+  }
+
+  function syncDetachedTitlebarInsets() {
+    if (typeof document === 'undefined') return;
+    const titlebars = document.querySelectorAll('[class*="@container/titlebar"]');
+    const wantMacInset = Boolean(state.detachedChatMode && isMacPlatform());
+    for (let i = 0; i < titlebars.length; i += 1) {
+      const tb = titlebars[i];
+      if (!wantMacInset || titlebars.length <= 1) {
+        if (tb.hasAttribute('data-aq-mac-no-inset')) {
+          tb.removeAttribute('data-aq-mac-no-inset');
+        }
+        continue;
+      }
+      const left = tb.getBoundingClientRect?.().left ?? 0;
+      const skipInset = left >= 40;
+      if (tb.hasAttribute('data-aq-mac-no-inset') !== skipInset) {
+        tb.toggleAttribute('data-aq-mac-no-inset', skipInset);
+      }
+    }
+  }
+
+  function applyDetachedChatMode(enabled, { persist = true, notifyDaemon = false } = {}) {
+    const on = Boolean(enabled);
+    state.detachedChatMode = on;
+    try {
+      const root = document.documentElement;
+      if (root) {
+        if (on) {
+          root.setAttribute('data-aq-detached-chat', '1');
+          if (isMacPlatform()) {
+            root.setAttribute('data-aq-platform', 'mac');
+          } else {
+            root.removeAttribute('data-aq-platform');
+          }
+        } else {
+          root.removeAttribute('data-aq-detached-chat');
+          root.removeAttribute('data-aq-platform');
+        }
+      }
+    } catch {}
+    if (persist) {
+      try {
+        if (on) {
+          sessionStorage.setItem('aq_detached_chat_v1', '1');
+        } else {
+          sessionStorage.removeItem('aq_detached_chat_v1');
+        }
+      } catch {}
+    }
+    if (notifyDaemon) {
+      sendWindowAction({ type: 'set-detached-mode', enabled: on });
+    }
+    syncDetachedTitlebarInsets();
+    syncTitlebarDetachButton();
+  }
+
+  function clearDetachedNavTimers() {
+    if (state.detachedNavEarlyTimer) {
+      clearTimeout(state.detachedNavEarlyTimer);
+      state.detachedNavEarlyTimer = null;
+    }
+    if (state.detachedNavTimer) {
+      clearTimeout(state.detachedNavTimer);
+      state.detachedNavTimer = null;
+    }
+  }
+
+  function findNativeAppRouter() {
+    if (state.nativeRouter && typeof state.nativeRouter.navigate === 'function') {
+      return state.nativeRouter;
+    }
+    try {
+      const rootEl = document.getElementById('root') || document.body?.firstElementChild;
+      if (!rootEl) return null;
+      const fiberKey = Object.keys(rootEl).find(
+        (k) => k.startsWith('__reactContainer') || k.startsWith('__reactFiber')
+      );
+      if (!fiberKey) return null;
+      const start = rootEl[fiberKey];
+      const stack = [{ node: start, depth: 0 }];
+      let visited = 0;
+      while (stack.length > 0 && visited < 80) {
+        const { node, depth } = stack.pop();
+        if (!node) continue;
+        visited += 1;
+        const mp = node.memoizedProps;
+        if (mp && typeof mp === 'object') {
+          const cand = mp.router || mp.value;
+          if (
+            cand &&
+            typeof cand === 'object' &&
+            typeof cand.navigate === 'function' &&
+            cand.history &&
+            cand.routeTree
+          ) {
+            state.nativeRouter = cand;
+            return cand;
+          }
+        }
+        if (node.sibling) stack.push({ node: node.sibling, depth });
+        if (node.child && depth < 24) stack.push({ node: node.child, depth: depth + 1 });
+      }
+    } catch {}
+    return null;
+  }
+
+  function tryNativeSpaNavigateToConversation(cid) {
+    const router = findNativeAppRouter();
+    if (router) {
+      try {
+        void router.navigate({ to: '/c/$cascadeId', params: { cascadeId: cid } });
+        return true;
+      } catch {}
+    }
+    const cidLower = cid.toLowerCase();
+    const rows = document.querySelectorAll('.bg-sidebar [data-testid="conversation-row-sidebar"][data-cascade-id]');
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (row.closest('[aria-hidden="true"]')) continue;
+      if (String(row.getAttribute('data-cascade-id') || '').trim().toLowerCase() !== cidLower) continue;
+      const anchor = row.querySelector('a[href]');
+      if (anchor && typeof anchor.click === 'function') {
+        anchor.click();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function hasLoadedConversationView(cidLower) {
+    const view = document.querySelector('[data-testid="conversation-view"][data-cascade-id]');
+    const viewCid = String(view?.getAttribute('data-cascade-id') || '').trim().toLowerCase();
+    return Boolean(viewCid && viewCid === cidLower);
+  }
+
+  function forceLocationToConversation(cid) {
+    try {
+      window.location.replace(`/c/${encodeURIComponent(cid)}`);
+    } catch {
+      window.location.pathname = `/c/${encodeURIComponent(cid)}`;
+    }
+  }
+
+  function navigateToDetachedConversation(cascadeId) {
+    const cid = String(cascadeId || '').trim();
+    if (!/^[0-9a-f-]{36}$/i.test(cid)) return;
+    const cidLower = cid.toLowerCase();
+    clearDetachedNavTimers();
+    if (hasLoadedConversationView(cidLower)) return;
+
+    let attempts = 0;
+    const trySpaJump = () => {
+      state.detachedNavEarlyTimer = null;
+      if (!isInstanceAlive() || hasLoadedConversationView(cidLower)) return;
+      if (tryNativeSpaNavigateToConversation(cid)) {
+        return;
+      }
+      attempts += 1;
+      if (attempts < 20) {
+        state.detachedNavEarlyTimer = setTimeout(trySpaJump, 60);
+      }
+    };
+    trySpaJump();
+
+    // Last-resort fallback only if SPA navigation still hasn't mounted the conversation view.
+    state.detachedNavTimer = setTimeout(() => {
+      state.detachedNavTimer = null;
+      if (!isInstanceAlive()) return;
+      if (!hasLoadedConversationView(cidLower)) {
+        clearDetachedNavTimers();
+        forceLocationToConversation(cid);
+      }
+    }, 2200);
+  }
+
+  function requestDetachConversation(cascadeId, title = '') {
+    const cid = String(cascadeId || '').trim();
+    if (!/^[0-9a-f-]{36}$/i.test(cid)) {
+      showWindowActionToast({ status: 'error', message: '请先打开具体会话再拆出独立聊天窗' });
+      return false;
+    }
+    const resolvedTitle =
+      String(title || '').trim() ||
+      state.trajMetaById[cid.toLowerCase()]?.title ||
+      '';
+    const sent = sendWindowAction({
+      type: 'detach-conversation',
+      cascadeId: cid,
+      title: resolvedTitle,
+    });
+    if (!sent) {
+      showWindowActionToast({ status: 'error', message: '独立聊天窗桥接尚未就绪，请稍后重试' });
+      return false;
+    }
+    return true;
+  }
+
+  function syncTitlebarDetachButton() {
+    if (!isInstanceAlive()) return;
+    syncDetachedTitlebarInsets();
+    const activeCid = extractCascadeId();
+    const isDetached = Boolean(state.detachedChatMode);
+    const shouldShow = isDetached || Boolean(activeCid);
+    const modeKey = isDetached ? 'restore' : 'detach';
+    const sig = `${shouldShow ? 1 : 0}|${modeKey}`;
+
+    if (
+      state.titlebarDetachBtnEl?.isConnected &&
+      state.titlebarDetachBtnEl.dataset.aqOwner === INSTANCE_TOKEN &&
+      state.titlebarDetachSig === sig
+    ) {
+      return;
+    }
+
+    const moreBtn = document.querySelector('[data-testid="titlebar-more-actions"]');
+    const host = moreBtn?.parentElement;
+    if (!host) return;
+
+    let btn = host.querySelector('[data-aq-titlebar-detach-btn="1"]');
+    if (!shouldShow) {
+      if (btn) btn.remove();
+      state.titlebarDetachBtnEl = null;
+      state.titlebarDetachSig = sig;
+      return;
+    }
+    if (btn && btn.dataset.aqOwner !== INSTANCE_TOKEN) {
+      btn.remove();
+      btn = null;
+    }
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'aq-titlebar-detach-btn';
+      btn.dataset.aqOwner = INSTANCE_TOKEN;
+      btn.setAttribute('data-aq-titlebar-detach-btn', '1');
+      btn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (state.detachedChatMode) {
+          applyDetachedChatMode(false, { persist: true, notifyDaemon: true });
+          return;
+        }
+        const curCid = extractCascadeId();
+        if (!curCid) return;
+        requestDetachConversation(curCid);
+      });
+      host.insertBefore(btn, moreBtn);
+    }
+
+    if (btn.dataset.aqMode !== modeKey) {
+      btn.dataset.aqMode = modeKey;
+      btn.classList.toggle('is-detached', isDetached);
+      if (isDetached) {
+        btn.innerHTML = `${SVG_RESTORE_LAYOUT}<span>完整界面</span>`;
+        btn.setAttribute('title', '退出独立聊天窗，恢复左侧边栏');
+        btn.setAttribute('aria-label', '退出独立聊天窗，恢复左侧边栏');
+      } else {
+        btn.innerHTML = SVG_POPOUT;
+        btn.setAttribute('title', '在独立聊天窗中打开此会话');
+        btn.setAttribute('aria-label', '在独立聊天窗中打开此会话');
+      }
+    }
+    state.titlebarDetachBtnEl = btn;
+    state.titlebarDetachSig = sig;
+  }
+
+  window.__aqApplyDetachedWindow = function (payload) {
+    if (!isInstanceAlive()) return;
+    applyDetachedChatMode(Boolean(payload?.enabled), { persist: true, notifyDaemon: false });
+    const cid = String(payload?.cascadeId || '').trim();
+    if (cid) {
+      navigateToDetachedConversation(cid);
+    }
+  };
+
+  window.__aqWindowActionStatus = function (payload) {
+    if (!isInstanceAlive()) return;
+    showWindowActionToast(payload);
+  };
+
+  window.__aqRenderDetachedWindows = function (payload) {
+    if (!isInstanceAlive()) return;
+    const ids = Array.isArray(payload?.cascadeIds) ? payload.cascadeIds : [];
+    const next = new Set();
+    for (let i = 0; i < ids.length; i += 1) {
+      const cid = String(ids[i] || '').trim().toLowerCase();
+      if (/^[0-9a-f-]{36}$/i.test(cid)) next.add(cid);
+    }
+    state.detachedCascadeIds = next;
+  };
+
+  window.__aqFallbackOpenConversation = function (payload) {
+    if (!isInstanceAlive()) return;
+    const isObj = payload && typeof payload === 'object';
+    const cid = String(isObj ? payload.cascadeId : payload || '').trim();
+    const keepDetached = Boolean(isObj && payload.keepDetached);
+    if (/^[0-9a-f-]{36}$/i.test(cid)) {
+      if (!keepDetached) {
+        state.detachedCascadeIds.delete(cid.toLowerCase());
+      }
+      navigateToConversation(cid);
+    }
+  };
+
   function renderFileOpenSelectOptionsHtml() {
     const cur = getEffectiveFileOpenDefault();
     const list = [{ id: 'builtin', label: '内置预览' }, ...getDetectedEditorOptions()];
@@ -8639,8 +9189,12 @@
 
     state.quotaFetching = true;
     renderQuotaChipContent();
+    let usedCsrf = '';
+    let got401 = false;
+    const is401Retry = typeof arg === 'object' && arg !== null && Boolean(arg.retryOn401);
     try {
-      const csrf = window.__APP_CONFIG__?.csrfToken || '';
+      const csrf = getLsCsrfToken();
+      usedCsrf = csrf;
       const headers = {
         'Content-Type': 'application/json',
         ...(csrf ? { 'x-codeium-csrf-token': csrf } : {}),
@@ -8695,7 +9249,10 @@
           }
         }
       }
-      if (!quotaRes.ok) throw new Error(`HTTP ${quotaRes.status}`);
+      if (!quotaRes.ok) {
+        if (quotaRes.status === 401) got401 = true;
+        throw new Error(`HTTP ${quotaRes.status}`);
+      }
       const json = await quotaRes.json();
       const resp = json?.response || json;
       if (Array.isArray(resp?.groups)) {
@@ -8704,6 +9261,10 @@
         state.quotaFetchedAt = doneAt;
         if (force) state.quotaForceFetchedAt = doneAt;
         state.quotaError = '';
+        if (state.quota401RetryTimer) {
+          clearTimeout(state.quota401RetryTimer);
+          state.quota401RetryTimer = null;
+        }
         syncCurrentAccountQuotaSnapshot();
         void maybeRunKeepAlives();
       }
@@ -8714,6 +9275,16 @@
       renderQuotaChipContent();
       refreshQuotaTooltipIfVisible();
       void maybeExecuteBatchWakeStep();
+      if (got401 && !is401Retry && isInstanceAlive() && !state.quota401RetryTimer) {
+        state.quota401RetryTimer = setTimeout(() => {
+          state.quota401RetryTimer = null;
+          if (!isInstanceAlive()) return;
+          const nextCsrf = getLsCsrfToken();
+          if (nextCsrf && nextCsrf !== usedCsrf) {
+            void fetchQuota({ force: true, immediate: true, includeUserStatus: true, retryOn401: true });
+          }
+        }, 900);
+      }
       if (state.quotaPendingRefresh) {
         const nextForce = state.quotaPendingForce;
         state.quotaPendingRefresh = false;
@@ -8730,7 +9301,7 @@
   }
 
   const TRANSLATE_SKIP_SELECTOR =
-    '[data-markdown-root], [data-testid="user-message"], [data-testid="user-message-content"], [data-lexical-editor], [data-testid="model-selector-trigger"], [data-aq-turn-usage], [data-aq-thinking-btn], [data-aq-thinking-card], [data-aq-native-menu-ext], [data-aq-settings-ext], .aq-conv-width-resizer, #aq-turn-tooltip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-key-settings-modal, #aq-batch-wake-panel, #aq-batch-toast, #aq-file-toast, #aq-context-chip, #aq-quota-chip, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-file-ctx-menu, #aq-conv-drag-ghost, code, pre, script, style, .codicon, .google-symbols, .agy-sidebar-row';
+    '[data-markdown-root], [data-testid="user-message"], [data-testid="user-message-content"], [data-lexical-editor], [data-testid="model-selector-trigger"], [data-aq-turn-usage], [data-aq-thinking-btn], [data-aq-thinking-card], [data-aq-native-menu-ext], [data-aq-settings-ext], [data-aq-titlebar-detach-btn], .aq-conv-width-resizer, #aq-turn-tooltip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-key-settings-modal, #aq-batch-wake-panel, #aq-batch-toast, #aq-file-toast, #aq-window-toast, #aq-context-chip, #aq-quota-chip, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-file-ctx-menu, #aq-conv-drag-ghost, code, pre, script, style, .codicon, .google-symbols, .agy-sidebar-row';
 
   const CHROME_ROOT_SELECTOR = [
     '.settings-modal-container',
@@ -9034,6 +9605,10 @@
     '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6"/></svg>';
   const SVG_SMART_ACTIVE =
     '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="1.8" fill="currentColor" stroke="none"/></svg>';
+  const SVG_POPOUT =
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2.5h4v4"/><path d="M7.5 8.5l6-6"/><path d="M12.5 9v3.2a1.3 1.3 0 0 1-1.3 1.3H3.8a1.3 1.3 0 0 1-1.3-1.3V4.8a1.3 1.3 0 0 1 1.3-1.3H7"/></svg>';
+  const SVG_RESTORE_LAYOUT =
+    '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="2.8" width="11.6" height="10.4" rx="1.6"/><path d="M6.2 2.8v10.4"/></svg>';
 
   function saveAutoUnpinnedCids() {
     try {
@@ -9055,7 +9630,7 @@
 
   async function updateConversationAnnotationPinnedRpc(cascadeId, pinned) {
     try {
-      const csrf = window.__APP_CONFIG__?.csrfToken || '';
+      const csrf = getLsCsrfToken();
       const res = await fetch('/exa.language_server_pb.LanguageServerService/UpdateConversationAnnotations', {
         method: 'POST',
         headers: {
@@ -9079,7 +9654,7 @@
 
   async function updateConversationAnnotationTitleRpc(cascadeId, title) {
     try {
-      const csrf = window.__APP_CONFIG__?.csrfToken || '';
+      const csrf = getLsCsrfToken();
       const res = await fetch('/exa.language_server_pb.LanguageServerService/UpdateConversationAnnotations', {
         method: 'POST',
         headers: {
@@ -9829,17 +10404,7 @@
     const cid = String(cascadeId || '').trim();
     if (!/^[0-9a-f-]{36}$/i.test(cid)) return;
     if (extractCascadeId().toLowerCase() === cid.toLowerCase()) return;
-    const rows = document.querySelectorAll('.bg-sidebar [data-testid="conversation-row-sidebar"][data-cascade-id]');
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      if (row.closest('[aria-hidden="true"]')) continue;
-      if (String(row.getAttribute('data-cascade-id') || '').trim().toLowerCase() !== cid.toLowerCase()) continue;
-      const anchor = row.querySelector('a[href]');
-      if (anchor && typeof anchor.click === 'function') {
-        anchor.click();
-        return;
-      }
-    }
+    if (tryNativeSpaNavigateToConversation(cid)) return;
     try {
       window.history.pushState({}, '', `/c/${encodeURIComponent(cid)}`);
       window.dispatchEvent(new PopStateEvent('popstate'));
@@ -10005,9 +10570,14 @@
   }
 
   function applyConversationMaxWidthVar(widthPx = state.convMaxWidth) {
+    const root = document.documentElement;
+    if (!root) return;
+    if (!root.classList.contains('bleed-contain')) {
+      root.classList.add('bleed-contain');
+    }
     const val = widthPx > 0 ? `${Math.round(widthPx)}px` : '100%';
-    if (document.documentElement.style.getPropertyValue('--aq-conv-max-width') !== val) {
-      document.documentElement.style.setProperty('--aq-conv-max-width', val);
+    if (root.style.getPropertyValue('--aq-conv-max-width') !== val) {
+      root.style.setProperty('--aq-conv-max-width', val);
     }
   }
 
@@ -10470,7 +11040,7 @@
     if (!force && Date.now() - state.trajFetchedAt < minIntervalMs) return;
     state.trajFetchedAt = Date.now();
     try {
-      const csrf = window.__APP_CONFIG__?.csrfToken || '';
+      const csrf = getLsCsrfToken();
       const headers = {
         'Content-Type': 'application/json',
         ...(csrf ? { 'x-codeium-csrf-token': csrf } : {}),
@@ -10802,6 +11372,9 @@
           if (anchor) {
             openGroupMenu(anchor, info);
           }
+        } else if (act === 'detach-conv' && cid) {
+          const info = buildConversationInfoById(cid);
+          requestDetachConversation(cid, info?.title || '');
         }
       });
     }
@@ -10822,6 +11395,7 @@
     } else {
       if (item?.cascadeId) {
         actionsHtml.push(
+          `<button type="button" class="aq-ctx-item" data-aq-ctx-act="detach-conv" data-aq-ctx-cid="${escapeHtml(item.cascadeId)}">${SVG_POPOUT}<span>独立聊天窗打开</span></button>`,
           `<button type="button" class="aq-ctx-item" data-aq-ctx-act="rename-conv" data-aq-ctx-cid="${escapeHtml(item.cascadeId)}" data-aq-ctx-scope="${escapeHtml(item.scope || '')}">${SVG_EDIT}<span>重命名</span></button>`,
           `<button type="button" class="aq-ctx-item" data-aq-ctx-act="item-menu" data-aq-ctx-cid="${escapeHtml(item.cascadeId)}">${SVG_FOLDER_PLUS}<span>加入文件夹</span></button>`
         );
@@ -11171,6 +11745,10 @@
           (existingEntry.getAttribute('data-aq-nmf-cid') !== curConv.cascadeId ||
             (existingEntry.getAttribute('data-aq-nmf-gid') || '') !== (curConv.itemGroupId || ''))
         ) {
+          const existingDetach = menu.querySelector('.aq-native-detach-entry');
+          if (existingDetach) {
+            existingDetach.setAttribute('data-aq-nmd-cid', curConv.cascadeId);
+          }
           renderNativeFolderEntryContent(
             existingEntry,
             menu.querySelector('.aq-native-folder-rm-btn'),
@@ -11194,6 +11772,15 @@
       sep.setAttribute('aria-orientation', 'horizontal');
       sep.setAttribute('data-aq-native-menu-ext', '1');
       sep.className = 'h-px bg-border my-1 -mx-1';
+
+      const detachEl = document.createElement('div');
+      detachEl.setAttribute('role', 'menuitem');
+      detachEl.setAttribute('tabindex', '-1');
+      detachEl.setAttribute('data-aq-native-menu-ext', '1');
+      detachEl.setAttribute('data-aq-nmd-cid', convInfo.cascadeId);
+      detachEl.className =
+        'agy-overlay-item group w-full pr-2 pl-1.5 text-left text-compact cursor-pointer outline-none no-focus-ring transition-colors select-none flex items-center rounded-md py-1 gap-1.5 hover:bg-secondary hover:text-foreground text-secondary-foreground aq-native-detach-entry';
+      detachEl.innerHTML = `${SVG_POPOUT}<span class="truncate">独立聊天窗打开</span>`;
 
       const entryEl = document.createElement('div');
       entryEl.setAttribute('role', 'menuitem');
@@ -11320,13 +11907,27 @@
         closeNativeBaseUiMenu(menu);
       });
 
+      detachEl.addEventListener('pointerenter', () => subEl?.classList.remove('is-open'));
+      detachEl.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const curCid = detachEl.getAttribute('data-aq-nmd-cid') || entryEl.getAttribute('data-aq-nmf-cid') || '';
+        if (curCid) {
+          const latestConv = buildConversationInfoById(curCid);
+          requestDetachConversation(curCid, latestConv?.title || '');
+        }
+        closeNativeBaseUiMenu(menu);
+      });
+
       const firstSep = menu.querySelector(':scope > [role="separator"]');
       if (firstSep) {
         menu.insertBefore(sep, firstSep);
+        menu.insertBefore(detachEl, firstSep);
         menu.insertBefore(entryEl, firstSep);
         menu.insertBefore(rmEl, firstSep);
       } else {
         menu.appendChild(sep);
+        menu.appendChild(detachEl);
         menu.appendChild(entryEl);
         menu.appendChild(rmEl);
       }
@@ -15007,6 +15608,7 @@
     if (runMenus) {
       syncNativeConversationMenus();
       syncNativeSettingsModal();
+      syncTitlebarDetachButton();
     }
     if (runI18n) {
       applyUiTranslations({ includeSidebar: runI18nSidebar || runSidebar });
@@ -15058,6 +15660,8 @@
       (!document.hidden && (!document.getElementById('aq-quota-chip') || !document.getElementById('aq-conv-groups')))
     ) {
       scheduleRenderAll();
+    } else if (!document.hidden) {
+      syncTitlebarDetachButton();
     }
   }
 
@@ -15565,7 +16169,7 @@
   injectStyles();
 
   const SELF_MUTATION_IGNORE_SELECTOR =
-    '[data-aq-turn-usage], [data-aq-thinking-btn], [data-aq-thinking-card], [data-aq-native-menu-ext], [data-aq-settings-ext], [data-aq-proj-card], [data-aq-row-grp-btn], .aq-conv-width-resizer, #aq-context-chip, #aq-quota-chip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-key-settings-modal, #aq-batch-wake-panel, #aq-batch-toast, #aq-file-toast, #aq-turn-tooltip, #aq-sidebar-tabs, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-file-ctx-menu, #aq-conv-drag-ghost';
+    '[data-aq-turn-usage], [data-aq-thinking-btn], [data-aq-thinking-card], [data-aq-native-menu-ext], [data-aq-settings-ext], [data-aq-proj-card], [data-aq-row-grp-btn], [data-aq-titlebar-detach-btn], .aq-conv-width-resizer, #aq-context-chip, #aq-quota-chip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-key-settings-modal, #aq-batch-wake-panel, #aq-batch-toast, #aq-file-toast, #aq-window-toast, #aq-turn-tooltip, #aq-sidebar-tabs, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-file-ctx-menu, #aq-conv-drag-ghost';
 
   const POPUP_CHROME_SELECTOR = [
     '.settings-modal-container',
@@ -16401,12 +17005,66 @@
     startGroupConversationRename(convInfo.cascadeId, convInfo.scope || '', convInfo.title || '');
     return true;
   };
+  const resolveSidebarConversationRowFromTarget = (target) => {
+    if (
+      !target ||
+      target?.closest?.(
+        'input, textarea, button, [role="button"], .agy-row-actions, [data-aq-grp-resizer], [data-aq-grp-hdr], [data-aq-grp-sec-toggle]'
+      )
+    ) {
+      return null;
+    }
+    const grpRow = target?.closest?.('#aq-conv-groups [data-aq-grp-open], #aq-conv-groups [data-aq-recent-cid]');
+    const nativeRow = !grpRow
+      ? target?.closest?.('.bg-sidebar [data-testid="conversation-row-sidebar"][data-cascade-id]')
+      : null;
+    if (nativeRow && nativeRow.closest('[aria-hidden="true"]')) return null;
+
+    let cid = '';
+    let title = '';
+    if (grpRow) {
+      cid = String(
+        grpRow.getAttribute('data-aq-grp-open') || grpRow.getAttribute('data-aq-recent-cid') || ''
+      ).trim();
+      if (cid) {
+        title = buildConversationInfoById(cid, grpRow)?.title || '';
+      }
+    } else if (nativeRow) {
+      const info = extractRowConversationInfo(nativeRow);
+      cid = String(info?.cascadeId || '').trim();
+      title = String(info?.title || '').trim();
+    }
+    if (!/^[0-9a-f-]{36}$/i.test(cid)) return null;
+    return { cascadeId: cid, title };
+  };
+
   const onWinClickCapture = (ev) => {
     if (!isInstanceAlive()) return;
     const renameItem = ev.target?.closest?.('[data-testid="conversation-rename-menu-item"]');
     if (renameItem) {
       interceptNativeRenameMenuAction(ev, renameItem);
       return;
+    }
+    if (
+      ev.button === 0 &&
+      !ev.metaKey &&
+      !ev.ctrlKey &&
+      !ev.shiftKey &&
+      !ev.altKey &&
+      !state.convRenaming &&
+      !state.convDrag?.started &&
+      state.detachedCascadeIds.size > 0
+    ) {
+      const hit = resolveSidebarConversationRowFromTarget(ev.target);
+      if (hit && state.detachedCascadeIds.has(hit.cascadeId.toLowerCase())) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (typeof ev.stopImmediatePropagation === 'function') {
+          ev.stopImmediatePropagation();
+        }
+        sendWindowAction({ type: 'focus-detached', cascadeId: hit.cascadeId });
+        return;
+      }
     }
     if (
       ev.button === 0 &&
@@ -16552,6 +17210,19 @@
       }
     }
   };
+  const onDocDblClickCapture = (ev) => {
+    if (!isInstanceAlive() || ev.button !== 0) return;
+    if (state.convRenaming || state.convDrag?.started) return;
+    const hit = resolveSidebarConversationRowFromTarget(ev.target);
+    if (!hit) return;
+
+    ev.preventDefault();
+    ev.stopPropagation();
+    try {
+      window.getSelection?.()?.removeAllRanges?.();
+    } catch {}
+    requestDetachConversation(hit.cascadeId, hit.title);
+  };
   registerGlobalListener(window, 'popstate', onPopState, true);
   registerGlobalListener(window, 'click', onWinClickCapture, true);
   registerGlobalListener(window, 'contextmenu', onWinContextMenuCapture, true);
@@ -16567,6 +17238,7 @@
   registerGlobalListener(document, 'touchstart', onDocWheelOrTouchCapture, { capture: true, passive: true });
   registerGlobalListener(document, 'touchmove', onDocWheelOrTouchCapture, { capture: true, passive: true });
   registerGlobalListener(document, 'click', onDocClickCapture, true);
+  registerGlobalListener(document, 'dblclick', onDocDblClickCapture, true);
   registerGlobalListener(document, 'keydown', onDocKeyDown, true);
 
   state.routeTimer = setInterval(checkRoute, 2000);
@@ -16677,6 +17349,7 @@
       closeGroupCtxMenu();
       closeFileCtxMenu();
     } catch {}
+    document.documentElement.classList.remove('bleed-contain');
     document.documentElement.style.removeProperty('--aq-conv-max-width');
     document.querySelectorAll('[data-testid="conversation-view"].aq-conv-width-armed').forEach((el) => {
       el.classList.remove('aq-conv-width-armed');
@@ -16709,6 +17382,7 @@
     state.i18nCtrlSigCache = null;
     document.getElementById('aq-codex-theme')?.remove();
     document.getElementById('aq-style')?.remove();
+    document.getElementById('aq-detach-boot-style')?.remove();
     document.getElementById('aq-context-chip')?.remove();
     document.getElementById('aq-quota-chip')?.remove();
     document.getElementById('aq-context-tooltip')?.remove();
@@ -16718,6 +17392,20 @@
     document.getElementById('aq-batch-wake-panel')?.remove();
     document.getElementById('aq-batch-toast')?.remove();
     document.getElementById('aq-file-toast')?.remove();
+    clearWindowActionToast();
+    if (state.quota401RetryTimer) {
+      clearTimeout(state.quota401RetryTimer);
+      state.quota401RetryTimer = null;
+    }
+    clearDetachedNavTimers();
+    state.nativeRouter = null;
+    state.detachedCascadeIds.clear();
+    state.titlebarDetachBtnEl = null;
+    state.titlebarDetachSig = '';
+    document.querySelectorAll('[data-aq-titlebar-detach-btn]').forEach((el) => el.remove());
+    document.querySelectorAll('[data-aq-mac-no-inset]').forEach((el) => el.removeAttribute('data-aq-mac-no-inset'));
+    document.documentElement?.removeAttribute?.('data-aq-detached-chat');
+    document.documentElement?.removeAttribute?.('data-aq-platform');
     document.getElementById('aq-turn-tooltip')?.remove();
     document.querySelectorAll('[data-testid="sidebar-navigation-items"]').forEach((el) => {
       el.removeAttribute('data-aq-nav-inline');
@@ -16770,6 +17458,10 @@
       delete window.__aqRenderBatchKeepAlive;
       delete window.__aqRenderUiPrefs;
       delete window.__aqShowFileToast;
+      delete window.__aqApplyDetachedWindow;
+      delete window.__aqWindowActionStatus;
+      delete window.__aqRenderDetachedWindows;
+      delete window.__aqFallbackOpenConversation;
       delete window.__aqRenderGroups;
       delete window.__aqHydrated;
       delete window.__aq_version;
@@ -16782,6 +17474,7 @@
   window.__aqHydrated = false;
   window.__aq_version = INJECT_VERSION;
   ensureWebContextMenuMode();
+  applyDetachedChatMode(state.detachedChatMode, { persist: false, notifyDaemon: false });
   checkRoute();
   void fetchQuota({ force: false, includeUserStatus: true }).then(() => {
     if (!document.hidden) {

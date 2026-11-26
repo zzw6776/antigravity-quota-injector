@@ -48,9 +48,19 @@ await cp(resolve(options.nodeLicense), resolve(resources, 'NODE_LICENSE.txt'));
 await writeFile(resolve(contents, 'Info.plist'), infoPlist(packageJson.version));
 
 execFileSync('/bin/chmod', ['755', executable, worker]);
-execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', appPath], {
-  stdio: 'inherit',
-});
+const signingIdentity = String(process.env.MACOS_SIGNING_IDENTITY || '-').trim() || '-';
+const signingKeychain = String(process.env.MACOS_SIGNING_KEYCHAIN || '').trim();
+const signTarget = (targetPath, extraArgs = []) => {
+  const args = ['--force'];
+  if (signingKeychain) {
+    args.push('--keychain', signingKeychain);
+  }
+  args.push(...extraArgs, '--sign', signingIdentity, targetPath);
+  execFileSync('/usr/bin/codesign', args, { stdio: 'inherit' });
+};
+// Sign inner worker first, then the outer .app bundle so both carry the same stable identity.
+signTarget(worker);
+signTarget(appPath);
 await createMacDmg({ appPath, dmgPath });
 
 console.log(dmgPath);

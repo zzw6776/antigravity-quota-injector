@@ -121,6 +121,13 @@ jobs:
             --node-binary "build/node-runtimes/node-v${NODE_RUNTIME_VERSION}-darwin-${{ matrix.architecture }}/bin/node" \
             --output "build/native/Antigravity Quota Injector-${{ matrix.architecture }}"
 
+      - name: Setup macOS release signing certificate
+        shell: bash
+        env:
+          MACOS_SIGNING_CERTIFICATE: ${{ secrets.MACOS_SIGNING_CERTIFICATE || '' }}
+          MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD || '' }}
+        run: bash scripts/setup-macos-signing.sh
+
       - name: Package architecture DMG
         shell: bash
         run: |
@@ -130,6 +137,19 @@ jobs:
             --input-executable "build/native/Antigravity Quota Injector-${{ matrix.architecture }}" \
             --node-license "build/node-runtimes/node-v${NODE_RUNTIME_VERSION}-darwin-${{ matrix.architecture }}/LICENSE" \
             --output-dir "release/macos-${{ matrix.architecture }}"
+
+      - name: Verify macOS app signature and DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/verify-macos-bundle.sh \
+            "release/macos-${{ matrix.architecture }}/Antigravity Quota Injector.app" \
+            "release/macos-${{ matrix.architecture }}"/*.dmg
+
+      - name: Cleanup macOS signing keychain
+        if: always() && env.MACOS_SIGNING_KEYCHAIN != ''
+        shell: bash
+        run: security delete-keychain "${MACOS_SIGNING_KEYCHAIN}" >/dev/null 2>&1 || true
 
       - name: Upload macOS package
         uses: actions/upload-artifact@v4

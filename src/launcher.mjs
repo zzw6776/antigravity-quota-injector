@@ -62,27 +62,24 @@ function computeDevRuntimeIdentity() {
         : path.dirname(fileURLToPath(import.meta.url));
     const rootDir = path.resolve(srcDir, '..');
     const hash = crypto.createHash('sha256');
-    const files = [
-      path.join(rootDir, 'package.json'),
-      path.join(srcDir, 'launcher.mjs'),
-      path.join(srcDir, 'daemon.mjs'),
-      path.join(srcDir, 'platform.mjs'),
-      path.join(srcDir, 'single-instance.mjs'),
-      path.join(srcDir, 'file-logger.mjs'),
-      path.join(srcDir, 'macos-dev-console.mjs'),
-      path.join(srcDir, 'accounts.mjs'),
-      path.join(srcDir, 'conversation-groups.mjs'),
-      path.join(srcDir, 'keepalive.mjs'),
-      path.join(srcDir, 'batch-keepalive.mjs'),
-      path.join(srcDir, 'ui-prefs.mjs'),
-      path.join(srcDir, 'proto-metrics.mjs'),
-      path.join(srcDir, 'thinking-translator.mjs'),
-      path.join(srcDir, 'token-pricing.mjs'),
-      path.join(srcDir, 'app-update', 'manager.mjs'),
-      path.join(srcDir, 'app-update', 'releases.mjs'),
-      path.join(srcDir, 'app-update', 'download.mjs'),
-      path.join(srcDir, 'app-update', 'install.mjs'),
-    ];
+    const files = [path.join(rootDir, 'package.json')];
+    const collectMjs = (dirPath) => {
+      if (!fs.existsSync(dirPath)) return;
+      const entries = fs
+        .readdirSync(dirPath, { withFileTypes: true })
+        .sort((a, b) => a.name.localeCompare(b.name));
+      for (const entry of entries) {
+        const fullPath = path.join(dirPath, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name === 'app-update') {
+            collectMjs(fullPath);
+          }
+        } else if (entry.isFile() && entry.name.endsWith('.mjs')) {
+          files.push(fullPath);
+        }
+      }
+    };
+    collectMjs(srcDir);
     for (const file of files) {
       if (fs.existsSync(file)) {
         hash.update(file);

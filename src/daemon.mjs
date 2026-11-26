@@ -56,6 +56,14 @@ import {
   detectExternalEditors,
   executeExternalFileAction,
 } from './external-editors.mjs';
+import {
+  buildEarlyDetachedBootstrapExpression,
+  createDetachedWindowCoordinator,
+  formatShortcutHint,
+  openMacAccessibilitySettings,
+  raiseAntigravityWindowByTitle,
+  triggerNativeNewWindowViaCdp,
+} from './detached-window.mjs';
 import { TokenPricingManager } from './token-pricing.mjs';
 import {
   readUiPrefsStore,
@@ -519,6 +527,11 @@ export async function runDaemon({
   let batchDriverInFlight = false;
   const attached = new Map(); // targetId -> session state
   const targetAttachTracker = createTargetAttachTracker();
+  const detachedWindows = createDetachedWindowCoordinator();
+  let pendingDetachedRestore = null;
+  let batchSavedDetachedItems = [];
+  let lastDetachedBroadcastSig = '';
+  let lastAccessibilityPromptAt = 0;
   const turnsCache = new Map(); // dbPath -> { sig, payload }
   let stopping = false;
   let switchInFlight = false;
@@ -526,12 +539,7 @@ export async function runDaemon({
   let wakeLoop = null;
   let sleepTimer = null;
 
-  const pricingManager = new TokenPricingManager({
-    stateDir: paths.stateDir,
-    refreshOnInitialize: !once,
-  });
-  await pricingManager.initialize();
-  const unsubscribePricing = pricingManager.onChange(() => {
+  const wakeDaemonLoop = () => {
     if (sleepTimer) {
       clearTimeout(sleepTimer);
       sleepTimer = null;
@@ -541,6 +549,15 @@ export async function runDaemon({
       wakeLoop = null;
       fn();
     }
+  };
+
+  const pricingManager = new TokenPricingManager({
+    stateDir: paths.stateDir,
+    refreshOnInitialize: !once,
+  });
+  await pricingManager.initialize();
+  const unsubscribePricing = pricingManager.onChange(() => {
+    wakeDaemonLoop();
   });
 
   const pushUpdateToSession = async (session) => {
@@ -879,6 +896,474 @@ export async function runDaemon({
         });
       } catch {}
     }
+  };
+
+  const pushDetachedWindowState = async (session, payload) => {
+    if (!session?.client?.isOpen() || !session.hostConfirmed) return;
+    try {
+      await session.client.send('Runtime.evaluate', {
+        expression: `window.__aqApplyDetachedWindow && window.__aqApplyDetachedWindow(${JSON.stringify(payload)})`,
+        returnByValue: false,
+      });
+    } catch {}
+  };
+
+  const pushWindowActionStatus = async (session, payload) => {
+    if (!session?.client?.isOpen() || !session.hostConfirmed) return;
+    try {
+      await session.client.send('Runtime.evaluate', {
+        expression: `window.__aqWindowActionStatus && window.__aqWindowActionStatus(${JSON.stringify(payload)})`,
+        returnByValue: false,
+      });
+    } catch {}
+  };
+
+  const snapshotPageTargetIds = async () => {
+    const port = readDebugPort(paths.portFile);
+    if (!port) return new Set(attached.keys());
+    const targets = await fetchCdpTargets(port);
+    const ids = new Set(attached.keys());
+    for (let i = 0; i < targets.length; i += 1) {
+      const t = targets[i];
+      if (t?.type === 'page' && ALLOWED_ORIGIN_RE.test(String(t.url || '')) && t.id) {
+        ids.add(t.id);
+      }
+    }
+    return ids;
+  };
+
+  const waitForDetachedClaim = async (requestId, baselineTargetIds) => {
+    const initialDeadline = Date.now() + 1_200;
+    let deadline = initialDeadline;
+    let sawNewTarget = false;
+
+    while (!stopping && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, sawNewTarget ? 80 : 60));
+      if (stopping) return { claimed: false, sawNewTarget };
+      if (!sawNewTarget) {
+        const port = readDebugPort(paths.portFile);
+        if (port) {
+          const targets = await fetchCdpTargets(port);
+          for (let i = 0; i < targets.length; i += 1) {
+            const t = targets[i];
+            if (
+              t?.type === 'page' &&
+              ALLOWED_ORIGIN_RE.test(String(t.url || '')) &&
+              t.id &&
+              !baselineTargetIds.has(t.id)
+            ) {
+              sawNewTarget = true;
+              deadline = Math.max(deadline, Date.now() + 5_000);
+              break;
+            }
+          }
+        }
+      }
+      try {
+        await tick();
+      } catch {}
+      if (!detachedWindows.hasRequest(requestId)) {
+        return { claimed: true, sawNewTarget };
+      }
+    }
+    return {
+      claimed: !detachedWindows.hasRequest(requestId),
+      sawNewTarget,
+    };
+  };
+
+  const collectActiveDetachedCascadeIds = () => {
+    const seen = new Set();
+    const list = [];
+    for (const s of attached.values()) {
+      if (!s?.client?.isOpen() || !s.hostConfirmed) continue;
+      if (!detachedWindows.isDetachedTarget(s.targetId)) continue;
+      const cid = String(s.pendingDetach?.cascadeId || s.activeCascadeId || '').trim();
+      if (!UUID_RE.test(cid)) continue;
+      const key = cid.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      list.push(key);
+    }
+    list.sort();
+    return list;
+  };
+
+  const pushDetachedWindowsToSession = async (session, cascadeIds = null) => {
+    if (!session?.client?.isOpen() || !session.hostConfirmed) return;
+    const list = Array.isArray(cascadeIds) ? cascadeIds : collectActiveDetachedCascadeIds();
+    try {
+      await session.client.send('Runtime.evaluate', {
+        expression: `window.__aqRenderDetachedWindows && window.__aqRenderDetachedWindows(${JSON.stringify({
+          cascadeIds: list,
+        })})`,
+        returnByValue: false,
+      });
+    } catch {}
+  };
+
+  const pushDetachedWindowsToAllSessions = async ({ force = false } = {}) => {
+    const list = collectActiveDetachedCascadeIds();
+    const sig = list.join(',');
+    if (!force && sig === lastDetachedBroadcastSig) return;
+    lastDetachedBroadcastSig = sig;
+    await Promise.allSettled(
+      [...attached.values()].map((s) => pushDetachedWindowsToSession(s, list))
+    );
+  };
+
+  const findExistingDetachedSessionByCid = (cid, { excludeTargetId = '' } = {}) => {
+    const cidLower = String(cid || '').trim().toLowerCase();
+    if (!cidLower) return null;
+    for (const s of attached.values()) {
+      if (!s?.client?.isOpen() || !s.hostConfirmed) continue;
+      if (excludeTargetId && s.targetId === excludeTargetId) continue;
+      if (!detachedWindows.isDetachedTarget(s.targetId)) continue;
+      const sCid = String(s.pendingDetach?.cascadeId || s.activeCascadeId || '').trim().toLowerCase();
+      if (sCid === cidLower) return s;
+    }
+    return null;
+  };
+
+  const snapshotOpenDetachedWindows = async () => {
+    const sessions = [...attached.values()].filter((s) => s?.client?.isOpen() && s.hostConfirmed);
+    if (sessions.length === 0) return [];
+    const results = await Promise.allSettled(
+      sessions.map(async (s) => {
+        const evalRes = await s.client.send('Runtime.evaluate', {
+          expression: `(() => {
+            const detached = document.documentElement?.getAttribute?.('data-aq-detached-chat') === '1';
+            const watched = window.__aqGetWatchedCascadeId ? window.__aqGetWatchedCascadeId() : '';
+            const urlMatch = String(window.location?.pathname || '').match(/\\/c\\/([0-9a-f-]{36})/i);
+            const cid = watched || (urlMatch ? urlMatch[1] : '');
+            const title = String(document.title || '').replace(/\\s*-\\s*Antigravity$/i, '').trim();
+            return { detached, cid, title };
+          })()`,
+          returnByValue: true,
+        });
+        const val = evalRes?.result?.result?.value;
+        const detached = typeof val?.detached === 'boolean' ? val.detached : detachedWindows.isDetachedTarget(s.targetId);
+        const cid = String(val?.cid || s.pendingDetach?.cascadeId || s.activeCascadeId || '').trim();
+        const title = String(val?.title || '').trim();
+        return { detached, cid, title };
+      })
+    );
+    const seen = new Set();
+    const items = [];
+    for (const r of results) {
+      if (r.status !== 'fulfilled' || !r.value?.detached) continue;
+      const cid = r.value.cid;
+      if (!UUID_RE.test(cid)) continue;
+      const key = cid.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push({ cascadeId: cid, title: r.value.title || '' });
+      if (items.length >= 8) break;
+    }
+    return items;
+  };
+
+  const scheduleDetachedRestoreAfterRestart = (items, prevTargetIds) => {
+    const list = Array.isArray(items)
+      ? items.filter((it) => UUID_RE.test(String(it?.cascadeId || '').trim()))
+      : [];
+    if (list.length === 0) {
+      pendingDetachedRestore = null;
+      return;
+    }
+    pendingDetachedRestore = {
+      items: list,
+      prevTargetIds: new Set(prevTargetIds || []),
+      armedAt: Date.now(),
+      expiresAt: Date.now() + 35_000,
+      running: false,
+    };
+    log(`[detached-window] scheduled auto-restore for ${list.length} detached window(s) after account switch`);
+    wakeDaemonLoop();
+  };
+
+  const focusDetachedSession = async (targetSession, { promptIfUntrusted = true } = {}) => {
+    if (!targetSession?.client?.isOpen() || !targetSession.hostConfirmed) {
+      return { ok: false, reason: 'target-closed' };
+    }
+    const titleRes = await targetSession.client.send('Runtime.evaluate', {
+      expression: 'String(document.title || "")',
+      returnByValue: true,
+    });
+    const title = String(titleRes?.result?.result?.value || '').trim();
+    const canPromptNow =
+      promptIfUntrusted &&
+      process.platform === 'darwin' &&
+      Date.now() - lastAccessibilityPromptAt >= 60_000;
+    const [raiseRes] = await Promise.all([
+      raiseAntigravityWindowByTitle({ title, channel, promptIfUntrusted: canPromptNow }),
+      targetSession.client.send('Page.bringToFront', {}),
+    ]);
+    await new Promise((r) => setTimeout(r, 90));
+    const focusCheck = await targetSession.client.send('Runtime.evaluate', {
+      expression: 'Boolean(document.hasFocus && document.hasFocus())',
+      returnByValue: true,
+    });
+    const hasFocus = focusCheck?.result?.result?.value === true;
+    if (hasFocus || raiseRes?.ok === true) {
+      return { ok: true, hasFocus };
+    }
+    const permissionDenied = Boolean(raiseRes?.permissionDenied);
+    if (permissionDenied && canPromptNow) {
+      lastAccessibilityPromptAt = Date.now();
+      void openMacAccessibilitySettings();
+    }
+    return {
+      ok: false,
+      permissionDenied,
+      reason: String(raiseRes?.reason || 'focus-not-verified'),
+    };
+  };
+
+  const detachConversationFromSession = async (
+    session,
+    { cascadeId, title = '', silent = false, allowManualFallback = true } = {}
+  ) => {
+    const cid = String(cascadeId || '').trim();
+    const cleanTitle = String(title || '').trim();
+    if (!UUID_RE.test(cid)) {
+      if (!silent) {
+        await pushWindowActionStatus(session, {
+          status: 'error',
+          message: '未识别到有效的会话 ID',
+        });
+      }
+      return { ok: false, reason: 'invalid-cid' };
+    }
+
+    const existing = findExistingDetachedSessionByCid(cid, { excludeTargetId: session.targetId });
+    if (existing) {
+      const focusRes = await focusDetachedSession(existing);
+      if (focusRes.ok) {
+        if (!silent) {
+          await pushWindowActionStatus(session, {
+            status: 'opened',
+            message: '已切换至该会话的独立聊天窗',
+          });
+        }
+        return { ok: true, focusedExisting: true };
+      }
+      if (!silent) {
+        await pushWindowActionStatus(session, {
+          status: 'awaiting-shortcut',
+          message:
+            process.platform === 'darwin'
+              ? '该会话已在独立窗打开（请按 ⌘` 切换，或授辅助功能权限以自动前置）'
+              : '该会话已在独立窗口打开，请直接切换至对应窗口',
+        });
+      }
+      return { ok: true, focusedExisting: false, alreadyDetached: true };
+    }
+
+    const armRes = detachedWindows.arm({
+      cascadeId: cid,
+      sourceTargetId: session.targetId,
+      title: cleanTitle,
+    });
+    if (!armRes) return { ok: false, reason: 'arm-failed' };
+    if (armRes.duplicate) return { ok: true, duplicate: true };
+    const armed = armRes.entry;
+
+    if (!silent) {
+      await pushWindowActionStatus(session, {
+        status: 'opening',
+        requestId: armed.requestId,
+        message: '正在独立聊天窗中打开…',
+      });
+    }
+
+    const baselineTargetIds = await snapshotPageTargetIds();
+
+    // 1. Zero-permission native path: dispatch Cmd/Ctrl+Shift+N via CDP
+    const cdpRes = await triggerNativeNewWindowViaCdp(session.client);
+    if (cdpRes.ok) {
+      const waitRes = await waitForDetachedClaim(armed.requestId, baselineTargetIds);
+      if (waitRes.claimed) {
+        return { ok: true };
+      }
+    }
+
+    // 2. Fallback (manual shortcut handoff): keep armed queue entry and guide user
+    if (detachedWindows.hasRequest(armed.requestId)) {
+      if (!allowManualFallback) {
+        detachedWindows.clearPending(armed.requestId);
+        return { ok: false, reason: 'restore-timeout' };
+      }
+      const shortcut = formatShortcutHint();
+      wakeDaemonLoop();
+      if (!silent) {
+        await pushWindowActionStatus(session, {
+          status: 'awaiting-shortcut',
+          requestId: armed.requestId,
+          shortcut,
+          expiresAt: armed.expiresAt,
+          message: `请按 ${shortcut} 新建窗口，将自动打开该独立聊天窗`,
+        });
+      }
+    }
+    return { ok: false, reason: 'awaiting-shortcut' };
+  };
+
+  const maybeRunPendingDetachedRestore = () => {
+    const restore = pendingDetachedRestore;
+    if (!restore || restore.running || stopping || switchInFlight || batchStore.getRaw().active) {
+      return;
+    }
+    if (Date.now() > restore.expiresAt) {
+      pendingDetachedRestore = null;
+      return;
+    }
+    const candidates = [...attached.values()].filter(
+      (s) => s?.client?.isOpen() && s.hostConfirmed && !restore.prevTargetIds.has(s.targetId)
+    );
+    if (candidates.length === 0) return;
+
+    restore.running = true;
+    void (async () => {
+      try {
+        let hostSession = null;
+        for (const s of candidates) {
+          const checkRes = await s.client.send('Runtime.evaluate', {
+            expression:
+              'Boolean(window.__aqHydrated && document.querySelector("[data-testid=sidebar-split], .bg-sidebar"))',
+            returnByValue: true,
+          });
+          if (checkRes?.result?.result?.value === true) {
+            hostSession = s;
+            break;
+          }
+        }
+        if (!hostSession) {
+          if (pendingDetachedRestore === restore) {
+            restore.running = false;
+          }
+          return;
+        }
+
+        await new Promise((r) => setTimeout(r, 600));
+        if (
+          stopping ||
+          switchInFlight ||
+          batchStore.getRaw().active ||
+          pendingDetachedRestore !== restore ||
+          !hostSession.client.isOpen()
+        ) {
+          if (pendingDetachedRestore === restore) restore.running = false;
+          return;
+        }
+
+        const total = restore.items.length;
+        await pushWindowActionStatus(hostSession, {
+          status: 'opening',
+          message: `正在自动恢复 ${total} 个独立聊天窗…`,
+        });
+
+        let restoredCount = 0;
+        for (let i = 0; i < restore.items.length; i += 1) {
+          if (
+            stopping ||
+            switchInFlight ||
+            batchStore.getRaw().active ||
+            !hostSession.client.isOpen()
+          ) {
+            break;
+          }
+          const item = restore.items[i];
+          const res = await detachConversationFromSession(hostSession, {
+            cascadeId: item.cascadeId,
+            title: item.title,
+            silent: true,
+            allowManualFallback: false,
+          });
+          if (!res.ok) {
+            log(`[detached-window] auto-restore stopped at ${i + 1}/${total}: ${res.reason || 'failed'}`);
+            break;
+          }
+          restoredCount += 1;
+          if (i + 1 < restore.items.length) {
+            await new Promise((r) => setTimeout(r, 220));
+          }
+        }
+
+        if (pendingDetachedRestore === restore) {
+          pendingDetachedRestore = null;
+        }
+        if (restoredCount > 0 && hostSession.client.isOpen()) {
+          await pushWindowActionStatus(hostSession, {
+            status: 'opened',
+            message: `已自动恢复 ${restoredCount} 个独立聊天窗`,
+          });
+          log(`[detached-window] auto-restored ${restoredCount}/${total} detached window(s)`);
+        }
+      } catch (err) {
+        log(`[detached-window] auto-restore error: ${err?.message || err}`);
+        if (pendingDetachedRestore === restore) {
+          pendingDetachedRestore = null;
+        }
+      }
+    })();
+  };
+
+  const handleWindowAction = async (session, rawPayload) => {
+    if (!session) return;
+    let msg;
+    try {
+      msg = JSON.parse(String(rawPayload || '{}'));
+    } catch {
+      return;
+    }
+    const type = String(msg?.type || '');
+    if (type === 'set-detached-mode') {
+      const enabled = Boolean(msg?.enabled);
+      detachedWindows.setDetachedTarget(session.targetId, enabled);
+      await pushDetachedWindowState(session, { enabled, cascadeId: '' });
+      void pushDetachedWindowsToAllSessions({ force: true });
+      return;
+    }
+    if (type === 'focus-detached') {
+      const cid = String(msg?.cascadeId || '').trim();
+      if (!UUID_RE.test(cid)) return;
+      const existing = findExistingDetachedSessionByCid(cid, { excludeTargetId: session.targetId });
+      let keepDetached = false;
+      if (existing) {
+        const focusRes = await focusDetachedSession(existing, { promptIfUntrusted: true });
+        if (focusRes.ok) {
+          return;
+        }
+        keepDetached = true;
+      } else {
+        void pushDetachedWindowsToAllSessions({ force: true });
+      }
+      if (session?.client?.isOpen() && session.hostConfirmed) {
+        try {
+          await session.client.send('Runtime.evaluate', {
+            expression: `window.__aqFallbackOpenConversation && window.__aqFallbackOpenConversation(${JSON.stringify({
+              cascadeId: cid,
+              keepDetached,
+            })})`,
+            returnByValue: false,
+          });
+        } catch {}
+      }
+      return;
+    }
+    if (type === 'cancel-detach') {
+      detachedWindows.clearPending(String(msg?.requestId || ''));
+      return;
+    }
+    if (type !== 'detach-conversation') return;
+
+    await detachConversationFromSession(session, {
+      cascadeId: msg?.cascadeId,
+      title: msg?.title,
+      silent: false,
+      allowManualFallback: true,
+    });
   };
 
   const thinkingDbCache = new Map();
@@ -1244,6 +1729,7 @@ export async function runDaemon({
       await pushBatchKeepAliveToAllSessions();
       await pushAccountsToAllSessions({ busy: true, status: raw.statusText });
 
+      const prevIdsBeforeReturn = new Set(attached.keys());
       switchInFlight = true;
       let failedReturnError = '';
       try {
@@ -1260,6 +1746,11 @@ export async function runDaemon({
       } finally {
         switchInFlight = false;
         targetAttachTracker.reset();
+      }
+      const savedDetached = batchSavedDetachedItems;
+      batchSavedDetachedItems = [];
+      if (!failedReturnError && savedDetached.length > 0) {
+        scheduleDetachedRestoreAfterRestart(savedDetached, prevIdsBeforeReturn);
       }
 
       const finished = batchStore.markFinished({ failedReturnError });
@@ -1457,6 +1948,7 @@ export async function runDaemon({
         return;
       }
 
+      batchSavedDetachedItems = await snapshotOpenDetachedWindows();
       batchStore.start({
         originAccount: plan.originAccount,
         targets: plan.targets,
@@ -1764,6 +2256,9 @@ export async function runDaemon({
       }
       if (type === 'switch') {
         if (switchInFlight || batchStore.getRaw().active) return;
+        const detachedToRestore = await snapshotOpenDetachedWindows();
+        const prevTargetIds = new Set(attached.keys());
+        pendingDetachedRestore = null;
         switchInFlight = true;
         await pushAccountsToAllSessions({
           activeEmail,
@@ -1790,11 +2285,14 @@ export async function runDaemon({
           targetAttachTracker.reset();
         }
         if (switchErr) {
+          pendingDetachedRestore = null;
           await pushAccountsToAllSessions({
             activeEmail,
             busy: false,
             error: String(switchErr?.message || '切换账号失败'),
           });
+        } else if (detachedToRestore.length > 0) {
+          scheduleDetachedRestoreAfterRestart(detachedToRestore, prevTargetIds);
         }
       }
     } catch (err) {
@@ -1909,6 +2407,7 @@ export async function runDaemon({
       lastOriginalPushSig: '',
       lastClientThinking: null,
       evalScriptId: null,
+      pendingDetach: null,
     };
     attached.set(target.id, session);
 
@@ -1916,6 +2415,8 @@ export async function runDaemon({
       if (attached.get(target.id) === session) {
         attached.delete(target.id);
       }
+      detachedWindows.forgetTarget(target.id);
+      void pushDetachedWindowsToAllSessions();
     });
 
     const probeRes = await client.send('Runtime.evaluate', {
@@ -1937,15 +2438,46 @@ export async function runDaemon({
     targetAttachTracker.markSuccess(target.id);
 
     session.hostConfirmed = true;
-    await client.send('Runtime.addBinding', { name: '__aqRequestTurns' });
-    await client.send('Runtime.addBinding', { name: '__aqAccountAction' });
-    await client.send('Runtime.addBinding', { name: '__aqUpdateAction' });
-    await client.send('Runtime.addBinding', { name: '__aqGroupAction' });
-    await client.send('Runtime.addBinding', { name: '__aqKeepAliveAction' });
-    await client.send('Runtime.addBinding', { name: '__aqBatchKeepAliveAction' });
-    await client.send('Runtime.addBinding', { name: '__aqUiPrefsAction' });
-    await client.send('Runtime.addBinding', { name: '__aqThinkingAction' });
-    await client.send('Runtime.addBinding', { name: '__aqFileAction' });
+
+    const claimedDetach = detachedWindows.consumeForNewTarget(target.id);
+    if (claimedDetach) {
+      session.pendingDetach = {
+        cascadeId: claimedDetach.cascadeId,
+        title: claimedDetach.title,
+      };
+      session.activeCascadeId = claimedDetach.cascadeId;
+      // Kick off lightweight detached styling + native SPA navigation immediately
+      // before transferring the full client bundle.
+      await client.send('Runtime.evaluate', {
+        expression: buildEarlyDetachedBootstrapExpression({
+          cascadeId: claimedDetach.cascadeId,
+          isMac: process.platform === 'darwin',
+        }),
+        returnByValue: false,
+      });
+      const sourceSession = claimedDetach.sourceTargetId ? attached.get(claimedDetach.sourceTargetId) : null;
+      if (sourceSession) {
+        void pushWindowActionStatus(sourceSession, {
+          status: 'opened',
+          requestId: claimedDetach.requestId,
+          message: '已在独立聊天窗中打开',
+        });
+      }
+      void pushDetachedWindowsToAllSessions();
+    }
+
+    await Promise.all([
+      client.send('Runtime.addBinding', { name: '__aqRequestTurns' }),
+      client.send('Runtime.addBinding', { name: '__aqAccountAction' }),
+      client.send('Runtime.addBinding', { name: '__aqUpdateAction' }),
+      client.send('Runtime.addBinding', { name: '__aqGroupAction' }),
+      client.send('Runtime.addBinding', { name: '__aqKeepAliveAction' }),
+      client.send('Runtime.addBinding', { name: '__aqBatchKeepAliveAction' }),
+      client.send('Runtime.addBinding', { name: '__aqUiPrefsAction' }),
+      client.send('Runtime.addBinding', { name: '__aqThinkingAction' }),
+      client.send('Runtime.addBinding', { name: '__aqFileAction' }),
+      client.send('Runtime.addBinding', { name: '__aqWindowAction' }),
+    ]);
 
     client.onBinding((params) => {
       if (params?.name === '__aqRequestTurns') {
@@ -1971,24 +2503,44 @@ export async function runDaemon({
         void handleThinkingAction(session, params.payload);
       } else if (params?.name === '__aqFileAction') {
         void handleFileAction(session, params.payload);
+      } else if (params?.name === '__aqWindowAction') {
+        void handleWindowAction(session, params.payload);
       }
     });
 
-    const docRes = await client.send('Page.addScriptToEvaluateOnNewDocument', { source: script });
-    session.evalScriptId = docRes?.result?.identifier || null;
-
     await client.send('Runtime.evaluate', { expression: script, returnByValue: false });
-    await hydrateSession(session);
+    const [docRes] = await Promise.all([
+      client.send('Page.addScriptToEvaluateOnNewDocument', { source: script }),
+      hydrateSession(session),
+    ]);
+    session.evalScriptId = docRes?.result?.identifier || null;
   };
 
   const hydrateSession = async (session) => {
-    await pushUiPrefsToSession(session);
-    await syncTurnsForSession(session, true);
-    await pushAccountsToSession(session);
-    await pushGroupsToSession(session);
-    await pushKeepAliveToSession(session);
-    await pushBatchKeepAliveToSession(session);
-    await pushUpdateToSession(session);
+    if (session.pendingDetach) {
+      const pending = session.pendingDetach;
+      session.pendingDetach = null;
+      await pushDetachedWindowState(session, {
+        enabled: true,
+        cascadeId: pending.cascadeId,
+        title: pending.title,
+      });
+    } else if (detachedWindows.isDetachedTarget(session.targetId)) {
+      await pushDetachedWindowState(session, {
+        enabled: true,
+        cascadeId: '',
+      });
+    }
+    await Promise.allSettled([
+      pushUiPrefsToSession(session),
+      syncTurnsForSession(session, true),
+      pushAccountsToSession(session),
+      pushGroupsToSession(session),
+      pushKeepAliveToSession(session),
+      pushBatchKeepAliveToSession(session),
+      pushUpdateToSession(session),
+      pushDetachedWindowsToSession(session),
+    ]);
     await session.client.send('Runtime.evaluate', {
       expression: 'window.__aqHydrated = true;',
       returnByValue: false,
@@ -2033,13 +2585,16 @@ export async function runDaemon({
         const urlCid = targetUrlById.get(id)?.match(/\/c\/([0-9a-f-]{36})/i)?.[1] || '';
         const stateRes = await session.client.send('Runtime.evaluate', {
           expression:
-            '({ v: window.__aq_version || "", h: Boolean(window.__aqHydrated), cid: window.__aqGetWatchedCascadeId ? window.__aqGetWatchedCascadeId() : "" })',
+            '({ v: window.__aq_version || "", h: Boolean(window.__aqHydrated), d: document.documentElement?.getAttribute?.("data-aq-detached-chat") === "1", cid: window.__aqGetWatchedCascadeId ? window.__aqGetWatchedCascadeId() : "" })',
           returnByValue: true,
         });
         if (!stateRes) {
           return;
         }
         const pageState = stateRes?.result?.result?.value;
+        if (typeof pageState?.d === 'boolean') {
+          detachedWindows.setDetachedTarget(id, pageState.d);
+        }
         const watchedCid = UUID_RE.test(String(pageState?.cid || '')) ? String(pageState.cid) : '';
         const resolvedCid = watchedCid || (pageState?.v ? '' : urlCid);
         if (resolvedCid && resolvedCid !== session.activeCascadeId) {
@@ -2066,7 +2621,9 @@ export async function runDaemon({
         }
       })
     );
+    await pushDetachedWindowsToAllSessions();
     await checkBatchKeepAliveTimeouts();
+    maybeRunPendingDetachedRestore();
     return { liveCount: liveIds.size, attachedCount: attached.size };
   };
 
@@ -2168,12 +2725,13 @@ export async function runDaemon({
   try {
     while (!stopping) {
       await new Promise((r) => {
+        const pollMs = detachedWindows.hasActivePending() || Boolean(pendingDetachedRestore) ? 350 : 1500;
         wakeLoop = r;
         sleepTimer = setTimeout(() => {
           sleepTimer = null;
           wakeLoop = null;
           r();
-        }, 1500);
+        }, pollMs);
       });
       if (stopping) break;
       try {
