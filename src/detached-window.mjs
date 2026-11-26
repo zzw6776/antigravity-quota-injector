@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { encodePowerShellCommand } from './platform.mjs';
 
 const UUID_RE = /^[0-9a-f-]{36}$/i;
 const DEFAULT_PENDING_TTL_MS = 20_000;
@@ -233,10 +234,13 @@ export function raiseAntigravityWindowByTitle({
   execFileFn = execFile,
 } = {}) {
   const exactTitle = String(title || '').trim();
-  const shortTitle = exactTitle.replace(/\s*-\s*Antigravity(?:\s*-\s*Insiders)?$/i, '').trim();
-  if (!exactTitle && !shortTitle) {
+  if (!exactTitle) {
     return Promise.resolve({ ok: false, reason: 'empty-title' });
   }
+  if (/^Antigravity(?:\s*-\s*Insiders)?$/i.test(exactTitle)) {
+    return Promise.resolve({ ok: false, reason: 'generic-title' });
+  }
+  const shortTitle = exactTitle.replace(/\s*-\s*Antigravity(?:\s*-\s*Insiders)?$/i, '').trim();
   if (process.env.NODE_TEST_CONTEXT) {
     return Promise.resolve({ ok: false, reason: 'test-context' });
   }
@@ -392,10 +396,8 @@ function run(argv) {
 
   if (platform === 'win32') {
     const psScript = `
-param([string]$ExactTitle, [string]$ShortTitle)
 Add-Type @"
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -411,9 +413,21 @@ public static class AqWinFocus {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  private static string Norm(string s) {
+    if (string.IsNullOrEmpty(s)) return "";
+    string t = s.Trim();
+    while (t.EndsWith("...", StringComparison.Ordinal) || t.EndsWith("\\u2026", StringComparison.Ordinal)) {
+      t = t.EndsWith("...", StringComparison.Ordinal) ? t.Substring(0, t.Length - 3).TrimEnd() : t.Substring(0, t.Length - 1).TrimEnd();
+    }
+    return t.ToLowerInvariant();
+  }
   public static bool RaiseByTitle(string exactTitle, string shortTitle) {
-    IntPtr exactMatch = IntPtr.Zero;
-    IntPtr partialMatch = IntPtr.Zero;
+    string exactNorm = Norm(exactTitle);
+    string shortNorm = Norm(shortTitle);
+    if (string.IsNullOrEmpty(exactNorm) && string.IsNullOrEmpty(shortNorm)) return false;
+    IntPtr fg = GetForegroundWindow();
+    IntPtr bestWin = IntPtr.Zero;
+    int bestScore = -1;
     EnumWindows((hWnd, lParam) => {
       if (!IsWindowVisible(hWnd)) return true;
       uint pid;
@@ -425,42 +439,71 @@ public static class AqWinFocus {
       var sb = new StringBuilder(512);
       int len = GetWindowText(hWnd, sb, sb.Capacity);
       if (len <= 0) return true;
-      string title = sb.ToString();
-      if (!string.IsNullOrEmpty(exactTitle) && string.Equals(title, exactTitle, StringComparison.Ordinal)) {
-        exactMatch = hWnd;
-        return false;
+      string wNorm = Norm(sb.ToString());
+      if (string.IsNullOrEmpty(wNorm)) return true;
+      int matchScore = 0;
+      if (!string.IsNullOrEmpty(exactNorm) && wNorm == exactNorm) {
+        matchScore = 100;
+      } else if (!string.IsNullOrEmpty(shortNorm) && wNorm == shortNorm) {
+        matchScore = 90;
+      } else if (wNorm.Length >= 4 && !string.IsNullOrEmpty(exactNorm) && exactNorm.StartsWith(wNorm, StringComparison.Ordinal)) {
+        matchScore = 80;
+      } else if (wNorm.Length >= 4 && !string.IsNullOrEmpty(shortNorm) && shortNorm.StartsWith(wNorm, StringComparison.Ordinal)) {
+        matchScore = 75;
+      } else if (!string.IsNullOrEmpty(shortNorm) && wNorm.StartsWith(shortNorm, StringComparison.Ordinal)) {
+        matchScore = 70;
+      } else if (!string.IsNullOrEmpty(shortNorm) && wNorm.IndexOf(shortNorm, StringComparison.Ordinal) >= 0) {
+        matchScore = 60;
       }
-      if (partialMatch == IntPtr.Zero && !string.IsNullOrEmpty(shortTitle) && title.IndexOf(shortTitle, StringComparison.OrdinalIgnoreCase) >= 0) {
-        partialMatch = hWnd;
+      if (matchScore <= 0) return true;
+      int finalScore = matchScore + (hWnd == fg ? 0 : 10);
+      if (finalScore > bestScore) {
+        bestScore = finalScore;
+        bestWin = hWnd;
       }
       return true;
     }, IntPtr.Zero);
-    IntPtr target = exactMatch != IntPtr.Zero ? exactMatch : partialMatch;
-    if (target == IntPtr.Zero) return false;
-    if (IsIconic(target)) ShowWindow(target, 9);
-    IntPtr fg = GetForegroundWindow();
+    if (bestWin == IntPtr.Zero) return false;
+    if (IsIconic(bestWin)) ShowWindow(bestWin, 9);
     uint fgPid;
     uint fgThread = fg != IntPtr.Zero ? GetWindowThreadProcessId(fg, out fgPid) : 0;
     uint targetPid;
-    uint targetThread = GetWindowThreadProcessId(target, out targetPid);
+    uint targetThread = GetWindowThreadProcessId(bestWin, out targetPid);
     uint curThread = GetCurrentThreadId();
     if (fgThread != 0 && fgThread != curThread) AttachThreadInput(fgThread, curThread, true);
     if (targetThread != 0 && targetThread != curThread) AttachThreadInput(targetThread, curThread, true);
-    bool ok = SetForegroundWindow(target);
+    bool ok = SetForegroundWindow(bestWin);
     if (targetThread != 0 && targetThread != curThread) AttachThreadInput(targetThread, curThread, false);
     if (fgThread != 0 && fgThread != curThread) AttachThreadInput(fgThread, curThread, false);
     return ok;
   }
 }
 "@
-if ([AqWinFocus]::RaiseByTitle($ExactTitle, $ShortTitle)) { Write-Output "raised" } else { Write-Output "not-found" }
+if ([AqWinFocus]::RaiseByTitle($env:AQ_EXACT_TITLE, $env:AQ_SHORT_TITLE)) { Write-Output "raised" } else { Write-Output "not-found" }
 `;
     return new Promise((resolve) => {
       try {
         execFileFn(
           'powershell.exe',
-          ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', psScript, exactTitle, shortTitle],
-          { timeout: 3000, windowsHide: true },
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-WindowStyle',
+            'Hidden',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-EncodedCommand',
+            encodePowerShellCommand(psScript),
+          ],
+          {
+            timeout: 5000,
+            windowsHide: true,
+            env: {
+              ...process.env,
+              AQ_EXACT_TITLE: exactTitle,
+              AQ_SHORT_TITLE: shortTitle,
+            },
+          },
           (err, stdout) => {
             if (err) {
               resolve({ ok: false, reason: String(err?.message || 'ps-error') });

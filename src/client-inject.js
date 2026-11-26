@@ -2409,45 +2409,57 @@
         appearance: none;
         border: 0;
         background: transparent;
-        color: var(--muted-foreground, #71717a);
+        color: var(--secondary-foreground, #27272a);
+        width: 28px;
         height: 28px;
-        min-width: 28px;
-        padding: 0 6px;
-        border-radius: 6px;
+        padding: 0;
+        border-radius: 9999px;
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        gap: 4px;
-        font: 500 11.5px/1 var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
         cursor: pointer;
         flex-shrink: 0;
         -webkit-app-region: no-drag;
         transition: background-color 120ms ease, color 120ms ease;
       }
+      .aq-titlebar-detach-btn svg {
+        pointer-events: none;
+      }
       .aq-titlebar-detach-btn:hover {
         background: var(--secondary, rgba(24, 24, 27, 0.06));
         color: var(--foreground, #18181b);
       }
-      .aq-titlebar-detach-btn.is-detached {
-        padding: 0 8px;
-        background: rgba(37, 99, 235, 0.09);
-        color: #2563eb;
-      }
-      .aq-titlebar-detach-btn.is-detached:hover {
-        background: rgba(37, 99, 235, 0.16);
-        color: #1d4ed8;
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-titlebar-detach-btn {
+        color: var(--secondary-foreground, #e4e4e7);
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-titlebar-detach-btn:hover {
         background: rgba(255, 255, 255, 0.08);
         color: #f4f4f5;
       }
-      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-titlebar-detach-btn.is-detached {
-        background: rgba(96, 165, 250, 0.16);
-        color: #93c5fd;
+      #aq-titlebar-tooltip {
+        position: fixed;
+        z-index: 2147483647;
+        pointer-events: none;
+        white-space: nowrap;
+        padding: 5px 9px;
+        border-radius: 6px;
+        font: 500 11.5px/1.3 var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+        background: #18181b;
+        color: #fafafa;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22);
+        opacity: 0;
+        transform: translateY(-2px);
+        transition: opacity 110ms ease, transform 110ms ease;
       }
-      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-titlebar-detach-btn.is-detached:hover {
-        background: rgba(96, 165, 250, 0.24);
-        color: #bfdbfe;
+      #aq-titlebar-tooltip.is-visible {
+        opacity: 1;
+        transform: translateY(0);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) #aq-titlebar-tooltip {
+        background: #27272a;
+        color: #f4f4f5;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
       }
       #aq-window-toast {
         position: fixed;
@@ -8261,14 +8273,37 @@
     return true;
   }
 
+  function hideTitlebarTooltip() {
+    const tip = document.getElementById('aq-titlebar-tooltip');
+    if (tip) {
+      tip.classList.remove('is-visible');
+    }
+  }
+
+  function showTitlebarTooltip(btn) {
+    if (!btn || !btn.isConnected || !document.body) return;
+    const text = String(btn.getAttribute('data-aq-tip') || '').trim();
+    if (!text) return;
+    let tip = document.getElementById('aq-titlebar-tooltip');
+    if (!tip) {
+      tip = document.createElement('div');
+      tip.id = 'aq-titlebar-tooltip';
+      document.body.appendChild(tip);
+    }
+    tip.textContent = text;
+    const rect = btn.getBoundingClientRect();
+    tip.style.top = `${Math.round(rect.bottom + 6)}px`;
+    tip.style.right = `${Math.max(8, Math.round(window.innerWidth - rect.right))}px`;
+    tip.style.left = 'auto';
+    tip.classList.add('is-visible');
+  }
+
   function syncTitlebarDetachButton() {
     if (!isInstanceAlive()) return;
     syncDetachedTitlebarInsets();
-    const activeCid = extractCascadeId();
     const isDetached = Boolean(state.detachedChatMode);
-    const shouldShow = isDetached || Boolean(activeCid);
-    const modeKey = isDetached ? 'restore' : 'detach';
-    const sig = `${shouldShow ? 1 : 0}|${modeKey}`;
+    const modeKey = isDetached ? 'restore' : 'compact';
+    const sig = `1|${modeKey}`;
 
     if (
       state.titlebarDetachBtnEl?.isConnected &&
@@ -8283,12 +8318,6 @@
     if (!host) return;
 
     let btn = host.querySelector('[data-aq-titlebar-detach-btn="1"]');
-    if (!shouldShow) {
-      if (btn) btn.remove();
-      state.titlebarDetachBtnEl = null;
-      state.titlebarDetachSig = sig;
-      return;
-    }
     if (btn && btn.dataset.aqOwner !== INSTANCE_TOKEN) {
       btn.remove();
       btn = null;
@@ -8299,32 +8328,28 @@
       btn.className = 'aq-titlebar-detach-btn';
       btn.dataset.aqOwner = INSTANCE_TOKEN;
       btn.setAttribute('data-aq-titlebar-detach-btn', '1');
+      btn.addEventListener('pointerenter', () => showTitlebarTooltip(btn));
+      btn.addEventListener('pointerleave', hideTitlebarTooltip);
+      btn.addEventListener('focus', () => showTitlebarTooltip(btn));
+      btn.addEventListener('blur', hideTitlebarTooltip);
       btn.addEventListener('click', (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
-        if (state.detachedChatMode) {
-          applyDetachedChatMode(false, { persist: true, notifyDaemon: true });
-          return;
-        }
-        const curCid = extractCascadeId();
-        if (!curCid) return;
-        requestDetachConversation(curCid);
+        hideTitlebarTooltip();
+        applyDetachedChatMode(!state.detachedChatMode, { persist: true, notifyDaemon: true });
       });
       host.insertBefore(btn, moreBtn);
     }
 
     if (btn.dataset.aqMode !== modeKey) {
       btn.dataset.aqMode = modeKey;
-      btn.classList.toggle('is-detached', isDetached);
-      if (isDetached) {
-        btn.innerHTML = `${SVG_RESTORE_LAYOUT}<span>完整界面</span>`;
-        btn.setAttribute('title', '退出独立聊天窗，恢复左侧边栏');
-        btn.setAttribute('aria-label', '退出独立聊天窗，恢复左侧边栏');
-      } else {
-        btn.innerHTML = SVG_POPOUT;
-        btn.setAttribute('title', '在独立聊天窗中打开此会话');
-        btn.setAttribute('aria-label', '在独立聊天窗中打开此会话');
-      }
+      const tipText = isDetached
+        ? '显示左侧边栏（恢复完整界面）'
+        : '隐藏左侧边栏（切换简洁模式）';
+      btn.innerHTML = isDetached ? SVG_SIDEBAR_SHOW : SVG_SIDEBAR_HIDE;
+      btn.removeAttribute('title');
+      btn.setAttribute('data-aq-tip', tipText);
+      btn.setAttribute('aria-label', tipText);
     }
     state.titlebarDetachBtnEl = btn;
     state.titlebarDetachSig = sig;
@@ -9301,7 +9326,7 @@
   }
 
   const TRANSLATE_SKIP_SELECTOR =
-    '[data-markdown-root], [data-testid="user-message"], [data-testid="user-message-content"], [data-lexical-editor], [data-testid="model-selector-trigger"], [data-aq-turn-usage], [data-aq-thinking-btn], [data-aq-thinking-card], [data-aq-native-menu-ext], [data-aq-settings-ext], [data-aq-titlebar-detach-btn], .aq-conv-width-resizer, #aq-turn-tooltip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-key-settings-modal, #aq-batch-wake-panel, #aq-batch-toast, #aq-file-toast, #aq-window-toast, #aq-context-chip, #aq-quota-chip, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-file-ctx-menu, #aq-conv-drag-ghost, code, pre, script, style, .codicon, .google-symbols, .agy-sidebar-row';
+    '[data-markdown-root], [data-testid="user-message"], [data-testid="user-message-content"], [data-lexical-editor], [data-testid="model-selector-trigger"], [data-aq-turn-usage], [data-aq-thinking-btn], [data-aq-thinking-card], [data-aq-native-menu-ext], [data-aq-settings-ext], [data-aq-titlebar-detach-btn], .aq-conv-width-resizer, #aq-turn-tooltip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-key-settings-modal, #aq-batch-wake-panel, #aq-batch-toast, #aq-file-toast, #aq-window-toast, #aq-titlebar-tooltip, #aq-context-chip, #aq-quota-chip, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-file-ctx-menu, #aq-conv-drag-ghost, code, pre, script, style, .codicon, .google-symbols, .agy-sidebar-row';
 
   const CHROME_ROOT_SELECTOR = [
     '.settings-modal-container',
@@ -9607,8 +9632,10 @@
     '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="1.8" fill="currentColor" stroke="none"/></svg>';
   const SVG_POPOUT =
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2.5h4v4"/><path d="M7.5 8.5l6-6"/><path d="M12.5 9v3.2a1.3 1.3 0 0 1-1.3 1.3H3.8a1.3 1.3 0 0 1-1.3-1.3V4.8a1.3 1.3 0 0 1 1.3-1.3H7"/></svg>';
-  const SVG_RESTORE_LAYOUT =
-    '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="2.8" width="11.6" height="10.4" rx="1.6"/><path d="M6.2 2.8v10.4"/></svg>';
+  const SVG_SIDEBAR_SHOW =
+    '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"/><line x1="9" y1="4" x2="9" y2="20"/><path d="M13 9.5l2.5 2.5-2.5 2.5"/></svg>';
+  const SVG_SIDEBAR_HIDE =
+    '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"/><line x1="9" y1="4" x2="9" y2="20"/><path d="M15.5 9.5L13 12l2.5 2.5"/></svg>';
 
   function saveAutoUnpinnedCids() {
     try {
@@ -16169,7 +16196,7 @@
   injectStyles();
 
   const SELF_MUTATION_IGNORE_SELECTOR =
-    '[data-aq-turn-usage], [data-aq-thinking-btn], [data-aq-thinking-card], [data-aq-native-menu-ext], [data-aq-settings-ext], [data-aq-proj-card], [data-aq-row-grp-btn], [data-aq-titlebar-detach-btn], .aq-conv-width-resizer, #aq-context-chip, #aq-quota-chip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-key-settings-modal, #aq-batch-wake-panel, #aq-batch-toast, #aq-file-toast, #aq-window-toast, #aq-turn-tooltip, #aq-sidebar-tabs, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-file-ctx-menu, #aq-conv-drag-ghost';
+    '[data-aq-turn-usage], [data-aq-thinking-btn], [data-aq-thinking-card], [data-aq-native-menu-ext], [data-aq-settings-ext], [data-aq-proj-card], [data-aq-row-grp-btn], [data-aq-titlebar-detach-btn], .aq-conv-width-resizer, #aq-context-chip, #aq-quota-chip, #aq-context-tooltip, #aq-quota-tooltip, #aq-acct-quota-tooltip, #aq-key-settings-modal, #aq-batch-wake-panel, #aq-batch-toast, #aq-file-toast, #aq-window-toast, #aq-titlebar-tooltip, #aq-turn-tooltip, #aq-sidebar-tabs, #aq-conv-groups, #aq-group-menu, #aq-grp-ctx-menu, #aq-file-ctx-menu, #aq-conv-drag-ghost';
 
   const POPUP_CHROME_SELECTOR = [
     '.settings-modal-container',
@@ -17062,7 +17089,9 @@
         if (typeof ev.stopImmediatePropagation === 'function') {
           ev.stopImmediatePropagation();
         }
-        sendWindowAction({ type: 'focus-detached', cascadeId: hit.cascadeId });
+        if (ev.detail <= 1) {
+          sendWindowAction({ type: 'focus-detached', cascadeId: hit.cascadeId });
+        }
         return;
       }
     }
@@ -17221,6 +17250,9 @@
     try {
       window.getSelection?.()?.removeAllRanges?.();
     } catch {}
+    if (state.detachedCascadeIds.has(hit.cascadeId.toLowerCase())) {
+      return;
+    }
     requestDetachConversation(hit.cascadeId, hit.title);
   };
   registerGlobalListener(window, 'popstate', onPopState, true);
@@ -17403,6 +17435,7 @@
     state.titlebarDetachBtnEl = null;
     state.titlebarDetachSig = '';
     document.querySelectorAll('[data-aq-titlebar-detach-btn]').forEach((el) => el.remove());
+    document.getElementById('aq-titlebar-tooltip')?.remove();
     document.querySelectorAll('[data-aq-mac-no-inset]').forEach((el) => el.removeAttribute('data-aq-mac-no-inset'));
     document.documentElement?.removeAttribute?.('data-aq-detached-chat');
     document.documentElement?.removeAttribute?.('data-aq-platform');

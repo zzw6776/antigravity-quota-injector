@@ -526,6 +526,8 @@ export async function runDaemon({
   const batchStore = createBatchKeepAliveStore();
   let batchDriverInFlight = false;
   const attached = new Map(); // targetId -> session state
+  const attachingIds = new Set(); // in-flight attachTarget guard
+  const focusInFlight = new Map(); // targetId -> Promise<focusRes>
   const targetAttachTracker = createTargetAttachTracker();
   const detachedWindows = createDetachedWindowCoordinator();
   let pendingDetachedRestore = null;
@@ -940,28 +942,35 @@ export async function runDaemon({
     while (!stopping && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, sawNewTarget ? 80 : 60));
       if (stopping) return { claimed: false, sawNewTarget };
-      if (!sawNewTarget) {
-        const port = readDebugPort(paths.portFile);
-        if (port) {
-          const targets = await fetchCdpTargets(port);
-          for (let i = 0; i < targets.length; i += 1) {
-            const t = targets[i];
-            if (
-              t?.type === 'page' &&
-              ALLOWED_ORIGIN_RE.test(String(t.url || '')) &&
-              t.id &&
-              !baselineTargetIds.has(t.id)
-            ) {
-              sawNewTarget = true;
-              deadline = Math.max(deadline, Date.now() + 5_000);
-              break;
-            }
+      if (!detachedWindows.hasRequest(requestId)) {
+        return { claimed: true, sawNewTarget };
+      }
+      const port = readDebugPort(paths.portFile);
+      if (port) {
+        const targets = await fetchCdpTargets(port);
+        const newTargets = [];
+        for (let i = 0; i < targets.length; i += 1) {
+          const t = targets[i];
+          if (
+            t?.type === 'page' &&
+            ALLOWED_ORIGIN_RE.test(String(t.url || '')) &&
+            t.id &&
+            !baselineTargetIds.has(t.id)
+          ) {
+            newTargets.push(t);
+          }
+        }
+        if (newTargets.length > 0) {
+          if (!sawNewTarget) {
+            sawNewTarget = true;
+            deadline = Math.max(deadline, Date.now() + 5_000);
+          }
+          const unattached = newTargets.filter((t) => !attached.has(t.id) && !attachingIds.has(t.id));
+          if (unattached.length > 0) {
+            await Promise.allSettled(unattached.map((t) => attachTarget(t)));
           }
         }
       }
-      try {
-        await tick();
-      } catch {}
       if (!detachedWindows.hasRequest(requestId)) {
         return { claimed: true, sawNewTarget };
       }
@@ -1086,38 +1095,50 @@ export async function runDaemon({
     if (!targetSession?.client?.isOpen() || !targetSession.hostConfirmed) {
       return { ok: false, reason: 'target-closed' };
     }
-    const titleRes = await targetSession.client.send('Runtime.evaluate', {
-      expression: 'String(document.title || "")',
-      returnByValue: true,
-    });
-    const title = String(titleRes?.result?.result?.value || '').trim();
-    const canPromptNow =
-      promptIfUntrusted &&
-      process.platform === 'darwin' &&
-      Date.now() - lastAccessibilityPromptAt >= 60_000;
-    const [raiseRes] = await Promise.all([
-      raiseAntigravityWindowByTitle({ title, channel, promptIfUntrusted: canPromptNow }),
-      targetSession.client.send('Page.bringToFront', {}),
-    ]);
-    await new Promise((r) => setTimeout(r, 90));
-    const focusCheck = await targetSession.client.send('Runtime.evaluate', {
-      expression: 'Boolean(document.hasFocus && document.hasFocus())',
-      returnByValue: true,
-    });
-    const hasFocus = focusCheck?.result?.result?.value === true;
-    if (hasFocus || raiseRes?.ok === true) {
-      return { ok: true, hasFocus };
+    const existingInFlight = focusInFlight.get(targetSession.targetId);
+    if (existingInFlight) {
+      return existingInFlight;
     }
-    const permissionDenied = Boolean(raiseRes?.permissionDenied);
-    if (permissionDenied && canPromptNow) {
-      lastAccessibilityPromptAt = Date.now();
-      void openMacAccessibilitySettings();
-    }
-    return {
-      ok: false,
-      permissionDenied,
-      reason: String(raiseRes?.reason || 'focus-not-verified'),
-    };
+    const runFocus = (async () => {
+      const titleRes = await targetSession.client.send('Runtime.evaluate', {
+        expression: 'String(document.title || "")',
+        returnByValue: true,
+      });
+      const title = String(titleRes?.result?.result?.value || '').trim();
+      const canPromptNow =
+        promptIfUntrusted &&
+        process.platform === 'darwin' &&
+        Date.now() - lastAccessibilityPromptAt >= 60_000;
+      const [raiseRes] = await Promise.all([
+        raiseAntigravityWindowByTitle({ title, channel, promptIfUntrusted: canPromptNow }),
+        targetSession.client.send('Page.bringToFront', {}),
+      ]);
+      await new Promise((r) => setTimeout(r, 90));
+      const focusCheck = await targetSession.client.send('Runtime.evaluate', {
+        expression: 'Boolean(document.hasFocus && document.hasFocus())',
+        returnByValue: true,
+      });
+      const hasFocus = focusCheck?.result?.result?.value === true;
+      if (hasFocus || raiseRes?.ok === true) {
+        return { ok: true, hasFocus };
+      }
+      const permissionDenied = Boolean(raiseRes?.permissionDenied);
+      if (permissionDenied && canPromptNow) {
+        lastAccessibilityPromptAt = Date.now();
+        void openMacAccessibilitySettings();
+      }
+      return {
+        ok: false,
+        permissionDenied,
+        reason: String(raiseRes?.reason || 'focus-not-verified'),
+      };
+    })().finally(() => {
+      if (focusInFlight.get(targetSession.targetId) === runFocus) {
+        focusInFlight.delete(targetSession.targetId);
+      }
+    });
+    focusInFlight.set(targetSession.targetId, runFocus);
+    return runFocus;
   };
 
   const detachConversationFromSession = async (
@@ -2382,138 +2403,142 @@ export async function runDaemon({
   };
 
   const attachTarget = async (target) => {
-    if (attached.has(target.id) || !target.webSocketDebuggerUrl) return;
+    if (attached.has(target.id) || attachingIds.has(target.id) || !target.webSocketDebuggerUrl) return;
     if (targetAttachTracker.shouldSkip(target.id)) return;
-
-    let client;
+    attachingIds.add(target.id);
     try {
-      client = await createCdpClient(target.webSocketDebuggerUrl);
-    } catch {
-      targetAttachTracker.markFailure(target.id);
-      return;
-    }
-
-    const session = {
-      targetId: target.id,
-      client,
-      hostConfirmed: false,
-      activeCascadeId: '',
-      lastPushedKey: '',
-      lastPushedCid: '',
-      lastPushedRateSig: '',
-      lastPushedRawTurns: null,
-      latestThinkingReqId: '',
-      lastThinkingPushSig: '',
-      lastOriginalPushSig: '',
-      lastClientThinking: null,
-      evalScriptId: null,
-      pendingDetach: null,
-    };
-    attached.set(target.id, session);
-
-    client.onClose(() => {
-      if (attached.get(target.id) === session) {
-        attached.delete(target.id);
+      let client;
+      try {
+        client = await createCdpClient(target.webSocketDebuggerUrl);
+      } catch {
+        targetAttachTracker.markFailure(target.id);
+        return;
       }
-      detachedWindows.forgetTarget(target.id);
-      void pushDetachedWindowsToAllSessions();
-    });
 
-    const probeRes = await client.send('Runtime.evaluate', {
-      expression: `({
-        isHost: Boolean(window.__APP_CONFIG__?.productName === 'antigravity' || document.getElementById('antigravity.agentSidePanelInputBox')),
-        readyState: typeof document !== 'undefined' ? document.readyState : '',
-      })`,
-      returnByValue: true,
-    });
-    const probeVal = probeRes?.result?.result?.value;
-    if (probeVal?.isHost !== true) {
-      attached.delete(target.id);
-      targetAttachTracker.markFailure(target.id, {
-        readyState: typeof probeVal?.readyState === 'string' ? probeVal.readyState : '',
-      });
-      client.close();
-      return;
-    }
-    targetAttachTracker.markSuccess(target.id);
-
-    session.hostConfirmed = true;
-
-    const claimedDetach = detachedWindows.consumeForNewTarget(target.id);
-    if (claimedDetach) {
-      session.pendingDetach = {
-        cascadeId: claimedDetach.cascadeId,
-        title: claimedDetach.title,
+      const session = {
+        targetId: target.id,
+        client,
+        hostConfirmed: false,
+        activeCascadeId: '',
+        lastPushedKey: '',
+        lastPushedCid: '',
+        lastPushedRateSig: '',
+        lastPushedRawTurns: null,
+        latestThinkingReqId: '',
+        lastThinkingPushSig: '',
+        lastOriginalPushSig: '',
+        lastClientThinking: null,
+        evalScriptId: null,
+        pendingDetach: null,
       };
-      session.activeCascadeId = claimedDetach.cascadeId;
-      // Kick off lightweight detached styling + native SPA navigation immediately
-      // before transferring the full client bundle.
-      await client.send('Runtime.evaluate', {
-        expression: buildEarlyDetachedBootstrapExpression({
-          cascadeId: claimedDetach.cascadeId,
-          isMac: process.platform === 'darwin',
-        }),
-        returnByValue: false,
-      });
-      const sourceSession = claimedDetach.sourceTargetId ? attached.get(claimedDetach.sourceTargetId) : null;
-      if (sourceSession) {
-        void pushWindowActionStatus(sourceSession, {
-          status: 'opened',
-          requestId: claimedDetach.requestId,
-          message: '已在独立聊天窗中打开',
-        });
-      }
-      void pushDetachedWindowsToAllSessions();
-    }
+      attached.set(target.id, session);
 
-    await Promise.all([
-      client.send('Runtime.addBinding', { name: '__aqRequestTurns' }),
-      client.send('Runtime.addBinding', { name: '__aqAccountAction' }),
-      client.send('Runtime.addBinding', { name: '__aqUpdateAction' }),
-      client.send('Runtime.addBinding', { name: '__aqGroupAction' }),
-      client.send('Runtime.addBinding', { name: '__aqKeepAliveAction' }),
-      client.send('Runtime.addBinding', { name: '__aqBatchKeepAliveAction' }),
-      client.send('Runtime.addBinding', { name: '__aqUiPrefsAction' }),
-      client.send('Runtime.addBinding', { name: '__aqThinkingAction' }),
-      client.send('Runtime.addBinding', { name: '__aqFileAction' }),
-      client.send('Runtime.addBinding', { name: '__aqWindowAction' }),
-    ]);
-
-    client.onBinding((params) => {
-      if (params?.name === '__aqRequestTurns') {
-        const nextCid = String(params.payload || '').trim();
-        if (UUID_RE.test(nextCid)) {
-          session.activeCascadeId = nextCid;
-          session.lastPushedKey = '';
-          void syncTurnsForSession(session, true);
+      client.onClose(() => {
+        if (attached.get(target.id) === session) {
+          attached.delete(target.id);
         }
-      } else if (params?.name === '__aqAccountAction') {
-        void handleAccountAction(session, params.payload);
-      } else if (params?.name === '__aqUpdateAction') {
-        void handleUpdateAction(params.payload);
-      } else if (params?.name === '__aqGroupAction') {
-        void handleGroupAction(session, params.payload);
-      } else if (params?.name === '__aqKeepAliveAction') {
-        void handleKeepAliveAction(session, params.payload);
-      } else if (params?.name === '__aqBatchKeepAliveAction') {
-        void handleBatchKeepAliveAction(session, params.payload);
-      } else if (params?.name === '__aqUiPrefsAction') {
-        void handleUiPrefsAction(session, params.payload);
-      } else if (params?.name === '__aqThinkingAction') {
-        void handleThinkingAction(session, params.payload);
-      } else if (params?.name === '__aqFileAction') {
-        void handleFileAction(session, params.payload);
-      } else if (params?.name === '__aqWindowAction') {
-        void handleWindowAction(session, params.payload);
-      }
-    });
+        detachedWindows.forgetTarget(target.id);
+        void pushDetachedWindowsToAllSessions();
+      });
 
-    await client.send('Runtime.evaluate', { expression: script, returnByValue: false });
-    const [docRes] = await Promise.all([
-      client.send('Page.addScriptToEvaluateOnNewDocument', { source: script }),
-      hydrateSession(session),
-    ]);
-    session.evalScriptId = docRes?.result?.identifier || null;
+      const probeRes = await client.send('Runtime.evaluate', {
+        expression: `({
+          isHost: Boolean(window.__APP_CONFIG__?.productName === 'antigravity' || document.getElementById('antigravity.agentSidePanelInputBox')),
+          readyState: typeof document !== 'undefined' ? document.readyState : '',
+        })`,
+        returnByValue: true,
+      });
+      const probeVal = probeRes?.result?.result?.value;
+      if (probeVal?.isHost !== true) {
+        attached.delete(target.id);
+        targetAttachTracker.markFailure(target.id, {
+          readyState: typeof probeVal?.readyState === 'string' ? probeVal.readyState : '',
+        });
+        client.close();
+        return;
+      }
+      targetAttachTracker.markSuccess(target.id);
+
+      session.hostConfirmed = true;
+
+      const claimedDetach = detachedWindows.consumeForNewTarget(target.id);
+      if (claimedDetach) {
+        session.pendingDetach = {
+          cascadeId: claimedDetach.cascadeId,
+          title: claimedDetach.title,
+        };
+        session.activeCascadeId = claimedDetach.cascadeId;
+        // Kick off lightweight detached styling + native SPA navigation immediately
+        // before transferring the full client bundle.
+        await client.send('Runtime.evaluate', {
+          expression: buildEarlyDetachedBootstrapExpression({
+            cascadeId: claimedDetach.cascadeId,
+            isMac: process.platform === 'darwin',
+          }),
+          returnByValue: false,
+        });
+        const sourceSession = claimedDetach.sourceTargetId ? attached.get(claimedDetach.sourceTargetId) : null;
+        if (sourceSession) {
+          void pushWindowActionStatus(sourceSession, {
+            status: 'opened',
+            requestId: claimedDetach.requestId,
+            message: '已在独立聊天窗中打开',
+          });
+        }
+        void pushDetachedWindowsToAllSessions();
+      }
+
+      await Promise.all([
+        client.send('Runtime.addBinding', { name: '__aqRequestTurns' }),
+        client.send('Runtime.addBinding', { name: '__aqAccountAction' }),
+        client.send('Runtime.addBinding', { name: '__aqUpdateAction' }),
+        client.send('Runtime.addBinding', { name: '__aqGroupAction' }),
+        client.send('Runtime.addBinding', { name: '__aqKeepAliveAction' }),
+        client.send('Runtime.addBinding', { name: '__aqBatchKeepAliveAction' }),
+        client.send('Runtime.addBinding', { name: '__aqUiPrefsAction' }),
+        client.send('Runtime.addBinding', { name: '__aqThinkingAction' }),
+        client.send('Runtime.addBinding', { name: '__aqFileAction' }),
+        client.send('Runtime.addBinding', { name: '__aqWindowAction' }),
+      ]);
+
+      client.onBinding((params) => {
+        if (params?.name === '__aqRequestTurns') {
+          const nextCid = String(params.payload || '').trim();
+          if (UUID_RE.test(nextCid)) {
+            session.activeCascadeId = nextCid;
+            session.lastPushedKey = '';
+            void syncTurnsForSession(session, true);
+          }
+        } else if (params?.name === '__aqAccountAction') {
+          void handleAccountAction(session, params.payload);
+        } else if (params?.name === '__aqUpdateAction') {
+          void handleUpdateAction(params.payload);
+        } else if (params?.name === '__aqGroupAction') {
+          void handleGroupAction(session, params.payload);
+        } else if (params?.name === '__aqKeepAliveAction') {
+          void handleKeepAliveAction(session, params.payload);
+        } else if (params?.name === '__aqBatchKeepAliveAction') {
+          void handleBatchKeepAliveAction(session, params.payload);
+        } else if (params?.name === '__aqUiPrefsAction') {
+          void handleUiPrefsAction(session, params.payload);
+        } else if (params?.name === '__aqThinkingAction') {
+          void handleThinkingAction(session, params.payload);
+        } else if (params?.name === '__aqFileAction') {
+          void handleFileAction(session, params.payload);
+        } else if (params?.name === '__aqWindowAction') {
+          void handleWindowAction(session, params.payload);
+        }
+      });
+
+      await client.send('Runtime.evaluate', { expression: script, returnByValue: false });
+      const [docRes] = await Promise.all([
+        client.send('Page.addScriptToEvaluateOnNewDocument', { source: script }),
+        hydrateSession(session),
+      ]);
+      session.evalScriptId = docRes?.result?.identifier || null;
+    } finally {
+      attachingIds.delete(target.id);
+    }
   };
 
   const hydrateSession = async (session) => {
@@ -2592,7 +2617,7 @@ export async function runDaemon({
           return;
         }
         const pageState = stateRes?.result?.result?.value;
-        if (typeof pageState?.d === 'boolean') {
+        if (pageState?.d === true || (pageState?.d === false && Boolean(pageState?.v))) {
           detachedWindows.setDetachedTarget(id, pageState.d);
         }
         const watchedCid = UUID_RE.test(String(pageState?.cid || '')) ? String(pageState.cid) : '';
