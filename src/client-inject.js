@@ -330,6 +330,14 @@
         return 'builtin';
       }
     })(),
+    quotaColorTheme: (() => {
+      try {
+        const v = String(localStorage.getItem('aq_quota_color_theme_v1') || '').trim().toLowerCase();
+        return ['native', 'macos', 'slate-rose', 'morandi', 'mono-crit'].includes(v) ? v : 'macos';
+      } catch {
+        return 'macos';
+      }
+    })(),
     externalEditors: (() => {
       const plat =
         typeof window.process?.platform === 'string' && window.process.platform
@@ -1018,35 +1026,36 @@
       #aq-quota-chip {
         display: inline-flex;
         align-items: center;
-        gap: 4px;
+        gap: 3px;
         height: 28px;
-        padding: 0 9px;
+        padding: 0 6px;
         margin-right: 2px;
         border-radius: 9999px;
-        border: 1px solid var(--border, rgba(127, 127, 127, 0.22));
+        border: 1px solid transparent;
         background: transparent;
         color: var(--secondary-foreground, var(--foreground, #3f3f46));
-        font: 400 12px/1 var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
-        font-variant-numeric: tabular-nums;
+        font: 500 12px/16px var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+        letter-spacing: -0.01em;
         white-space: nowrap;
         cursor: pointer;
         user-select: none;
-        transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+        transition: background-color 0.12s ease, color 0.12s ease;
       }
       #aq-context-chip:hover,
       #aq-context-chip:focus-visible,
       #aq-quota-chip:hover,
       #aq-quota-chip:focus-visible {
         background: var(--secondary, rgba(127, 127, 127, 0.1));
-        border-color: var(--border, rgba(127, 127, 127, 0.36));
+        border-color: transparent;
         outline: none;
       }
       #aq-quota-chip[data-loading="1"] {
         opacity: 0.72;
       }
       #aq-quota-chip .aq-chip-sep {
-        margin: 0 1px;
-        opacity: 0.45;
+        margin: 0;
+        font-weight: 700;
+        opacity: 0.35;
       }
       #aq-context-chip[data-mode="ring"],
       #aq-quota-chip[data-mode="ring"],
@@ -1095,11 +1104,87 @@
       .aq-lvl-muted {
         color: var(--muted-foreground, #71717a);
       }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-lvl-warn {
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-lvl-warn {
         color: #fbbf24;
       }
-      :is(body.dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-lvl-crit {
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-lvl-crit {
         color: #f87171;
+      }
+      html,
+      html[data-aq-quota-theme="macos"],
+      [data-aq-quota-theme-opt="macos"] {
+        --aq-qc-ok: #248a3d;
+        --aq-qc-warn: #c96a00;
+        --aq-qc-crit: #d70015;
+      }
+      html[data-aq-quota-theme="native"],
+      [data-aq-quota-theme-opt="native"] {
+        --aq-qc-ok: #27272a;
+        --aq-qc-warn: #c26d18;
+        --aq-qc-crit: #d14343;
+      }
+      html[data-aq-quota-theme="slate-rose"],
+      [data-aq-quota-theme-opt="slate-rose"] {
+        --aq-qc-ok: #475569;
+        --aq-qc-warn: #d97706;
+        --aq-qc-crit: #e11d48;
+      }
+      html[data-aq-quota-theme="morandi"],
+      [data-aq-quota-theme-opt="morandi"] {
+        --aq-qc-ok: #4c7362;
+        --aq-qc-warn: #b87642;
+        --aq-qc-crit: #b85454;
+      }
+      html[data-aq-quota-theme="mono-crit"],
+      [data-aq-quota-theme-opt="mono-crit"] {
+        --aq-qc-ok: #3f3f46;
+        --aq-qc-warn: #71717a;
+        --aq-qc-crit: #dc2626;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]),
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"])[data-aq-quota-theme="macos"],
+      html[data-aq-quota-theme="macos"] :is(body.dark, body.theme-dark),
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) [data-aq-quota-theme-opt="macos"] {
+        --aq-qc-ok: #30d158;
+        --aq-qc-warn: #ff9f0a;
+        --aq-qc-crit: #ff453a;
+      }
+      :is(html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"])[data-aq-quota-theme="native"],
+      html[data-aq-quota-theme="native"] :is(body.dark, body.theme-dark),
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) [data-aq-quota-theme-opt="native"] {
+        --aq-qc-ok: #e4e4e7;
+        --aq-qc-warn: #f5b85b;
+        --aq-qc-crit: #f27474;
+      }
+      :is(html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"])[data-aq-quota-theme="slate-rose"],
+      html[data-aq-quota-theme="slate-rose"] :is(body.dark, body.theme-dark),
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) [data-aq-quota-theme-opt="slate-rose"] {
+        --aq-qc-ok: #cbd5e1;
+        --aq-qc-warn: #fbbf24;
+        --aq-qc-crit: #fb7185;
+      }
+      :is(html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"])[data-aq-quota-theme="morandi"],
+      html[data-aq-quota-theme="morandi"] :is(body.dark, body.theme-dark),
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) [data-aq-quota-theme-opt="morandi"] {
+        --aq-qc-ok: #84b09d;
+        --aq-qc-warn: #d9a477;
+        --aq-qc-crit: #dc8383;
+      }
+      :is(html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"])[data-aq-quota-theme="mono-crit"],
+      html[data-aq-quota-theme="mono-crit"] :is(body.dark, body.theme-dark),
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) [data-aq-quota-theme-opt="mono-crit"] {
+        --aq-qc-ok: #d4d4d8;
+        --aq-qc-warn: #a1a1aa;
+        --aq-qc-crit: #f87171;
+      }
+      #aq-quota-chip .aq-lvl-ok {
+        color: var(--aq-qc-ok);
+      }
+      #aq-quota-chip .aq-lvl-warn {
+        color: var(--aq-qc-warn);
+      }
+      #aq-quota-chip .aq-lvl-crit {
+        color: var(--aq-qc-crit);
       }
 
       .aq-floating-tooltip {
@@ -1900,20 +1985,30 @@
         flex-shrink: 0;
         transition: opacity 0.12s ease, background-color 0.12s ease;
       }
+      .aq-q-acct-gem.is-ok,
       .aq-q-acct-gem.is-available {
-        background: #059669;
+        background: #248a3d;
       }
+      .aq-q-acct-gem.is-warn {
+        background: #c96a00;
+      }
+      .aq-q-acct-gem.is-crit,
       .aq-q-acct-gem.is-depleted {
-        background: #dc2626;
+        background: #d70015;
       }
       .aq-q-acct-gem.is-unknown {
         background: rgba(127, 127, 127, 0.28);
       }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-gem.is-ok,
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-gem.is-available {
-        background: #34d399;
+        background: #30d158;
       }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-gem.is-warn {
+        background: #ff9f0a;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-gem.is-crit,
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-gem.is-depleted {
-        background: #f87171;
+        background: #ff453a;
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-gem.is-unknown {
         background: rgba(161, 161, 170, 0.28);
@@ -1938,38 +2033,56 @@
       .aq-q-acct-sub {
         display: flex;
         align-items: center;
-        gap: 5px;
+        gap: 4px;
         min-width: 0;
-        font-size: 10px;
+        font-size: 10.5px;
         line-height: 1.25;
-        font-variant-numeric: tabular-nums;
-        color: #8a8a93;
+        color: #71717a;
       }
       .aq-q-acct-sub-text {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
         min-width: 0;
       }
-      .aq-q-acct-unstarted-dot {
-        display: inline-block;
-        width: 5px;
-        height: 5px;
-        border-radius: 9999px;
-        flex-shrink: 0;
-        background: #f59e0b;
+      .aq-q-acct-sep {
+        opacity: 0.45;
       }
-      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-unstarted-dot {
-        background: #fbbf24;
+      .aq-q-acct-pct.is-warn {
+        color: #c96a00;
+        font-weight: 500;
+      }
+      .aq-q-acct-pct.is-crit {
+        color: #d70015;
+        font-weight: 500;
+      }
+      .aq-q-acct-unstarted-pill {
+        display: inline-flex;
+        align-items: center;
+        height: 14px;
+        padding: 0 4.5px;
+        border-radius: 4px;
+        font-size: 9.5px;
+        font-weight: 500;
+        flex-shrink: 0;
+        background: rgba(24, 24, 27, 0.06);
+        color: #71717a;
       }
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-sub {
         color: #8c8c96;
       }
-      .aq-q-acct-sub.is-depleted {
-        color: #c27803;
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-pct.is-warn {
+        color: #ff9f0a;
       }
-      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-sub.is-depleted {
-        color: #fbbf24;
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-pct.is-crit {
+        color: #ff453a;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-q-acct-unstarted-pill {
+        background: rgba(255, 255, 255, 0.08);
+        color: #a1a1aa;
       }
       .aq-q-acct-plan {
         font-size: 10px;
@@ -2189,8 +2302,7 @@
         position: fixed;
         inset: 0;
         z-index: 2147483646;
-        background: rgba(0, 0, 0, 0.32);
-        backdrop-filter: blur(2px);
+        background: rgba(0, 0, 0, 0.2);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -2364,6 +2476,74 @@
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-ks-select:focus,
       :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-stg-select:focus {
         border-color: #34d399;
+      }
+      .aq-qt-swatches {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .aq-qt-opt {
+        appearance: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        height: 26px;
+        padding: 0 8px;
+        border-radius: 7px;
+        border: 1px solid rgba(0, 0, 0, 0.12);
+        background: transparent;
+        color: inherit;
+        font: 500 11.5px/1 var(--font-sans, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+        cursor: pointer;
+        transition: background-color 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+      }
+      .aq-qt-opt:hover {
+        background: rgba(0, 0, 0, 0.04);
+        border-color: rgba(0, 0, 0, 0.22);
+      }
+      .aq-qt-opt.is-active {
+        border-color: #18181b;
+        background: rgba(24, 24, 27, 0.06);
+        box-shadow: 0 0 0 1px rgba(24, 24, 27, 0.18);
+      }
+      .aq-qt-dots {
+        display: inline-flex;
+        align-items: center;
+        gap: 2.5px;
+      }
+      .aq-qt-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 9999px;
+        flex-shrink: 0;
+      }
+      .aq-qt-dot.is-ok {
+        background: var(--aq-qc-ok);
+      }
+      .aq-qt-dot.is-warn {
+        background: var(--aq-qc-warn);
+      }
+      .aq-qt-dot.is-crit {
+        background: var(--aq-qc-crit);
+      }
+      .aq-ks-quota-row {
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+        padding: 4px 0 2px;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qt-opt {
+        border-color: rgba(255, 255, 255, 0.14);
+        color: #e4e4e7;
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qt-opt:hover {
+        background: rgba(255, 255, 255, 0.07);
+        border-color: rgba(255, 255, 255, 0.26);
+      }
+      :is(body.dark, body.theme-dark, html.dark, html[data-theme="dark"], html[data-ag-theme-mode="dark"]) .aq-qt-opt.is-active {
+        border-color: #e4e4e7;
+        background: rgba(255, 255, 255, 0.12);
+        box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22);
       }
       #aq-file-toast {
         position: fixed;
@@ -6339,7 +6519,7 @@
         if (quotaParts.length === 0) {
           quotaParts.push('<span class="aq-lvl-muted">--</span>');
         }
-        nextHtml = quotaParts.join('<span class="aq-chip-sep">/</span>') + updateDotHtml;
+        nextHtml = quotaParts.join('<span class="aq-chip-sep">·</span>') + updateDotHtml;
       }
     } else {
       const toQuotaRing = (b) =>
@@ -6466,17 +6646,34 @@
               ? '<span class="aq-q-active-tag">当前</span>'
               : `<button type="button" class="aq-q-btn${confirming ? ' aq-q-btn-warn' : ''}" data-aq-acct-switch="${escapeHtml(acct.id)}" title="${confirming ? '再次点击确认重启并切换账号' : '切换至此账号'}" ${state.accountsBusy ? 'disabled' : ''}>${confirming ? '确认重启' : '切换'}</button>`;
             const unstartedTitle = '刷新倒计时未开始（需使用一次才会开始计时）';
-            const unstartedDotHtml = gemStatus.unstarted
-              ? `<span class="aq-q-acct-unstarted-dot" data-aq-acct-unstarted="1" title="${unstartedTitle}" aria-label="${unstartedTitle}"></span>`
-              : '';
-            const subText = gemStatus.countdownText || gemStatus.label;
+            const dotTone = gemStatus.dotTone || (gemStatus.state === 'depleted' ? 'crit' : gemStatus.state === 'available' ? 'ok' : 'unknown');
+            const badges = Array.isArray(gemStatus.bucketBadges) ? gemStatus.bucketBadges : [];
+            let subInnerHtml;
+            if (badges.length > 0) {
+              const pctHtml = badges
+                .map((b) => {
+                  const toneCls = b.tone === 'crit' ? ' is-crit' : b.tone === 'warn' ? ' is-warn' : '';
+                  return `<span class="aq-q-acct-pct${toneCls}">${escapeHtml(b.text)}</span>`;
+                })
+                .join('<span class="aq-q-acct-sep">·</span>');
+              const timeHtml = gemStatus.timeText
+                ? `<span class="aq-q-acct-sep">·</span><span>${escapeHtml(gemStatus.timeText)}</span>`
+                : '';
+              const unstartedHtml = gemStatus.unstarted
+                ? `<span class="aq-q-acct-unstarted-pill" data-aq-acct-unstarted="1" title="${unstartedTitle}" aria-label="${unstartedTitle}">待激活</span>`
+                : '';
+              subInnerHtml = `<span class="aq-q-acct-sub-text">${pctHtml}${timeHtml}</span>${unstartedHtml}`;
+            } else {
+              const subText = gemStatus.countdownText || gemStatus.label;
+              subInnerHtml = `<span class="aq-q-acct-sub-text">${escapeHtml(subText)}</span>`;
+            }
             return `
               <div class="aq-q-acct-row${isCur ? ' is-current' : ''}${canDragAcct ? ' is-draggable' : ''}" data-aq-acct-id="${escapeHtml(acct.id)}">
                 <div class="aq-q-acct-info">
-                  <span class="aq-q-acct-gem is-${escapeHtml(gemStatus.state)}" data-aq-acct-gem="${escapeHtml(gemStatus.state)}" title="${escapeHtml(gemStatus.label)}" aria-label="${escapeHtml(gemStatus.label)}"></span>
+                  <span class="aq-q-acct-gem is-${escapeHtml(dotTone)}" data-aq-acct-gem="${escapeHtml(gemStatus.state)}" title="${escapeHtml(gemStatus.label)}" aria-label="${escapeHtml(gemStatus.label)}"></span>
                   <div class="aq-q-acct-meta">
                     <span class="aq-q-acct-email" title="${escapeHtml(acct.email)}">${escapeHtml(acct.email)}</span>
-                    <span class="aq-q-acct-sub is-${escapeHtml(gemStatus.state)}" title="${escapeHtml(gemStatus.unstarted ? `${gemStatus.label} · ${unstartedTitle}` : gemStatus.label)}"><span class="aq-q-acct-sub-text">${escapeHtml(subText)}</span>${unstartedDotHtml}</span>
+                    <span class="aq-q-acct-sub is-${escapeHtml(gemStatus.state)}" title="${escapeHtml(gemStatus.unstarted ? `${gemStatus.label} · ${unstartedTitle}` : gemStatus.label)}">${subInnerHtml}</span>
                   </div>
                 </div>
                 <div class="aq-q-acct-right">
@@ -8434,6 +8631,60 @@
     }
   }
 
+  const QUOTA_COLOR_THEMES = [
+    { id: 'native', label: '原生暖金' },
+    { id: 'macos', label: 'macOS 语义' },
+    { id: 'slate-rose', label: '板岩玫红' },
+    { id: 'morandi', label: '莫兰迪雾感' },
+    { id: 'mono-crit', label: '极简灰阶' },
+  ];
+
+  function sanitizeClientQuotaColorTheme(raw) {
+    const clean = String(raw || '').trim().toLowerCase();
+    return QUOTA_COLOR_THEMES.some((t) => t.id === clean) ? clean : 'macos';
+  }
+
+  function applyQuotaColorThemeAttr(themeId = state.quotaColorTheme) {
+    const clean = sanitizeClientQuotaColorTheme(themeId);
+    try {
+      document.documentElement?.setAttribute?.('data-aq-quota-theme', clean);
+    } catch {}
+  }
+
+  function renderQuotaColorThemeOptionsHtml() {
+    const cur = sanitizeClientQuotaColorTheme(state.quotaColorTheme);
+    const dotsHtml =
+      '<span class="aq-qt-dot is-ok"></span><span class="aq-qt-dot is-warn"></span><span class="aq-qt-dot is-crit"></span>';
+    return QUOTA_COLOR_THEMES.map((t) => {
+      const active = t.id === cur;
+      return `<button type="button" class="aq-qt-opt${active ? ' is-active' : ''}" data-aq-quota-theme-opt="${escapeHtml(t.id)}" aria-pressed="${active ? 'true' : 'false'}"><span class="aq-qt-dots">${dotsHtml}</span><span>${escapeHtml(t.label)}</span></button>`;
+    }).join('');
+  }
+
+  function syncQuotaColorThemeControlsInPlace() {
+    const cur = sanitizeClientQuotaColorTheme(state.quotaColorTheme);
+    const btns = document.querySelectorAll('[data-aq-quota-theme-opt]');
+    for (let i = 0; i < btns.length; i += 1) {
+      const b = btns[i];
+      const active = b.getAttribute('data-aq-quota-theme-opt') === cur;
+      b.classList.toggle('is-active', active);
+      b.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
+  }
+
+  function setQuotaColorThemePref(nextTheme, { notifyDaemon = true } = {}) {
+    const clean = sanitizeClientQuotaColorTheme(nextTheme);
+    state.quotaColorTheme = clean;
+    applyQuotaColorThemeAttr(clean);
+    try {
+      localStorage.setItem('aq_quota_color_theme_v1', clean);
+    } catch {}
+    syncQuotaColorThemeControlsInPlace();
+    if (notifyDaemon) {
+      sendUiPrefsAction({ type: 'set-quota-color-theme', theme: clean });
+    }
+  }
+
   function parseFileUriForClient(rawUri) {
     const raw = String(rawUri || '').trim();
     if (!/^file:\/\//i.test(raw)) return null;
@@ -8812,6 +9063,13 @@
           </div>
           <button type="button" role="switch" class="aq-ks-switch ${showCollapsedCount ? 'is-on' : ''}" data-aq-ks-collapsed-count="1" aria-checked="${showCollapsedCount ? 'true' : 'false'}" aria-label="显示收起文件夹数字"><span class="aq-ks-switch-thumb"></span></button>
         </div>
+        <div class="aq-ks-quota-row">
+          <div class="aq-ks-toggle-copy">
+            <span class="aq-ks-toggle-title">配额百分比配色</span>
+            <span class="aq-ks-note">点选即刻生效（充足 / 偏低 / 告急三档同步）</span>
+          </div>
+          <div class="aq-qt-swatches">${renderQuotaColorThemeOptionsHtml()}</div>
+        </div>
         <div class="aq-ks-sep"></div>
         <div class="aq-ks-field">
           <label class="aq-ks-lbl">API Key（默认免费支持智谱 glm-4-flash-250414）</label>
@@ -8919,6 +9177,11 @@
       ev.stopPropagation();
       if (ev.target === overlay || ev.target?.closest?.('[data-aq-ks-close], [data-aq-ks-cancel]')) {
         closeKeySettingsModal();
+        return;
+      }
+      const quotaThemeBtn = ev.target?.closest?.('[data-aq-quota-theme-opt]');
+      if (quotaThemeBtn) {
+        setQuotaColorThemePref(quotaThemeBtn.getAttribute('data-aq-quota-theme-opt'), { notifyDaemon: true });
         return;
       }
       if (ev.target?.closest?.('[data-aq-ks-collapsed-count]')) {
@@ -12057,6 +12320,13 @@
               </button>
             </div>
           </div>
+          <div class="py-2.5 px-3 w-full bg-transparent flex flex-col gap-2">
+            <div class="flex flex-col gap-0.5">
+              <span>配额百分比配色</span>
+              <span class="text-sm text-muted-foreground whitespace-pre-wrap">切换输入框底栏配额数字的配色方案，选择后立即在所有窗口实时生效。</span>
+            </div>
+            <div class="aq-qt-swatches">${renderQuotaColorThemeOptionsHtml()}</div>
+          </div>
         </div>
       `;
       const stgSelect = extEl.querySelector('select[data-aq-file-open-select]');
@@ -12064,6 +12334,13 @@
         setFileOpenDefaultPref(stgSelect.value || 'builtin', { notifyDaemon: true });
       });
       extEl.addEventListener('click', (ev) => {
+        const quotaThemeBtn = ev.target?.closest?.('[data-aq-quota-theme-opt]');
+        if (quotaThemeBtn) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          setQuotaColorThemePref(quotaThemeBtn.getAttribute('data-aq-quota-theme-opt'), { notifyDaemon: true });
+          return;
+        }
         const switchBtn = ev.target?.closest?.('[data-aq-stg-collapsed-count]');
         if (switchBtn) {
           ev.preventDefault();
@@ -12075,6 +12352,7 @@
     } else {
       syncCollapsedGroupCountSwitchesInPlace();
       syncFileOpenDefaultControlsInPlace();
+      syncQuotaColorThemeControlsInPlace();
     }
   }
 
@@ -16065,6 +16343,9 @@
       if (payload && typeof payload.fileOpenDefault === 'string') {
         setFileOpenDefaultPref(payload.fileOpenDefault, { notifyDaemon: false });
       }
+      if (payload && typeof payload.quotaColorTheme === 'string') {
+        setQuotaColorThemePref(payload.quotaColorTheme, { notifyDaemon: false });
+      }
       if (payload && typeof payload.showCollapsedGroupCount === 'boolean') {
         setShowCollapsedGroupCountPref(payload.showCollapsedGroupCount, { notifyDaemon: false });
       }
@@ -17476,6 +17757,7 @@
     document.querySelectorAll('[data-aq-native-menu-ext]').forEach((el) => el.remove());
     document.querySelectorAll('[data-aq-settings-ext]').forEach((el) => el.remove());
     document.documentElement?.removeAttribute?.('data-aq-hide-collapsed-grp-count');
+    document.documentElement?.removeAttribute?.('data-aq-quota-theme');
     document.querySelectorAll('[data-aq-menu-open]').forEach((el) => el.removeAttribute('data-aq-menu-open'));
     document.querySelectorAll('[data-aq-turn-usage]').forEach((el) => el.remove());
     resetThinkingTranslateState();
@@ -17507,6 +17789,7 @@
   window.__aqHydrated = false;
   window.__aq_version = INJECT_VERSION;
   ensureWebContextMenuMode();
+  applyQuotaColorThemeAttr(state.quotaColorTheme);
   applyDetachedChatMode(state.detachedChatMode, { persist: false, notifyDaemon: false });
   checkRoute();
   void fetchQuota({ force: false, includeUserStatus: true }).then(() => {

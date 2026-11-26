@@ -454,11 +454,14 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
   if (groups.length === 0) {
     return {
       state: 'unknown',
+      dotTone: 'unknown',
       unstarted: false,
       label: '暂无 Gemini 额度记录',
       nextAvailableAt: null,
       nextResetAt: null,
       countdownText: '暂无 Gemini 额度记录',
+      timeText: '',
+      bucketBadges: [],
     };
   }
 
@@ -485,11 +488,14 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
   if (!primary) {
     return {
       state: 'unknown',
+      dotTone: 'unknown',
       unstarted: false,
       label: '暂无 Gemini 额度记录',
       nextAvailableAt: null,
       nextResetAt: null,
       countdownText: '暂无 Gemini 额度记录',
+      timeText: '',
+      bucketBadges: [],
     };
   }
 
@@ -497,11 +503,14 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
   if (buckets.length === 0) {
     return {
       state: 'unknown',
+      dotTone: 'unknown',
       unstarted: false,
       label: '暂无 Gemini 额度记录',
       nextAvailableAt: null,
       nextResetAt: null,
       countdownText: '暂无 Gemini 额度记录',
+      timeText: '',
+      bucketBadges: [],
     };
   }
 
@@ -550,6 +559,23 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
 
   const formatBucketPct = (info) =>
     info ? formatRemainingPercent(info.expired ? 1 : info.frac) : '';
+  const displayedInfos = [fiveHourInfo, weeklyInfo].filter(Boolean);
+  const badgeInfos = displayedInfos.length > 0 ? displayedInfos : firstInfo ? [firstInfo] : [];
+  const bucketBadges = badgeInfos.map((info) => {
+    const effectiveFrac = info.expired ? 1 : info.frac;
+    const lvl = quotaLevelClass(effectiveFrac);
+    const tone = lvl === 'aq-lvl-crit' ? 'crit' : lvl === 'aq-lvl-warn' ? 'warn' : 'ok';
+    return {
+      text: formatRemainingPercent(effectiveFrac),
+      tone,
+    };
+  });
+  const dotTone =
+    !allAvailable || bucketBadges.some((b) => b.tone === 'crit')
+      ? 'crit'
+      : bucketBadges.some((b) => b.tone === 'warn')
+        ? 'warn'
+        : 'ok';
   const quotaParts = [
     formatBucketPct(fiveHourInfo),
     formatBucketPct(weeklyInfo),
@@ -581,11 +607,14 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
 
     return {
       state: 'available',
+      dotTone,
       unstarted,
       label: anyInferredReset ? `Gemini 预计可用（${detail}）` : `Gemini 可用（${detail}）`,
       nextAvailableAt: null,
       nextResetAt,
       countdownText,
+      timeText,
+      bucketBadges,
     };
   }
 
@@ -596,11 +625,14 @@ export function resolveGeminiQuotaAvailability(quota, { isCurrent = false, nowMs
   const countdownText = [...quotaParts, depletedTimeText].filter(Boolean).join(' · ') || '0%';
   return {
     state: 'depleted',
+    dotTone: 'crit',
     unstarted: false,
     label: `Gemini 已用完（${detail}）`,
     nextAvailableAt,
     nextResetAt: nextAvailableAt,
     countdownText,
+    timeText: depletedTimeText,
+    bucketBadges,
   };
 }
 

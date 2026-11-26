@@ -62,13 +62,19 @@ import {
   formatShortcutHint,
   openMacAccessibilitySettings,
   raiseAntigravityWindowByTitle,
+  setAntigravityWindowBounds,
   triggerNativeNewWindowViaCdp,
 } from './detached-window.mjs';
 import { TokenPricingManager } from './token-pricing.mjs';
 import {
+  DEFAULT_QUOTA_COLOR_THEME,
   readUiPrefsStore,
+  resolveSavedDetachedBounds,
+  sanitizeWindowBounds,
   updateConversationWidthPref,
+  updateDetachedWindowBoundsPref,
   updateFileOpenDefaultPref,
+  updateQuotaColorThemePref,
   updateShowCollapsedGroupCountPref,
   updateThinkingSourcePref,
 } from './ui-prefs.mjs';
@@ -774,6 +780,7 @@ export async function runDaemon({
       thinkingTranslateSource: store.thinkingTranslateSource || 'auto',
       showCollapsedGroupCount: store.showCollapsedGroupCount !== false,
       fileOpenDefault: store.fileOpenDefault || 'builtin',
+      quotaColorTheme: store.quotaColorTheme || DEFAULT_QUOTA_COLOR_THEME,
       externalEditors: {
         platform: editors.platform || process.platform,
         options: Array.isArray(editors.options) ? editors.options : [],
@@ -835,6 +842,11 @@ export async function runDaemon({
     }
     if (type === 'set-file-open-default') {
       const store = updateFileOpenDefaultPref(paths.uiPrefsFile, msg?.target);
+      await pushUiPrefsToAllSessions({ store });
+      return;
+    }
+    if (type === 'set-quota-color-theme') {
+      const store = updateQuotaColorThemePref(paths.uiPrefsFile, msg?.theme);
       await pushUiPrefsToAllSessions({ store });
       return;
     }
@@ -1034,27 +1046,106 @@ export async function runDaemon({
     return null;
   };
 
+  const persistSessionDetachedBounds = (session, rawBounds, cascadeId) => {
+    if (!session || Date.now() < (session.boundsRestoreUntil || 0)) return;
+    const clean = sanitizeWindowBounds(rawBounds);
+    if (!clean) return;
+    const cid = UUID_RE.test(String(cascadeId || '').trim()) ? String(cascadeId).trim() : '';
+    const sig = `${cid.toLowerCase()}|${clean.x},${clean.y},${clean.width},${clean.height},${clean.maximized ? 1 : 0}`;
+    if (sig === session.lastDetachedBoundsSig) return;
+    session.lastDetachedBounds = clean;
+    session.lastDetachedBoundsSig = sig;
+    try {
+      updateDetachedWindowBoundsPref(paths.uiPrefsFile, { cascadeId: cid, bounds: clean });
+    } catch {}
+  };
+
+  const applyDetachedWindowBounds = async (session, rawBounds, { applyPosition = true } = {}) => {
+    const clean = sanitizeWindowBounds(rawBounds);
+    if (!clean || !session?.client?.isOpen()) return;
+    session.boundsRestoreUntil = Date.now() + 1_600;
+    try {
+      let curInfo = null;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        if (!session.client.isOpen()) return;
+        const res = await session.client.send('Runtime.evaluate', {
+          expression: `({
+            title: String(document.title || ""),
+            x: Math.round(window.screenX),
+            y: Math.round(window.screenY),
+            width: Math.round(window.outerWidth),
+            height: Math.round(window.outerHeight),
+          })`,
+          returnByValue: true,
+        });
+        const v = res?.result?.result?.value;
+        if (v && Number(v.width) >= 200 && Number(v.height) >= 200) {
+          curInfo = v;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 90));
+      }
+      if (!curInfo || !session.client.isOpen()) return;
+      const boundsRes = await setAntigravityWindowBounds({
+        title: curInfo.title,
+        curBounds: {
+          x: curInfo.x,
+          y: curInfo.y,
+          width: curInfo.width,
+          height: curInfo.height,
+        },
+        bounds: clean,
+        applyPosition,
+        channel,
+      });
+      if (!boundsRes?.ok) {
+        log(`[detached-window] restore bounds skipped (${boundsRes?.reason || 'unknown'})`);
+      }
+      if (process.platform === 'win32' && clean.maximized && session.client.isOpen()) {
+        await session.client.send('Runtime.evaluate', {
+          expression: 'try { window.electronNative?.maximize?.(); } catch {}',
+          returnByValue: false,
+        });
+      }
+      session.lastDetachedBounds = clean;
+    } catch {}
+  };
+
   const snapshotOpenDetachedWindows = async () => {
     const sessions = [...attached.values()].filter((s) => s?.client?.isOpen() && s.hostConfirmed);
     if (sessions.length === 0) return [];
     const results = await Promise.allSettled(
       sessions.map(async (s) => {
         const evalRes = await s.client.send('Runtime.evaluate', {
-          expression: `(() => {
+          expression: `(async () => {
             const detached = document.documentElement?.getAttribute?.('data-aq-detached-chat') === '1';
             const watched = window.__aqGetWatchedCascadeId ? window.__aqGetWatchedCascadeId() : '';
             const urlMatch = String(window.location?.pathname || '').match(/\\/c\\/([0-9a-f-]{36})/i);
             const cid = watched || (urlMatch ? urlMatch[1] : '');
             const title = String(document.title || '').replace(/\\s*-\\s*Antigravity$/i, '').trim();
-            return { detached, cid, title };
+            let maximized = false;
+            try {
+              const m = await window.electronNative?.isMaximized?.();
+              maximized = m === true;
+            } catch {}
+            const bounds = {
+              x: Math.round(window.screenX),
+              y: Math.round(window.screenY),
+              width: Math.round(window.outerWidth),
+              height: Math.round(window.outerHeight),
+              maximized,
+            };
+            return { detached, cid, title, bounds };
           })()`,
+          awaitPromise: true,
           returnByValue: true,
         });
         const val = evalRes?.result?.result?.value;
         const detached = typeof val?.detached === 'boolean' ? val.detached : detachedWindows.isDetachedTarget(s.targetId);
         const cid = String(val?.cid || s.pendingDetach?.cascadeId || s.activeCascadeId || '').trim();
         const title = String(val?.title || '').trim();
-        return { detached, cid, title };
+        const bounds = sanitizeWindowBounds(val?.bounds) || sanitizeWindowBounds(s.lastDetachedBounds);
+        return { detached, cid, title, bounds };
       })
     );
     const seen = new Set();
@@ -1066,7 +1157,12 @@ export async function runDaemon({
       const key = cid.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
-      items.push({ cascadeId: cid, title: r.value.title || '' });
+      if (r.value.bounds) {
+        try {
+          updateDetachedWindowBoundsPref(paths.uiPrefsFile, { cascadeId: cid, bounds: r.value.bounds });
+        } catch {}
+      }
+      items.push({ cascadeId: cid, title: r.value.title || '', bounds: r.value.bounds || null });
       if (items.length >= 8) break;
     }
     return items;
@@ -1118,8 +1214,30 @@ export async function runDaemon({
         expression: 'Boolean(document.hasFocus && document.hasFocus())',
         returnByValue: true,
       });
-      const hasFocus = focusCheck?.result?.result?.value === true;
-      if (hasFocus || raiseRes?.ok === true) {
+      let hasFocus = focusCheck?.result?.result?.value === true;
+      if (hasFocus) {
+        return { ok: true, hasFocus: true };
+      }
+      // On macOS, AXRaise cannot switch Spaces away from a full-screen Space even when AXWindows
+      // lists the target window; pressing the app's native Window menu item switches Spaces cleanly.
+      if (process.platform === 'darwin' && raiseRes?.via === 'raised') {
+        const menuRaiseRes = await raiseAntigravityWindowByTitle({
+          title,
+          channel,
+          promptIfUntrusted: false,
+          preferWindowMenu: true,
+        });
+        if (menuRaiseRes?.ok === true) {
+          await new Promise((r) => setTimeout(r, 150));
+          const retryFocus = await targetSession.client.send('Runtime.evaluate', {
+            expression: 'Boolean(document.hasFocus && document.hasFocus())',
+            returnByValue: true,
+          });
+          hasFocus = retryFocus?.result?.result?.value === true;
+          return { ok: true, hasFocus };
+        }
+      }
+      if (raiseRes?.ok === true) {
         return { ok: true, hasFocus };
       }
       const permissionDenied = Boolean(raiseRes?.permissionDenied);
@@ -1143,7 +1261,7 @@ export async function runDaemon({
 
   const detachConversationFromSession = async (
     session,
-    { cascadeId, title = '', silent = false, allowManualFallback = true } = {}
+    { cascadeId, title = '', bounds = null, applyPosition = null, silent = false, allowManualFallback = true } = {}
   ) => {
     const cid = String(cascadeId || '').trim();
     const cleanTitle = String(title || '').trim();
@@ -1181,10 +1299,24 @@ export async function runDaemon({
       return { ok: true, focusedExisting: false, alreadyDetached: true };
     }
 
+    const explicitBounds = sanitizeWindowBounds(bounds);
+    const resolvedSaved = !explicitBounds
+      ? resolveSavedDetachedBounds(readUiPrefsStore(paths.uiPrefsFile), cid)
+      : null;
+    const effectiveBounds = explicitBounds || resolvedSaved?.bounds || null;
+    const effectiveApplyPosition =
+      typeof applyPosition === 'boolean'
+        ? applyPosition
+        : explicitBounds
+          ? true
+          : Boolean(resolvedSaved?.applyPosition);
+
     const armRes = detachedWindows.arm({
       cascadeId: cid,
       sourceTargetId: session.targetId,
       title: cleanTitle,
+      bounds: effectiveBounds,
+      applyPosition: effectiveApplyPosition,
     });
     if (!armRes) return { ok: false, reason: 'arm-failed' };
     if (armRes.duplicate) return { ok: true, duplicate: true };
@@ -1298,6 +1430,8 @@ export async function runDaemon({
           const res = await detachConversationFromSession(hostSession, {
             cascadeId: item.cascadeId,
             title: item.title,
+            bounds: item.bounds || null,
+            applyPosition: true,
             silent: true,
             allowManualFallback: false,
           });
@@ -2430,6 +2564,9 @@ export async function runDaemon({
         lastClientThinking: null,
         evalScriptId: null,
         pendingDetach: null,
+        lastDetachedBounds: null,
+        lastDetachedBoundsSig: '',
+        boundsRestoreUntil: 0,
       };
       attached.set(target.id, session);
 
@@ -2483,6 +2620,11 @@ export async function runDaemon({
             status: 'opened',
             requestId: claimedDetach.requestId,
             message: '已在独立聊天窗中打开',
+          });
+        }
+        if (claimedDetach.bounds) {
+          void applyDetachedWindowBounds(session, claimedDetach.bounds, {
+            applyPosition: claimedDetach.applyPosition !== false,
           });
         }
         void pushDetachedWindowsToAllSessions();
@@ -2610,7 +2752,7 @@ export async function runDaemon({
         const urlCid = targetUrlById.get(id)?.match(/\/c\/([0-9a-f-]{36})/i)?.[1] || '';
         const stateRes = await session.client.send('Runtime.evaluate', {
           expression:
-            '({ v: window.__aq_version || "", h: Boolean(window.__aqHydrated), d: document.documentElement?.getAttribute?.("data-aq-detached-chat") === "1", cid: window.__aqGetWatchedCascadeId ? window.__aqGetWatchedCascadeId() : "" })',
+            '(() => { const d = document.documentElement?.getAttribute?.("data-aq-detached-chat") === "1"; return { v: window.__aq_version || "", h: Boolean(window.__aqHydrated), d, cid: window.__aqGetWatchedCascadeId ? window.__aqGetWatchedCascadeId() : "", b: d && !document.hidden ? { x: Math.round(window.screenX), y: Math.round(window.screenY), width: Math.round(window.outerWidth), height: Math.round(window.outerHeight), maximized: false } : null }; })()',
           returnByValue: true,
         });
         if (!stateRes) {
@@ -2629,6 +2771,9 @@ export async function runDaemon({
           session.lastThinkingPushSig = '';
           session.lastOriginalPushSig = '';
           session.lastClientThinking = null;
+        }
+        if (pageState?.d === true && pageState?.b) {
+          persistSessionDetachedBounds(session, pageState.b, session.activeCascadeId);
         }
         if (!pageState || pageState.v !== version) {
           session.lastPushedRawTurns = null;
